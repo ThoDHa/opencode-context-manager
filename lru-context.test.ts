@@ -18,7 +18,9 @@ const SMALL_TEXT_CHARS = 60
 const SMALL_TOOL_OUTPUT_CHARS = 256
 const CHARS_PER_TOKEN = 4
 const WATERMARK_RATIO = 0.5
-const DEFAULT_CONTEXT_TOKENS = 100000
+const LEGACY_DEFAULT_CONTEXT_TOKENS = 100000
+const EXPLICIT_DEFAULT_CONTEXT_TOKENS = 600
+const LARGE_DEFAULT_CONTEXT_TOKENS = 1000000
 const MIN_EVICTABLE_BYTES = 2048
 const RECENT_WINDOW_MESSAGES = 4
 const FILLER_TEXT_CHARS = 10
@@ -42,7 +44,7 @@ const SUBSTRING_APPEARANCE_COMMAND = "echo abcd done"
 const SHORT_SUBSTRING_ENTRY_COMMAND = "abc"
 const SHORT_SUBSTRING_APPEARANCE_COMMAND = "abc def"
 const MARKER_PADDED_CHARS = 4000
-const DEFAULT_WATERMARK_CHARS = DEFAULT_CONTEXT_TOKENS * WATERMARK_RATIO * CHARS_PER_TOKEN
+const LEGACY_DEFAULT_WATERMARK_CHARS = LEGACY_DEFAULT_CONTEXT_TOKENS * WATERMARK_RATIO * CHARS_PER_TOKEN
 const FALLBACK_TRAILING_FILLER_MESSAGES = 3
 const FALLBACK_EXTRA_CHARS = 1
 const SMALL_CONTEXT_LIMIT = 600
@@ -88,6 +90,7 @@ const HINT_SESSION_OVERFLOW_COUNT = 9
 const FOREIGN_HINT_BLOCK_TAIL = "foreign config block"
 const USER_TEXT_AFTER_BARE_MARKER = "plain user note"
 const NO_SESSION_HINT_PATH = "/data/no-session-hint.txt"
+const HINT_SKIP_RUN_PATH = "/data/hint-skip-run.txt"
 const SYSTEM_GUARD_HINT_PATH = "/data/system-guard.txt"
 const SYSTEM_GUARD_NON_ARRAY_VALUE = "not a block array"
 const RELOAD_TOOL_NAME = "read_evicted"
@@ -292,7 +295,8 @@ const buildOverWatermarkProtectedBundle = (tool: string): StrictBundle =>
   buildBundle([[completedToolPart(tool, {}, outputOfBytes(MIN_EVICTABLE_BYTES))], ...fillerMessages()])
 
 const FALLBACK_BUNDLE_LARGE_TEXT_CHARS =
-  DEFAULT_WATERMARK_CHARS - MIN_EVICTABLE_BYTES - FALLBACK_TRAILING_FILLER_MESSAGES * FILLER_TEXT_CHARS
+  LEGACY_DEFAULT_WATERMARK_CHARS - MIN_EVICTABLE_BYTES - FALLBACK_TRAILING_FILLER_MESSAGES * FILLER_TEXT_CHARS
+const LEGACY_FALLBACK_BUNDLE_OVER_WATERMARK_CHARS = FALLBACK_BUNDLE_LARGE_TEXT_CHARS + FALLBACK_EXTRA_CHARS
 
 const buildFallbackBudgetBundle = (largeTextChars: number): StrictBundle =>
   buildBundle([
@@ -668,45 +672,84 @@ test("transform leaves tombstones unchanged on a second transform pass", async (
   assert.ok(toolPartAt(bundle.messages[1], 0).state.output.startsWith(TOMBSTONE_MARKER))
 })
 
-test("transform applies the chat params context limit instead of the default budget", async () => {
+test("transform applies the chat params context limit while a session without one stays intact", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, SMALL_CONTEXT_LIMIT)
 
   const limited = buildStandardBundle(SESSION_ID, "/data/limited.txt")
-  const fallback = buildStandardBundle(SESSION_ID_B, "/data/fallback.txt")
-  await runTransform(hooks, fallback)
+  const unknownBudget = buildStandardBundle(SESSION_ID_B, "/data/unknown-budget.txt")
+  await runTransform(hooks, unknownBudget)
   await runTransform(hooks, limited)
 
   assert.ok(toolPartAt(limited.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
-  assert.equal(toolPartAt(fallback.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(toolPartAt(unknownBudget.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
 })
 
-test("transform keeps an unregistered session bundle intact at exactly the default watermark", async () => {
+test("transform keeps an unregistered session bundle intact past the legacy default watermark", async () => {
   const hooks = await loadPluginHooks()
-  const bundle = buildFallbackBudgetBundle(FALLBACK_BUNDLE_LARGE_TEXT_CHARS)
+  const bundle = buildFallbackBudgetBundle(LEGACY_FALLBACK_BUNDLE_OVER_WATERMARK_CHARS)
   await runTransform(hooks, bundle)
 
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
 })
 
-test("transform evicts an unregistered session bundle one token over the default watermark", async () => {
-  const hooks = await loadPluginHooks()
-  const bundle = buildFallbackBudgetBundle(FALLBACK_BUNDLE_LARGE_TEXT_CHARS + FALLBACK_EXTRA_CHARS)
-  await runTransform(hooks, bundle)
-
-  const evicted = toolPartAt(bundle.messages[0], 0).state.output
-  assert.ok(evicted.startsWith(TOMBSTONE_MARKER))
-  assert.ok(evicted.includes("(2048 bytes,"))
-})
-
-test("transform falls back to the default budget when chat params carry no context limit", async () => {
+test("transform skips budget-driven eviction when chat params carry no context limit", async () => {
   const hooks = await loadPluginHooks()
   await setChatParamsWithoutContext(hooks, SESSION_ID)
 
-  const bundle = buildFallbackBudgetBundle(FALLBACK_BUNDLE_LARGE_TEXT_CHARS + FALLBACK_EXTRA_CHARS)
+  const bundle = buildFallbackBudgetBundle(LEGACY_FALLBACK_BUNDLE_OVER_WATERMARK_CHARS)
   await runTransform(hooks, bundle)
 
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+})
+
+test("transform purges errored tool inputs on an unknown-budget run that skips eviction", async () => {
+  const hooks = await loadPluginHooks()
+  await setChatParamsWithoutContext(hooks, SESSION_ID)
+
+  const bundle = buildBundle([
+    [errorToolPart(READ_TOOL, { [PATH_INPUT_KEY]: PURGE_ERROR_PATH }, outputOfBytes(UNCOMPLETED_OUTPUT_BYTES))],
+    ...fillerMessages(RECENT_WINDOW_MESSAGES + 1),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(inputAt(bundle.messages[0]), PURGE_MARKER)
+})
+
+test("transform delivers a hint on an unknown-budget run that skips eviction", async () => {
+  const hooks = await loadPluginHooks()
+  await setChatParamsWithoutContext(hooks, SESSION_ID)
+
+  const bundle = buildStandardBundle(SESSION_ID, HINT_SKIP_RUN_PATH)
+  await runTransform(hooks, bundle)
+
+  assert.deepEqual(hintBlocksIn(await runSystemTransform(hooks, SESSION_ID)), [hintLineFor([HINT_SKIP_RUN_PATH])])
+})
+
+test("transform honors an explicit defaultContextTokens option by evicting against it without a captured limit", async () => {
+  const pressuredHooks = await loadPluginHooksWith({ defaultContextTokens: EXPLICIT_DEFAULT_CONTEXT_TOKENS })
+  const pressured = buildStandardBundle(SESSION_ID, "/data/explicit-budget.txt")
+  await runTransform(pressuredHooks, pressured)
+
+  const spaciousHooks = await loadPluginHooksWith({ defaultContextTokens: LARGE_DEFAULT_CONTEXT_TOKENS })
+  const spacious = buildStandardBundle(SESSION_ID, "/data/explicit-budget.txt")
+  await runTransform(spaciousHooks, spacious)
+
+  assert.ok(toolPartAt(pressured.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  assert.equal(toolPartAt(spacious.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+})
+
+test("transform keeps the captured limit in charge when an explicit defaultContextTokens option is also set", async () => {
+  const hooks = await loadPluginHooksWith({ defaultContextTokens: LARGE_DEFAULT_CONTEXT_TOKENS })
+  await setContextLimit(hooks, SESSION_ID, SMALL_CONTEXT_LIMIT)
+
+  const bundle = buildStandardBundle(SESSION_ID, "/data/captured-wins.txt")
+  await runTransform(hooks, bundle)
+
+  const stats = await lruStats(hooks, SESSION_ID)
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  assert.equal(stats.modelContextTokens, SMALL_CONTEXT_LIMIT)
+  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
 })
 
 test("transform keeps a stored real context limit when a later chat params event carries none", async () => {
@@ -2060,9 +2103,11 @@ const METRICS_BLOCKED_DIR_NAME = "missing-subdir"
 const METRICS_LINE_SEPARATOR = "\n"
 const CONTEXT_TOKENS_SOURCE_MODEL = "model"
 const CONTEXT_TOKENS_SOURCE_DEFAULT = "default"
+const CONTEXT_TOKENS_SOURCE_UNKNOWN = "unknown"
 const POST_EVICT_TOUCH_PATH = "/data/post-touch.txt"
 const POST_EVICT_UNMATCHED_PATH = "/data/post-touch-unmatched.txt"
 const STATS_MISS_SUBJECT = "/data/stats-miss.txt"
+const STATS_SKIP_RUN_SUBJECT = "/data/stats-skip-run.txt"
 const STATS_HIT_SUBJECT = "/data/stats-hit.txt"
 const STATS_STASH_SUBJECT_PREFIX = "/data/stats-stash"
 const STATS_STASH_SUBJECT_SUFFIX = ".txt"
@@ -2128,7 +2173,7 @@ const storeMetricsSession = async (hooks: HookMap, index: number): Promise<void>
   await runTransform(hooks, buildStandardBundle(metricsSessionId(index), metricsSessionSubject(index)))
 }
 
-test("lru_stats reports zeroed counters default budget and empty stash for a session without activity", async () => {
+test("lru_stats reports zeroed counters unknown budget and empty stash for a session without activity", async () => {
   const hooks = await loadPluginHooks()
 
   const stats = await lruStats(hooks, SESSION_ID)
@@ -2138,16 +2183,42 @@ test("lru_stats reports zeroed counters default budget and empty stash for a ses
     watermark: WATERMARK_RATIO,
     recentWindow: RECENT_WINDOW_MESSAGES,
     minEvictableBytes: MIN_EVICTABLE_BYTES,
-    defaultContextTokens: DEFAULT_CONTEXT_TOKENS,
+    defaultContextTokens: null,
     metricsLog: false,
     metricsPath: DEFAULT_METRICS_PATH,
   })
-  assert.equal(stats.modelContextTokens, DEFAULT_CONTEXT_TOKENS)
-  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_DEFAULT)
+  assert.equal(stats.modelContextTokens, null)
+  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
   assert.deepEqual(stats.stash, { entries: 0, capacity: STASH_LIMIT })
   assert.deepEqual(countersOf(stats), STATS_ZEROED_COUNTERS)
   assert.equal(stats.lastRun, null)
   assert.equal(Object.hasOwn(stats, "logWriteError"), false)
+})
+
+test("lru_stats reports the explicit defaultContextTokens option as the budget when no limit was captured", async () => {
+  const hooks = await loadPluginHooksWith({ defaultContextTokens: EXPLICIT_DEFAULT_CONTEXT_TOKENS })
+
+  const stats = await lruStats(hooks, SESSION_ID)
+
+  assert.equal(stats.options.defaultContextTokens, EXPLICIT_DEFAULT_CONTEXT_TOKENS)
+  assert.equal(stats.modelContextTokens, EXPLICIT_DEFAULT_CONTEXT_TOKENS)
+  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_DEFAULT)
+})
+
+test("lru_stats records an unknown budget last run with null watermark and deficit after a skip run", async () => {
+  const hooks = await loadPluginHooks()
+
+  const bundle = buildStandardBundle(SESSION_ID, STATS_SKIP_RUN_SUBJECT)
+  await runTransform(hooks, bundle)
+
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.equal(stats.modelContextTokens, null)
+  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+  assert.deepEqual(stats.lastRun, {
+    estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS),
+    watermarkTokens: null,
+    deficitTokens: null,
+  })
 })
 
 test("lru_stats counts the eviction reclaimed bytes stash entry and last run deficit after one eviction run", async () => {
@@ -2294,6 +2365,8 @@ test("metrics log appends one eventful jsonl line with expected fields and nothi
     assert.equal(typeof line.ts, "string")
     assert.ok(Number.isNaN(new Date(line.ts as string).getTime()) === false)
     assert.equal(line.session, SESSION_ID)
+    assert.equal(line.modelContextTokens, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+    assert.equal(line.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
     assert.equal(line.estimatedTokens, tokensForChars(STANDARD_BUNDLE_CHARS))
     assert.equal(line.watermarkTokens, tokensForChars(STANDARD_BUNDLE_CHARS) - OVER_BY_ONE_TOKENS)
     assert.equal(line.deficitTokens, OVER_BY_ONE_TOKENS)
@@ -2307,6 +2380,58 @@ test("metrics log appends one eventful jsonl line with expected fields and nothi
 
     await runTransform(hooks, bundle)
     assert.equal(metricsLinesIn(metricsLogPathIn(metricsDir)).length, STATS_LOG_FILE_LINES)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("metrics log records an unknown budget skip state with null watermark on an eventful run without a captured limit", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const hooks = await loadPluginHooksWithMetricsLog(metricsLogPathIn(metricsDir))
+
+    const bundle = buildBundle([
+      [pathToolPart(DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
+      ...fillerMessages(2),
+      [pathToolPart(DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
+      ...fillerMessages(2),
+    ])
+    await runTransform(hooks, bundle)
+
+    const lines = metricsLinesIn(metricsLogPathIn(metricsDir))
+    assert.equal(lines.length, STATS_LOG_FILE_LINES)
+    assert.equal(lines[0].modelContextTokens, null)
+    assert.equal(lines[0].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+    assert.equal(lines[0].watermarkTokens, null)
+    assert.equal(lines[0].deficitTokens, null)
+    assert.deepEqual(lines[0].evictedThisRun, [])
+    assert.equal(lines[0].dedupedThisRun, 1)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("metrics log records the default source label fields for an eventful explicit-option run without a captured limit", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const hooks = await loadPluginHooksWith({
+      metricsLog: true,
+      metricsPath: metricsLogPathIn(metricsDir),
+      defaultContextTokens: EXPLICIT_DEFAULT_CONTEXT_TOKENS,
+    })
+
+    const bundle = buildBundle([
+      [pathToolPart(DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
+      ...fillerMessages(2),
+      [pathToolPart(DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
+      ...fillerMessages(2),
+    ])
+    await runTransform(hooks, bundle)
+
+    const lines = metricsLinesIn(metricsLogPathIn(metricsDir))
+    assert.equal(lines.length, STATS_LOG_FILE_LINES)
+    assert.equal(lines[0].modelContextTokens, EXPLICIT_DEFAULT_CONTEXT_TOKENS)
+    assert.equal(lines[0].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_DEFAULT)
   } finally {
     cleanupMetricsDir(metricsDir)
   }
