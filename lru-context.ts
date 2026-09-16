@@ -14,7 +14,6 @@ const CHARS_PER_TOKEN = 4
 const DEFAULT_WATERMARK_RATIO = 0.5
 const DEFAULT_RECENT_WINDOW_MESSAGES = 4
 const DEFAULT_MIN_EVICTABLE_BYTES = 2048
-const DEFAULT_CONTEXT_TOKENS = 100000
 const DEFAULT_HINT_SUBJECTS = 10
 const DEFAULT_PROTECTED_TOOLS = ["task", "todowrite"]
 const PATH_INPUT_KEYS = ["filePath", "path", "file", "directory"]
@@ -67,6 +66,7 @@ const STATS_TOOL_DESCRIPTION =
 const JSON_INDENT_SPACES = 2
 const CONTEXT_TOKENS_SOURCE_MODEL = "model"
 const CONTEXT_TOKENS_SOURCE_DEFAULT = "default"
+const CONTEXT_TOKENS_SOURCE_UNKNOWN = "unknown"
 
 type LruContextOptions = {
   watermark?: number
@@ -79,7 +79,7 @@ type LruContextOptions = {
   metricsPath?: string
 }
 
-type ResolvedOptions = Required<LruContextOptions>
+type ResolvedOptions = Omit<Required<LruContextOptions>, "defaultContextTokens"> & { defaultContextTokens?: number }
 
 type SubjectRange = { start: number; end: number }
 
@@ -110,8 +110,8 @@ type EvictionResult = {
   hotSubjects: HotSubject[]
   appearances: ToolAppearance[]
   estimatedTokens: number
-  watermarkTokens: number
-  deficitTokens: number
+  watermarkTokens: number | null
+  deficitTokens: number | null
   evicted: EvictedEntryInfo[]
   stashDropped: number
 }
@@ -124,7 +124,14 @@ type EvictedEntryInfo = {
   messagesAgo: number
 }
 
-type LastRunMetrics = { estimatedTokens: number; watermarkTokens: number; deficitTokens: number }
+type LastRunMetrics = { estimatedTokens: number; watermarkTokens: number | null; deficitTokens: number | null }
+
+type ContextTokensSource =
+  | typeof CONTEXT_TOKENS_SOURCE_MODEL
+  | typeof CONTEXT_TOKENS_SOURCE_DEFAULT
+  | typeof CONTEXT_TOKENS_SOURCE_UNKNOWN
+
+type SessionBudget = { tokens: number | null; source: ContextTokensSource }
 
 type SessionMetrics = {
   evictions: number
@@ -175,7 +182,8 @@ const resolveOptions = (raw: LruContextOptions = {}): ResolvedOptions => ({
   watermark: typeof raw.watermark === "number" && raw.watermark > 0 && raw.watermark < 1 ? raw.watermark : DEFAULT_WATERMARK_RATIO,
   recentWindow: typeof raw.recentWindow === "number" && raw.recentWindow >= 0 ? Math.floor(raw.recentWindow) : DEFAULT_RECENT_WINDOW_MESSAGES,
   minEvictableBytes: typeof raw.minEvictableBytes === "number" && raw.minEvictableBytes >= 0 ? raw.minEvictableBytes : DEFAULT_MIN_EVICTABLE_BYTES,
-  defaultContextTokens: typeof raw.defaultContextTokens === "number" && raw.defaultContextTokens > 0 ? raw.defaultContextTokens : DEFAULT_CONTEXT_TOKENS,
+  defaultContextTokens:
+    typeof raw.defaultContextTokens === "number" && raw.defaultContextTokens > 0 ? raw.defaultContextTokens : undefined,
   hintSubjects:
     typeof raw.hintSubjects === "number" && Number.isInteger(raw.hintSubjects) && raw.hintSubjects >= 0
       ? raw.hintSubjects
@@ -495,6 +503,7 @@ const recordMetricsLine = async (
   options: ResolvedOptions,
   metrics: SessionMetrics,
   sessionKey: string,
+  budget: SessionBudget,
   eviction: EvictionResult,
   dedupedThisRun: number,
   touchesThisRun: number,
@@ -505,6 +514,8 @@ const recordMetricsLine = async (
   const line = {
     ts: new Date().toISOString(),
     session: sessionKey,
+    modelContextTokens: budget.tokens,
+    modelContextTokensSource: budget.source,
     estimatedTokens: eviction.estimatedTokens,
     watermarkTokens: eviction.watermarkTokens,
     deficitTokens: eviction.deficitTokens,
@@ -536,10 +547,17 @@ const recordMetricsLine = async (
   }
 }
 
+const resolveSessionBudget = (sessionLimit: number | undefined, explicitDefault: number | undefined): SessionBudget => {
+  if (sessionLimit !== undefined) return { tokens: sessionLimit, source: CONTEXT_TOKENS_SOURCE_MODEL }
+  if (explicitDefault !== undefined) return { tokens: explicitDefault, source: CONTEXT_TOKENS_SOURCE_DEFAULT }
+  return { tokens: null, source: CONTEXT_TOKENS_SOURCE_UNKNOWN }
+}
+
 const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
   const sessionID = sessionIDFromContext(toolContext)
   const sessionKey = sessionID ?? FALLBACK_SESSION_KEY
   const sessionLimit = sessionID === undefined ? undefined : touchMapEntry(source.limits, sessionID)
+  const budget = resolveSessionBudget(sessionLimit, source.options.defaultContextTokens)
   const metrics = touchMapEntry(source.metrics, sessionKey) ?? createSessionMetrics()
   const stash = source.stashes.get(sessionKey)
   const report = {
@@ -548,13 +566,12 @@ const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
       watermark: source.options.watermark,
       recentWindow: source.options.recentWindow,
       minEvictableBytes: source.options.minEvictableBytes,
-      defaultContextTokens: source.options.defaultContextTokens,
+      defaultContextTokens: source.options.defaultContextTokens ?? null,
       metricsLog: source.options.metricsLog,
       metricsPath: source.options.metricsPath,
     },
-    modelContextTokens: sessionLimit ?? source.options.defaultContextTokens,
-    modelContextTokensSource:
-      sessionLimit === undefined ? CONTEXT_TOKENS_SOURCE_DEFAULT : CONTEXT_TOKENS_SOURCE_MODEL,
+    modelContextTokens: budget.tokens,
+    modelContextTokensSource: budget.source,
     stash: { entries: stash === undefined ? 0 : stash.size, capacity: DEFAULT_STASH_LIMIT },
     counters: {
       evictions: metrics.evictions,
@@ -578,12 +595,10 @@ const liveSubjectsOf = (entries: EvictableEntry[]): HotSubject[] =>
       : entry.subjects.map((subject) => ({ subject, lastTouch: entry.lastTouch })),
   )
 
-const evictLeastRecentlyUsed = (
+const scanToolOutputs = (
   messages: MessageBundle[],
   options: ResolvedOptions,
-  watermarkTokens: number,
-  stash: SessionStash,
-): EvictionResult => {
+): { appearances: ToolAppearance[]; entries: EvictableEntry[] } => {
   const appearances: ToolAppearance[] = []
   const entries: EvictableEntry[] = []
 
@@ -622,6 +637,30 @@ const evictLeastRecentlyUsed = (
       }
     }
   }
+
+  return { appearances, entries }
+}
+
+const measureWithoutEvicting = (messages: MessageBundle[], options: ResolvedOptions): EvictionResult => {
+  const { appearances, entries } = scanToolOutputs(messages, options)
+  return {
+    hotSubjects: liveSubjectsOf(entries),
+    appearances,
+    estimatedTokens: estimateTokens(messages),
+    watermarkTokens: null,
+    deficitTokens: null,
+    evicted: [],
+    stashDropped: 0,
+  }
+}
+
+const evictLeastRecentlyUsed = (
+  messages: MessageBundle[],
+  options: ResolvedOptions,
+  watermarkTokens: number,
+  stash: SessionStash,
+): EvictionResult => {
+  const { appearances, entries } = scanToolOutputs(messages, options)
 
   const hotFromIndex = messages.length - options.recentWindow
   const evictable = entries
@@ -731,18 +770,21 @@ export default (async (_input, rawOptions) => {
       const info = messages[0]?.info
       const sessionKey = sessionKeyFromContext(info)
       const sessionID = info?.sessionID
-      const contextTokens =
-        (sessionID !== undefined ? touchMapEntry(contextTokensBySession, sessionID) : undefined) ?? options.defaultContextTokens
+      const sessionLimit = sessionID !== undefined ? touchMapEntry(contextTokensBySession, sessionID) : undefined
+      const budget = resolveSessionBudget(sessionLimit, options.defaultContextTokens)
       const sessionStash = stashForSession(stashBySession, sessionKey)
       const sessionMetrics = metricsForSession(metricsBySession, sessionKey)
       stripLegacyHintParts(messages)
       const dedupedThisRun = deduplicateToolOutputs(messages, options)
       purgeErroredToolInputs(messages, options)
-      const eviction = evictLeastRecentlyUsed(messages, options, contextTokens * options.watermark, sessionStash)
+      const eviction =
+        budget.tokens === null
+          ? measureWithoutEvicting(messages, options)
+          : evictLeastRecentlyUsed(messages, options, budget.tokens * options.watermark, sessionStash)
       const touchesThisRun = countPostEvictionTouches(sessionMetrics, eviction.appearances)
       recordRunOutcome(sessionMetrics, eviction, dedupedThisRun, touchesThisRun)
       storeHint(hintBySession, sessionKey, eviction.hotSubjects, options.hintSubjects)
-      await recordMetricsLine(options, sessionMetrics, sessionKey, eviction, dedupedThisRun, touchesThisRun)
+      await recordMetricsLine(options, sessionMetrics, sessionKey, budget, eviction, dedupedThisRun, touchesThisRun)
     },
     "experimental.chat.system.transform": async (input: { sessionID?: string }, output: { system: string[] }) => {
       deliverHint(hintBySession, input, output)
