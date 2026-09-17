@@ -2954,6 +2954,7 @@ test("lru_stats reports zeroed counters unknown budget and empty stash for a ses
     metricsLog: false,
     metricsPath: DEFAULT_METRICS_PATH,
     userFenceEviction: { enabled: false, minBlockLines: FENCE_DEFAULT_MIN_BLOCK_LINES },
+    manualMode: false,
   })
   assert.equal(stats.modelContextTokens, null)
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
@@ -4173,4 +4174,154 @@ test("transform keeps the user message sitting exactly at hotFromIndex untouched
 
   assert.equal(textAt(bundle, 1), text)
   assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG)))
+})
+
+const MANUAL_MODE_INVALID_VALUE = "yes"
+const MANUAL_FALSE_PIN_SUBJECT = "/data/manual-false-pin.txt"
+const MANUAL_PRESSURE_SUBJECT = "/data/manual-pressure.txt"
+const MANUAL_DEFAULT_BUDGET_SUBJECT = "/data/manual-default-budget.txt"
+const MANUAL_HINT_SUBJECT = "/data/manual-hint.txt"
+const MANUAL_STATS_SUBJECT = "/data/manual-stats.txt"
+const MANUAL_INVALID_SUBJECT = "/data/manual-invalid.txt"
+const MANUAL_REASONING_TEXT = "stale manual-mode reasoning"
+
+test("transform keeps every output untouched under eviction pressure while manualMode is enabled", async () => {
+  const hooks = await loadPluginHooksWith({ manualMode: true })
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+  const bundle = buildStandardBundle(SESSION_ID, MANUAL_PRESSURE_SUBJECT)
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+})
+
+test("transform keeps an explicit defaultContextTokens from driving eviction while manualMode is enabled", async () => {
+  const hooks = await loadPluginHooksWith({ manualMode: true, defaultContextTokens: EXPLICIT_DEFAULT_CONTEXT_TOKENS })
+
+  const bundle = buildStandardBundle(SESSION_ID, MANUAL_DEFAULT_BUDGET_SUBJECT)
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+})
+
+test("transform under manualMode with an unknown budget is byte-identical to the unknown-budget stand-down", async () => {
+  const manualHooks = await loadPluginHooksWith({ manualMode: true })
+  const standDownHooks = await loadPluginHooks()
+
+  const manualBundle = buildFallbackBudgetBundle(LEGACY_FALLBACK_BUNDLE_OVER_WATERMARK_CHARS)
+  const standDownBundle = buildFallbackBudgetBundle(LEGACY_FALLBACK_BUNDLE_OVER_WATERMARK_CHARS)
+  await runTransform(manualHooks, manualBundle)
+  await runTransform(standDownHooks, standDownBundle)
+
+  assert.deepEqual(manualBundle, standDownBundle)
+})
+
+test("transform behaves byte-identically with manualMode false configured and with it unset", async () => {
+  const explicitHooks = await loadPluginHooksWith({ manualMode: false })
+  const defaultHooks = await loadPluginHooks()
+  await setContextLimit(explicitHooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+  await setContextLimit(defaultHooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const explicitBundle = buildStandardBundle(SESSION_ID, MANUAL_FALSE_PIN_SUBJECT)
+  const defaultBundle = buildStandardBundle(SESSION_ID, MANUAL_FALSE_PIN_SUBJECT)
+  await runTransform(explicitHooks, explicitBundle)
+  await runTransform(defaultHooks, defaultBundle)
+
+  assert.deepEqual(explicitBundle, defaultBundle)
+  assert.ok(toolPartAt(defaultBundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+})
+
+test("transform keeps dedup active under pressure while manualMode is enabled", async () => {
+  const hooks = await loadPluginHooksWith({ manualMode: true })
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const bundle = buildBundle([
+    [pathToolPart(DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
+    [pathToolPart(DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, dedupTombstoneFor(READ_TOOL, 1))
+  assert.equal(toolPartAt(bundle.messages[1], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
+  assert.ok(!toolPartAt(bundle.messages[1], 0).state.output.startsWith(TOMBSTONE_MARKER))
+})
+
+test("transform keeps the errored-input purge active under pressure while manualMode is enabled", async () => {
+  const hooks = await loadPluginHooksWith({ manualMode: true })
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const bundle = buildBundle([
+    [errorToolPart(READ_TOOL, { [PATH_INPUT_KEY]: PURGE_ERROR_PATH }, outputOfBytes(UNCOMPLETED_OUTPUT_BYTES))],
+    ...fillerMessages(RECENT_WINDOW_MESSAGES + 1),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(inputAt(bundle.messages[0]), PURGE_MARKER)
+})
+
+test("transform keeps reasoning expiry active under pressure while manualMode is enabled", async () => {
+  const hooks = await loadPluginHooksWith({ manualMode: true })
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const bundle = buildBundle([
+    [reasoningPart(MANUAL_REASONING_TEXT), textPart(MANUAL_REASONING_TEXT)],
+    ...fillerMessages(RECENT_WINDOW_MESSAGES + 1),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.deepEqual(bundle.messages[0].parts, [textPart(MANUAL_REASONING_TEXT)])
+})
+
+test("chat system transform delivers a hint under pressure while manualMode is enabled", async () => {
+  const hooks = await loadPluginHooksWith({ manualMode: true })
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const bundle = buildStandardBundle(SESSION_ID, MANUAL_HINT_SUBJECT)
+  await runTransform(hooks, bundle)
+
+  assert.deepEqual(hintBlocksIn(await runSystemTransform(hooks, SESSION_ID)), [hintLineFor([MANUAL_HINT_SUBJECT])])
+})
+
+test("transform keeps fence eviction the stash and read_evicted active while manualMode is enabled", async () => {
+  const hooks = await loadPluginHooksWith({ manualMode: true, userFenceEviction: { enabled: true } })
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const block = fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG))
+  const bundle = userFenceBundle(`${FENCE_PROSE_BEFORE}\n${block}\n${FENCE_PROSE_AFTER}`)
+  await runTransform(hooks, bundle)
+
+  assert.equal(
+    textAt(bundle, 0),
+    `${FENCE_PROSE_BEFORE}\n${fenceTombstoneFor(FENCE_LANGUAGE_TS, FENCE_OVER_LINES, fenceFirstLineOf(FENCE_LINE_TAG))}\n${FENCE_PROSE_AFTER}`,
+  )
+  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), `${block}\n`)
+})
+
+test("lru_stats reports the manual state in the options block while the captured budget stays visible", async () => {
+  const hooks = await loadPluginHooksWith({ manualMode: true })
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const bundle = buildStandardBundle(SESSION_ID, MANUAL_STATS_SUBJECT)
+  await runTransform(hooks, bundle)
+
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.equal(stats.options.manualMode, true)
+  assert.equal(stats.modelContextTokens, WATERMARK_PROBE_CONTEXT_LIMIT)
+  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+  assert.deepEqual(stats.lastRun, {
+    estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS),
+    watermarkTokens: null,
+    deficitTokens: null,
+  })
+})
+
+test("transform still evicts under pressure when manualMode is invalid and falls back to false", async () => {
+  const hooks = await loadPluginHooksWith({ manualMode: MANUAL_MODE_INVALID_VALUE })
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+  const bundle = buildStandardBundle(SESSION_ID, MANUAL_INVALID_SUBJECT)
+  await runTransform(hooks, bundle)
+
+  assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
 })
