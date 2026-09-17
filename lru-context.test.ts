@@ -265,13 +265,13 @@ type MessagePart =
 type StatefulToolPart = { state: { input: unknown } }
 
 type Message = {
-  info: { sessionID?: string }
+  info: { sessionID?: string; role?: string }
   parts: Array<Record<string, unknown>>
 }
 
 type MessageBundle = { messages: Message[] }
 
-type StrictMessage = { info: { sessionID?: string }; parts: MessagePart[] }
+type StrictMessage = { info: { sessionID?: string; role?: string }; parts: MessagePart[] }
 
 type StrictBundle = { messages: StrictMessage[] }
 
@@ -2860,6 +2860,7 @@ const STATS_ZEROED_COUNTERS = {
   postEvictionTouches: 0,
   reasoningExpired: 0,
   reasoningBytesExpired: 0,
+  fenceEvicted: 0,
 }
 const STATS_LOG_FILE_LINES = 1
 
@@ -2915,6 +2916,7 @@ test("lru_stats reports zeroed counters unknown budget and empty stash for a ses
     modelContextTokens: {},
     metricsLog: false,
     metricsPath: DEFAULT_METRICS_PATH,
+    userFenceEviction: { enabled: false, minBlockLines: FENCE_DEFAULT_MIN_BLOCK_LINES },
   })
   assert.equal(stats.modelContextTokens, null)
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
@@ -3619,4 +3621,354 @@ test("metrics log records attachmentBytes on each evicted entry and adds the pay
   } finally {
     cleanupMetricsDir(metricsDir)
   }
+})
+
+const FENCE_TICKS = "```"
+const FENCE_FOUR_TICKS = "````"
+const FENCE_LANGUAGE_TS = "ts"
+const FENCE_LANGUAGE_JS = "js"
+const FENCE_NO_LANGUAGE = undefined
+const FENCE_INFO_STRING_TS = 'ts title="paste"'
+const FENCE_INDENT_FOUR_SPACES = "    "
+const FENCE_INDENT_THREE_SPACES = "   "
+const FENCE_INDENT_TWO_SPACES = "  "
+const FENCE_INNER_TICK_LINE_INDEX = 1
+const FENCE_EVICTED_MARKER = "[lru-evicted-fence]"
+const FENCE_STASH_TOOL_LABEL = "fence"
+const FENCE_DEFAULT_MIN_BLOCK_LINES = 40
+const FENCE_OVER_LINES = 42
+const FENCE_TEST_THRESHOLD = 3
+const FENCE_PROSE_BEFORE = "here is the paste I mentioned"
+const FENCE_PROSE_MIDDLE = "prose between the two fences"
+const FENCE_PROSE_AFTER = "and that is the whole paste"
+const FENCE_LINE_TAG = "log"
+const FENCE_LINE_TAG_A = "alpha"
+const FENCE_LINE_TAG_B = "beta"
+const FENCE_BLANK_LEAD_LINES = 2
+const FENCE_TRAILING_NEWLINE_CHARS = 1
+const USER_ROLE = "user"
+const ASSISTANT_ROLE = "assistant"
+
+const fenceFirstLineOf = (tag: string): string => `${tag} line 0`
+
+const fenceContentLines = (count: number, tag: string): string[] =>
+  Array.from({ length: count }, (_, index) => `${tag} line ${index}`)
+
+const fenceBlockText = (language: string | undefined, contentLines: string[]): string =>
+  `${FENCE_TICKS}${language ?? ""}\n${contentLines.join("\n")}\n${FENCE_TICKS}`
+
+const userTextMessageFor = (sessionID: string, role: string, text: string): StrictMessage => ({
+  info: { sessionID, role },
+  parts: [textPart(text)],
+})
+
+const userFenceBundle = (text: string): StrictBundle => roleFenceBundle(USER_ROLE, text)
+
+const roleFenceBundle = (role: string, text: string): StrictBundle => ({
+  messages: [
+    userTextMessageFor(SESSION_ID, role, text),
+    ...fillerMessages().map((parts) => syntheticMessageFor(SESSION_ID, parts)),
+  ],
+})
+
+const windowFenceBundle = (text: string): StrictBundle => ({
+  messages: [
+    ...fillerMessages().map((parts) => syntheticMessageFor(SESSION_ID, parts)),
+    userTextMessageFor(SESSION_ID, USER_ROLE, text),
+  ],
+})
+
+const textAt = (bundle: StrictBundle, messageIndex: number): string =>
+  (bundle.messages[messageIndex].parts[0] as TextPart).text
+
+const fenceTombstoneFor = (language: string | undefined, contentLineCount: number, firstLine: string): string =>
+  `${FENCE_EVICTED_MARKER} ${language === undefined ? "code block" : `${language} code block`} (${contentLineCount} lines, first line "${firstLine}") was evicted to reclaim context.${reloadPointerFor(firstLine)}`
+
+test("transform leaves every user fenced block byte-identical while userFenceEviction stays disabled by default", async () => {
+  const hooks = await loadPluginHooks()
+  const block = fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG))
+  const text = `${FENCE_PROSE_BEFORE}\n${block}\n${FENCE_PROSE_AFTER}`
+  const bundle = userFenceBundle(text)
+  await runTransform(hooks, bundle)
+
+  assert.equal(textAt(bundle, 0), text)
+  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG)))
+})
+
+test("transform evicts an over threshold fenced block from an old user message into a tombstone naming language line count and first non empty line", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
+  const contentLines = [
+    ...Array.from({ length: FENCE_BLANK_LEAD_LINES }, () => ""),
+    fenceFirstLineOf(FENCE_LINE_TAG),
+    ...fenceContentLines(FENCE_OVER_LINES - FENCE_BLANK_LEAD_LINES - 1, FENCE_LINE_TAG),
+  ]
+  const block = fenceBlockText(FENCE_LANGUAGE_TS, contentLines)
+  const text = `${FENCE_PROSE_BEFORE}\n${block}\n${FENCE_PROSE_AFTER}`
+  const bundle = userFenceBundle(text)
+  await runTransform(hooks, bundle)
+
+  assert.equal(
+    textAt(bundle, 0),
+    `${FENCE_PROSE_BEFORE}\n${fenceTombstoneFor(FENCE_LANGUAGE_TS, FENCE_OVER_LINES, fenceFirstLineOf(FENCE_LINE_TAG))}\n${FENCE_PROSE_AFTER}`,
+  )
+})
+
+test("read_evicted returns the exact stashed fence block text after a fence eviction", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
+  const block = fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG))
+  await runTransform(hooks, userFenceBundle(`${FENCE_PROSE_BEFORE}\n${block}\n${FENCE_PROSE_AFTER}`))
+
+  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), `${block}\n`)
+})
+
+test("transform keeps a fenced block exactly at minBlockLines and evicts the anonymous block one line over it", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true, minBlockLines: FENCE_TEST_THRESHOLD } })
+  const atThreshold = fenceBlockText(FENCE_NO_LANGUAGE, fenceContentLines(FENCE_TEST_THRESHOLD, FENCE_LINE_TAG_A))
+  const overThreshold = fenceBlockText(FENCE_NO_LANGUAGE, fenceContentLines(FENCE_TEST_THRESHOLD + 1, FENCE_LINE_TAG_B))
+  const text = `${FENCE_PROSE_BEFORE}\n${atThreshold}\n${FENCE_PROSE_MIDDLE}\n${overThreshold}\n${FENCE_PROSE_AFTER}`
+  const bundle = userFenceBundle(text)
+  await runTransform(hooks, bundle)
+
+  assert.equal(
+    textAt(bundle, 0),
+    `${FENCE_PROSE_BEFORE}\n${atThreshold}\n${FENCE_PROSE_MIDDLE}\n${fenceTombstoneFor(FENCE_NO_LANGUAGE, FENCE_TEST_THRESHOLD + 1, fenceFirstLineOf(FENCE_LINE_TAG_B))}\n${FENCE_PROSE_AFTER}`,
+  )
+})
+
+test("transform evicts every over threshold fence in one user part and keeps the prose between them byte-identical", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
+  const blockA = fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG_A))
+  const blockB = fenceBlockText(FENCE_LANGUAGE_JS, fenceContentLines(FENCE_OVER_LINES + 1, FENCE_LINE_TAG_B))
+  const text = `${FENCE_PROSE_BEFORE}\n${blockA}\n${FENCE_PROSE_MIDDLE}\n${blockB}\n${FENCE_PROSE_AFTER}`
+  const bundle = userFenceBundle(text)
+  await runTransform(hooks, bundle)
+
+  assert.equal(
+    textAt(bundle, 0),
+    `${FENCE_PROSE_BEFORE}\n${fenceTombstoneFor(FENCE_LANGUAGE_TS, FENCE_OVER_LINES, fenceFirstLineOf(FENCE_LINE_TAG_A))}\n${FENCE_PROSE_MIDDLE}\n${fenceTombstoneFor(FENCE_LANGUAGE_JS, FENCE_OVER_LINES + 1, fenceFirstLineOf(FENCE_LINE_TAG_B))}\n${FENCE_PROSE_AFTER}`,
+  )
+  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG_A), SESSION_ID), `${blockA}\n`)
+  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG_B), SESSION_ID), `${blockB}\n`)
+})
+
+test("transform never evicts an unterminated fence however large it grows", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
+  const text = `${FENCE_PROSE_BEFORE}\n${FENCE_TICKS}${FENCE_LANGUAGE_TS}\n${fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG).join("\n")}`
+  const bundle = userFenceBundle(text)
+  await runTransform(hooks, bundle)
+
+  assert.equal(textAt(bundle, 0), text)
+  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG)))
+})
+
+test("transform keeps an all blank fenced block untouched no matter how many blank lines it holds", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
+  const block = fenceBlockText(FENCE_LANGUAGE_TS, Array.from({ length: FENCE_OVER_LINES }, () => ""))
+  const text = `${FENCE_PROSE_BEFORE}\n${block}\n${FENCE_PROSE_AFTER}`
+  const bundle = userFenceBundle(text)
+  await runTransform(hooks, bundle)
+
+  assert.equal(textAt(bundle, 0), text)
+  assert.equal(await readEvicted(hooks, UNKNOWN_TARGET_LABEL, SESSION_ID), stashMissFor(UNKNOWN_TARGET_LABEL))
+})
+
+test("transform truncates a long fence first line in the tombstone and reload pointer to the same capped subject", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
+  const longLine = fenceContentLines(1, "L".repeat(RENDERED_SUBJECT_CAP)).join("")
+  const contentLines = [longLine, ...fenceContentLines(FENCE_OVER_LINES - 1, FENCE_LINE_TAG)]
+  const block = fenceBlockText(FENCE_LANGUAGE_TS, contentLines)
+  const bundle = userFenceBundle(`${FENCE_PROSE_BEFORE}\n${block}\n${FENCE_PROSE_AFTER}`)
+  await runTransform(hooks, bundle)
+
+  const truncated = `${longLine.slice(0, RENDERED_SUBJECT_CAP - ELLIPSIS_MARKER.length)}${ELLIPSIS_MARKER}`
+  assert.equal(
+    textAt(bundle, 0),
+    `${FENCE_PROSE_BEFORE}\n${fenceTombstoneFor(FENCE_LANGUAGE_TS, FENCE_OVER_LINES, truncated)}\n${FENCE_PROSE_AFTER}`,
+  )
+  assert.equal(await readEvicted(hooks, truncated, SESSION_ID), `${block}\n`)
+})
+
+test("read_evicted evicts the oldest stashed entry when fence evictions push a session stash past the fifty entry bound", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
+  const fenceCount = STASH_OVERFLOW_COUNT
+  const blocks = Array.from({ length: fenceCount }, (_, index) =>
+    fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, `block${index}`)),
+  )
+  const text = `${FENCE_PROSE_BEFORE}\n${blocks.join(`\n${FENCE_PROSE_MIDDLE}\n`)}\n${FENCE_PROSE_AFTER}`
+  await runTransform(hooks, userFenceBundle(text))
+
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.equal(countersOf(stats).fenceEvicted, fenceCount)
+  assert.equal(countersOf(stats).stashDropped, 1)
+  assert.deepEqual(stats.stash, { entries: STASH_LIMIT, capacity: STASH_LIMIT })
+  assert.equal(await readEvicted(hooks, fenceFirstLineOf("block0"), SESSION_ID), stashMissFor(fenceFirstLineOf("block0")))
+  assert.equal(await readEvicted(hooks, fenceFirstLineOf("block1"), SESSION_ID), `${blocks[1]}\n`)
+})
+
+test("transform replaces a fence block whose closer ends the part text without dropping the prose before it", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
+  const block = fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG))
+  const text = `${FENCE_PROSE_BEFORE}\n${block}\n`
+  const bundle = userFenceBundle(text)
+  await runTransform(hooks, bundle)
+
+  assert.equal(
+    textAt(bundle, 0),
+    `${FENCE_PROSE_BEFORE}\n${fenceTombstoneFor(FENCE_LANGUAGE_TS, FENCE_OVER_LINES, fenceFirstLineOf(FENCE_LINE_TAG))}\n`,
+  )
+  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), `${block}\n`)
+})
+
+test("transform keeps an over threshold user fence inside the recent window untouched", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
+  const block = fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG))
+  const text = `${FENCE_PROSE_BEFORE}\n${block}\n${FENCE_PROSE_AFTER}`
+  const bundle = windowFenceBundle(text)
+  await runTransform(hooks, bundle)
+
+  assert.equal(textAt(bundle, bundle.messages.length - 1), text)
+})
+
+test("transform keeps fenced blocks in non user messages untouched while userFenceEviction is enabled", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
+  const block = fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG))
+  const text = `${FENCE_PROSE_BEFORE}\n${block}\n${FENCE_PROSE_AFTER}`
+  const bundle = roleFenceBundle(ASSISTANT_ROLE, text)
+  await runTransform(hooks, bundle)
+
+  assert.equal(textAt(bundle, 0), text)
+})
+
+test("read_evicted keeps two same subject fence evictions in one part reloadable instead of overwriting the first stash", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
+  const blockA = fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG))
+  const blockB = fenceBlockText(FENCE_LANGUAGE_JS, fenceContentLines(FENCE_OVER_LINES + 1, FENCE_LINE_TAG))
+  await runTransform(hooks, userFenceBundle(`${FENCE_PROSE_BEFORE}\n${blockA}\n${FENCE_PROSE_MIDDLE}\n${blockB}\n${FENCE_PROSE_AFTER}`))
+
+  assert.equal(
+    await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID),
+    `${blockB}\n\n${olderMatchesLineFor(fenceFirstLineOf(FENCE_LINE_TAG), [pointerFor(FENCE_STASH_TOOL_LABEL, 0)])}`,
+  )
+})
+
+test("lru_stats counts fence evictions in a distinct fenceEvicted counter without counting tool evictions", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
+  const block = fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG))
+  await runTransform(hooks, userFenceBundle(`${FENCE_PROSE_BEFORE}\n${block}\n${FENCE_PROSE_AFTER}`))
+
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.deepEqual(countersOf(stats), {
+    ...STATS_ZEROED_COUNTERS,
+    fenceEvicted: 1,
+    bytesReclaimed: block.length + FENCE_TRAILING_NEWLINE_CHARS,
+  })
+  assert.deepEqual(stats.options.userFenceEviction, { enabled: true, minBlockLines: FENCE_DEFAULT_MIN_BLOCK_LINES })
+  assert.deepEqual(stats.stash, { entries: 1, capacity: STASH_LIMIT })
+})
+
+test("metrics log records a fence only run as eventful with the fenceEvictedThisRun counter", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const hooks = await loadPluginHooksWith({
+      metricsLog: true,
+      metricsPath: metricsLogPathIn(metricsDir),
+      userFenceEviction: { enabled: true },
+    })
+    const block = fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG))
+    await runTransform(hooks, userFenceBundle(`${FENCE_PROSE_BEFORE}\n${block}\n${FENCE_PROSE_AFTER}`))
+
+    const lines = metricsLinesIn(metricsLogPathIn(metricsDir))
+    assert.equal(lines.length, STATS_LOG_FILE_LINES)
+    assert.equal(lines[0].fenceEvictedThisRun, 1)
+    assert.deepEqual(lines[0].totals, {
+      ...STATS_ZEROED_COUNTERS,
+      fenceEvicted: 1,
+      bytesReclaimed: block.length + FENCE_TRAILING_NEWLINE_CHARS,
+    })
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("transform renders only the first word of the fence info string as the language tag in the tombstone", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
+  const block = fenceBlockText(FENCE_INFO_STRING_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG))
+  const text = `${FENCE_PROSE_BEFORE}\n${block}\n${FENCE_PROSE_AFTER}`
+  const bundle = userFenceBundle(text)
+  await runTransform(hooks, bundle)
+
+  assert.equal(
+    textAt(bundle, 0),
+    `${FENCE_PROSE_BEFORE}\n${fenceTombstoneFor(FENCE_LANGUAGE_TS, FENCE_OVER_LINES, fenceFirstLineOf(FENCE_LINE_TAG))}\n${FENCE_PROSE_AFTER}`,
+  )
+})
+
+test("transform never opens a fence span on a four space indented fence line", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
+  const block = `${FENCE_INDENT_FOUR_SPACES}${FENCE_TICKS}${FENCE_LANGUAGE_TS}\n${fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG).join("\n")}\n${FENCE_INDENT_FOUR_SPACES}${FENCE_TICKS}`
+  const text = `${FENCE_PROSE_BEFORE}\n${block}\n${FENCE_PROSE_AFTER}`
+  const bundle = userFenceBundle(text)
+  await runTransform(hooks, bundle)
+
+  assert.equal(textAt(bundle, 0), text)
+  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG)))
+})
+
+test("transform never closes a fence span on a four space indented fence line", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
+  const contentLines = fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG)
+  contentLines.push(`${FENCE_INDENT_FOUR_SPACES}${FENCE_TICKS}`)
+  const text = `${FENCE_PROSE_BEFORE}\n${FENCE_TICKS}${FENCE_LANGUAGE_TS}\n${contentLines.join("\n")}`
+  const bundle = userFenceBundle(text)
+  await runTransform(hooks, bundle)
+
+  assert.equal(textAt(bundle, 0), text)
+  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG)))
+})
+
+test("transform evicts a four backtick fence holding three backtick lines as content", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
+  const contentLines = fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG)
+  contentLines[FENCE_INNER_TICK_LINE_INDEX] = FENCE_TICKS
+  const block = `${FENCE_FOUR_TICKS}${FENCE_LANGUAGE_TS}\n${contentLines.join("\n")}\n${FENCE_FOUR_TICKS}`
+  const text = `${FENCE_PROSE_BEFORE}\n${block}\n${FENCE_PROSE_AFTER}`
+  const bundle = userFenceBundle(text)
+  await runTransform(hooks, bundle)
+
+  assert.equal(
+    textAt(bundle, 0),
+    `${FENCE_PROSE_BEFORE}\n${fenceTombstoneFor(FENCE_LANGUAGE_TS, FENCE_OVER_LINES, fenceFirstLineOf(FENCE_LINE_TAG))}\n${FENCE_PROSE_AFTER}`,
+  )
+  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), `${block}\n`)
+})
+
+test("transform evicts a fence indented up to three spaces and stashes its exact indented text", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
+  const block = `${FENCE_INDENT_THREE_SPACES}${FENCE_TICKS}${FENCE_LANGUAGE_TS}\n${fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG).join("\n")}\n${FENCE_INDENT_TWO_SPACES}${FENCE_TICKS}`
+  const text = `${FENCE_PROSE_BEFORE}\n${block}\n${FENCE_PROSE_AFTER}`
+  const bundle = userFenceBundle(text)
+  await runTransform(hooks, bundle)
+
+  assert.equal(
+    textAt(bundle, 0),
+    `${FENCE_PROSE_BEFORE}\n${fenceTombstoneFor(FENCE_LANGUAGE_TS, FENCE_OVER_LINES, fenceFirstLineOf(FENCE_LINE_TAG))}\n${FENCE_PROSE_AFTER}`,
+  )
+  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), `${block}\n`)
+})
+
+test("transform keeps the user message sitting exactly at hotFromIndex untouched while userFenceEviction is enabled", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true }, recentWindow: RECENT_WINDOW_MESSAGES })
+  const block = fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG))
+  const text = `${FENCE_PROSE_BEFORE}\n${block}\n${FENCE_PROSE_AFTER}`
+  const bundle: StrictBundle = {
+    messages: [
+      ...fillerMessages(1).map((parts) => syntheticMessageFor(SESSION_ID, parts)),
+      userTextMessageFor(SESSION_ID, USER_ROLE, text),
+      ...fillerMessages(RECENT_WINDOW_MESSAGES - 1).map((parts) => syntheticMessageFor(SESSION_ID, parts)),
+    ],
+  }
+  await runTransform(hooks, bundle)
+
+  assert.equal(textAt(bundle, 1), text)
+  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG)))
 })
