@@ -53,6 +53,8 @@ const FALLBACK_SESSION_KEY = "no-session"
 const DEDUP_MARKER = "[lru-deduped]"
 const DEDUP_SUPERSEDED_LEAD = "identical call superseded by the newer output at message"
 const PURGED_INPUT_MARKER = "[lru-purged-input]"
+const REASONING_PART_TYPE = "reasoning"
+const REASONING_TEXT_KEY = "text"
 const MAX_METRICS_SESSIONS = 8
 const MAX_REMEMBERED_EVICTED_SUBJECTS = 100
 const TOUCH_SCAN_INITIAL_WATERMARK = -1
@@ -62,7 +64,7 @@ const METRICS_FILE_BASENAME = "lru-metrics.jsonl"
 const DEFAULT_METRICS_PATH = join(homedir(), ...METRICS_DIR_SEGMENTS, METRICS_FILE_BASENAME)
 const STATS_TOOL_NAME = "lru_stats"
 const STATS_TOOL_DESCRIPTION =
-  "Return live metrics for the LRU context manager in this session: eviction counters, post-eviction touches, stash occupancy, the effective context budget, and the most recent transform run's token estimate."
+  "Return live metrics for the LRU context manager in this session: eviction counters, expired reasoning counts, post-eviction touches, stash occupancy, the effective context budget, and the most recent transform run's token estimate."
 const JSON_INDENT_SPACES = 2
 const CONTEXT_TOKENS_SOURCE_MODEL = "model"
 const CONTEXT_TOKENS_SOURCE_DEFAULT = "default"
@@ -126,6 +128,8 @@ type EvictedEntryInfo = {
 
 type LastRunMetrics = { estimatedTokens: number; watermarkTokens: number | null; deficitTokens: number | null }
 
+type ReasoningExpiry = { parts: number; bytes: number }
+
 type ContextTokensSource =
   | typeof CONTEXT_TOKENS_SOURCE_MODEL
   | typeof CONTEXT_TOKENS_SOURCE_DEFAULT
@@ -140,6 +144,8 @@ type SessionMetrics = {
   stashMisses: number
   stashDropped: number
   deduped: number
+  reasoningExpired: number
+  reasoningBytesExpired: number
   postEvictionTouches: number
   evictedSubjects: Subject[]
   touchScanThrough: number
@@ -197,6 +203,9 @@ const resolveOptions = (raw: LruContextOptions = {}): ResolvedOptions => ({
 })
 
 const isProtectedTool = (tool: string, options: ResolvedOptions): boolean => options.protectedTools.includes(tool)
+
+const hotFromIndexOf = (messages: MessageBundle[], options: ResolvedOptions): number =>
+  messages.length - options.recentWindow
 
 const rangeOf = (input: Record<string, unknown>): SubjectRange | undefined => {
   const offset = input[OFFSET_INPUT_KEY]
@@ -320,7 +329,7 @@ const estimateTokens = (messages: MessageBundle[]): number => {
 }
 
 const purgeErroredToolInputs = (messages: MessageBundle[], options: ResolvedOptions): void => {
-  const hotFromIndex = messages.length - options.recentWindow
+  const hotFromIndex = hotFromIndexOf(messages, options)
   for (let msgIndex = 0; msgIndex < hotFromIndex; msgIndex += 1) {
     for (const part of messages[msgIndex].parts) {
       if (part["type"] !== "tool") continue
@@ -332,6 +341,24 @@ const purgeErroredToolInputs = (messages: MessageBundle[], options: ResolvedOpti
       typedState["input"] = PURGED_INPUT_MARKER
     }
   }
+}
+
+const expireAgedReasoning = (messages: MessageBundle[], options: ResolvedOptions): ReasoningExpiry => {
+  const hotFromIndex = hotFromIndexOf(messages, options)
+  let parts = 0
+  let bytes = 0
+  for (let msgIndex = 0; msgIndex < hotFromIndex; msgIndex += 1) {
+    const messageParts = messages[msgIndex].parts
+    for (let partIndex = messageParts.length - 1; partIndex >= 0; partIndex -= 1) {
+      const part = messageParts[partIndex]
+      if (part["type"] !== REASONING_PART_TYPE) continue
+      const text = part[REASONING_TEXT_KEY]
+      if (typeof text === "string") bytes += text.length
+      messageParts.splice(partIndex, 1)
+      parts += 1
+    }
+  }
+  return { parts, bytes }
 }
 
 const stripLegacyHintParts = (messages: MessageBundle[]): void => {
@@ -455,6 +482,8 @@ const createSessionMetrics = (): SessionMetrics => ({
   stashMisses: 0,
   stashDropped: 0,
   deduped: 0,
+  reasoningExpired: 0,
+  reasoningBytesExpired: 0,
   postEvictionTouches: 0,
   evictedSubjects: [],
   touchScanThrough: TOUCH_SCAN_INITIAL_WATERMARK,
@@ -482,7 +511,7 @@ const countPostEvictionTouches = (metrics: SessionMetrics, appearances: ToolAppe
   return touches
 }
 
-const recordRunOutcome = (metrics: SessionMetrics, eviction: EvictionResult, dedupedThisRun: number, touchesThisRun: number): void => {
+const recordRunOutcome = (metrics: SessionMetrics, eviction: EvictionResult, dedupedThisRun: number, touchesThisRun: number, reasoningExpiredThisRun: ReasoningExpiry): void => {
   metrics.lastRun = {
     estimatedTokens: eviction.estimatedTokens,
     watermarkTokens: eviction.watermarkTokens,
@@ -496,6 +525,8 @@ const recordRunOutcome = (metrics: SessionMetrics, eviction: EvictionResult, ded
   }
   while (metrics.evictedSubjects.length > MAX_REMEMBERED_EVICTED_SUBJECTS) metrics.evictedSubjects.shift()
   metrics.deduped += dedupedThisRun
+  metrics.reasoningExpired += reasoningExpiredThisRun.parts
+  metrics.reasoningBytesExpired += reasoningExpiredThisRun.bytes
   metrics.postEvictionTouches += touchesThisRun
 }
 
@@ -507,9 +538,11 @@ const recordMetricsLine = async (
   eviction: EvictionResult,
   dedupedThisRun: number,
   touchesThisRun: number,
+  reasoningExpiredThisRun: ReasoningExpiry,
 ): Promise<void> => {
   const stashReadsSinceLastLine = metrics.stashHits + metrics.stashMisses - metrics.stashReadsLoggedThrough
-  const isEventful = eviction.evicted.length > 0 || dedupedThisRun > 0 || touchesThisRun > 0 || stashReadsSinceLastLine > 0
+  const isEventful =
+    eviction.evicted.length > 0 || dedupedThisRun > 0 || touchesThisRun > 0 || reasoningExpiredThisRun.parts > 0 || stashReadsSinceLastLine > 0
   if (options.metricsLog === false || isEventful === false) return
   const line = {
     ts: new Date().toISOString(),
@@ -526,6 +559,8 @@ const recordMetricsLine = async (
       messagesAgo: entry.messagesAgo,
     })),
     dedupedThisRun,
+    reasoningExpiredThisRun: reasoningExpiredThisRun.parts,
+    reasoningBytesExpiredThisRun: reasoningExpiredThisRun.bytes,
     postEvictionTouchesThisRun: touchesThisRun,
     stashReadsSinceLastLine,
     totals: {
@@ -535,6 +570,8 @@ const recordMetricsLine = async (
       stashMisses: metrics.stashMisses,
       stashDropped: metrics.stashDropped,
       deduped: metrics.deduped,
+      reasoningExpired: metrics.reasoningExpired,
+      reasoningBytesExpired: metrics.reasoningBytesExpired,
       postEvictionTouches: metrics.postEvictionTouches,
     },
   }
@@ -580,6 +617,8 @@ const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
       stashMisses: metrics.stashMisses,
       stashDropped: metrics.stashDropped,
       deduped: metrics.deduped,
+      reasoningExpired: metrics.reasoningExpired,
+      reasoningBytesExpired: metrics.reasoningBytesExpired,
       postEvictionTouches: metrics.postEvictionTouches,
     },
     lastRun: metrics.lastRun ?? null,
@@ -662,7 +701,7 @@ const evictLeastRecentlyUsed = (
 ): EvictionResult => {
   const { appearances, entries } = scanToolOutputs(messages, options)
 
-  const hotFromIndex = messages.length - options.recentWindow
+  const hotFromIndex = hotFromIndexOf(messages, options)
   const evictable = entries
     .filter((entry) => !isProtectedTool(entry.tool, options))
     .filter((entry) => entry.lastTouch < hotFromIndex)
@@ -777,14 +816,15 @@ export default (async (_input, rawOptions) => {
       stripLegacyHintParts(messages)
       const dedupedThisRun = deduplicateToolOutputs(messages, options)
       purgeErroredToolInputs(messages, options)
+      const reasoningExpiredThisRun = expireAgedReasoning(messages, options)
       const eviction =
         budget.tokens === null
           ? measureWithoutEvicting(messages, options)
           : evictLeastRecentlyUsed(messages, options, budget.tokens * options.watermark, sessionStash)
       const touchesThisRun = countPostEvictionTouches(sessionMetrics, eviction.appearances)
-      recordRunOutcome(sessionMetrics, eviction, dedupedThisRun, touchesThisRun)
+      recordRunOutcome(sessionMetrics, eviction, dedupedThisRun, touchesThisRun, reasoningExpiredThisRun)
       storeHint(hintBySession, sessionKey, eviction.hotSubjects, options.hintSubjects)
-      await recordMetricsLine(options, sessionMetrics, sessionKey, budget, eviction, dedupedThisRun, touchesThisRun)
+      await recordMetricsLine(options, sessionMetrics, sessionKey, budget, eviction, dedupedThisRun, touchesThisRun, reasoningExpiredThisRun)
     },
     "experimental.chat.system.transform": async (input: { sessionID?: string }, output: { system: string[] }) => {
       deliverHint(hintBySession, input, output)
