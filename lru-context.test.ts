@@ -177,7 +177,9 @@ type ErrorToolPart = {
   state: { status: "error"; input: Record<string, unknown>; output: string }
 }
 
-type MessagePart = TextPart | CompletedToolPart | PendingToolPart | ErrorToolPart
+type ReasoningPart = { type: "reasoning"; text: string; metadata?: Record<string, unknown> }
+
+type MessagePart = TextPart | CompletedToolPart | PendingToolPart | ErrorToolPart | ReasoningPart
 
 type StatefulToolPart = { state: { input: unknown } }
 
@@ -266,6 +268,9 @@ const errorToolPart = (tool: string, input: Record<string, unknown>, output: str
   tool,
   state: { status: "error", input, output },
 })
+
+const reasoningPart = (text: string, metadata?: Record<string, unknown>): ReasoningPart =>
+  metadata === undefined ? { type: "reasoning", text } : { type: "reasoning", text, metadata }
 
 const pathToolPart = (path: string, outputBytes: number): CompletedToolPart =>
   completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: path }, outputOfBytes(outputBytes))
@@ -1717,6 +1722,90 @@ test("transform purges errored tool inputs identically in both sessions with no 
   assert.equal(inputAt(sessionB.messages[0]), PURGE_MARKER)
 })
 
+const REASONING_COLD_TEXT = "cold reasoning block"
+const REASONING_SECOND_COLD_TEXT = "second cold reasoning block"
+const REASONING_BOUNDARY_TEXT = "boundary reasoning block"
+const REASONING_HOT_TEXT = "hot reasoning block"
+const REASONING_SIGNATURE_KEY = "signature"
+const REASONING_SIGNATURE_VALUE = "sig-abc123"
+const REASONING_MIXED_NOTE_TEXT = "user note beside reasoning"
+const REASONING_MIXED_REMAINING_PARTS = 2
+const EXPIRED_REASONING_PAIR_COUNT = 2
+const EXPIRED_REASONING_PAIR_BYTES = REASONING_COLD_TEXT.length + REASONING_SECOND_COLD_TEXT.length
+const EXPIRED_REASONING_SINGLE_COUNT = 1
+const EXPIRED_REASONING_METADATA = { [REASONING_SIGNATURE_KEY]: REASONING_SIGNATURE_VALUE }
+
+test("transform expires a reasoning part strictly older than the recent window and keeps the parts at and inside the boundary", async () => {
+  const hooks = await loadPluginHooks()
+
+  const bundle = buildBundle([
+    [reasoningPart(REASONING_COLD_TEXT)],
+    ...fillerMessages(RECENT_WINDOW_MESSAGES),
+    [reasoningPart(REASONING_BOUNDARY_TEXT)],
+    [reasoningPart(REASONING_HOT_TEXT)],
+    ...fillerMessages(RECENT_WINDOW_MESSAGES - 2),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(bundle.messages.length, RECENT_WINDOW_MESSAGES * 2 + 1)
+  assert.equal(bundle.messages[0].parts.length, 0)
+  assert.deepEqual(bundle.messages[RECENT_WINDOW_MESSAGES + 1].parts, [reasoningPart(REASONING_BOUNDARY_TEXT)])
+  assert.deepEqual(bundle.messages[RECENT_WINDOW_MESSAGES + 2].parts, [reasoningPart(REASONING_HOT_TEXT)])
+})
+
+test("transform expires a metadata bearing reasoning part outside the recent window and keeps the identical in window part untouched", async () => {
+  const hooks = await loadPluginHooks()
+
+  const bundle = buildBundle([
+    [reasoningPart(REASONING_COLD_TEXT, EXPIRED_REASONING_METADATA)],
+    ...fillerMessages(RECENT_WINDOW_MESSAGES),
+    [reasoningPart(REASONING_BOUNDARY_TEXT, EXPIRED_REASONING_METADATA)],
+    ...fillerMessages(RECENT_WINDOW_MESSAGES - 1),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(bundle.messages[0].parts.length, 0)
+  assert.deepEqual(bundle.messages[RECENT_WINDOW_MESSAGES + 1].parts, [
+    reasoningPart(REASONING_BOUNDARY_TEXT, EXPIRED_REASONING_METADATA),
+  ])
+})
+
+test("transform removes only the expired reasoning part from a mixed message keeping its tool and text siblings in order", async () => {
+  const hooks = await loadPluginHooks()
+
+  const bundle = buildBundle([
+    [
+      reasoningPart(REASONING_COLD_TEXT),
+      pathToolPart("/data/mixed.txt", MIN_EVICTABLE_BYTES),
+      textPart(REASONING_MIXED_NOTE_TEXT),
+    ],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(bundle.messages[0].parts.length, REASONING_MIXED_REMAINING_PARTS)
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(bundle.messages[0].parts[1]["text"], REASONING_MIXED_NOTE_TEXT)
+})
+
+test("transform leaves expiry results unchanged on a second transform pass", async () => {
+  const hooks = await loadPluginHooks()
+
+  const bundle = buildBundle([
+    [reasoningPart(REASONING_COLD_TEXT)],
+    ...fillerMessages(RECENT_WINDOW_MESSAGES),
+    [reasoningPart(REASONING_BOUNDARY_TEXT)],
+    ...fillerMessages(RECENT_WINDOW_MESSAGES - 1),
+  ])
+  await runTransform(hooks, bundle)
+  const afterFirstPass = structuredClone(bundle)
+  await runTransform(hooks, bundle)
+
+  assert.deepEqual(bundle, afterFirstPass)
+  assert.equal(bundle.messages[0].parts.length, 0)
+  assert.equal(bundle.messages[RECENT_WINDOW_MESSAGES + 1].parts.length, 1)
+})
+
 test("transform never tombstones a default protected task output under watermark pressure that evicts an unprotected sibling", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(
@@ -2132,6 +2221,8 @@ const STATS_ZEROED_COUNTERS = {
   stashDropped: 0,
   deduped: 0,
   postEvictionTouches: 0,
+  reasoningExpired: 0,
+  reasoningBytesExpired: 0,
 }
 const STATS_LOG_FILE_LINES = 1
 
@@ -2576,6 +2667,64 @@ test("metrics log clears a recorded write failure once a later write succeeds", 
     assert.equal(countersOf(stats).evictions, 1)
     assert.equal(countersOf(stats).postEvictionTouches, 1)
     assert.equal(metricsLinesIn(blockedPath).length, METRICS_LINES_AFTER_RECOVERY)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("lru_stats counts expired reasoning parts and bytes without counting them as evictions", async () => {
+  const hooks = await loadPluginHooks()
+
+  const bundle = buildBundle([
+    [reasoningPart(REASONING_COLD_TEXT), reasoningPart(REASONING_SECOND_COLD_TEXT)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.deepEqual(countersOf(await lruStats(hooks, SESSION_ID)), {
+    ...STATS_ZEROED_COUNTERS,
+    reasoningExpired: EXPIRED_REASONING_PAIR_COUNT,
+    reasoningBytesExpired: EXPIRED_REASONING_PAIR_BYTES,
+  })
+})
+
+test("lru_stats leaves reasoning counters at zero when a pressured session has no reasoning parts", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const bundle = buildStandardBundle(SESSION_ID, "/data/no-reasoning.txt")
+  await runTransform(hooks, bundle)
+
+  assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  assert.deepEqual(countersOf(await lruStats(hooks, SESSION_ID)), {
+    ...STATS_ZEROED_COUNTERS,
+    evictions: 1,
+    bytesReclaimed: MIN_EVICTABLE_BYTES,
+  })
+})
+
+test("metrics log counts expired reasoning bytes separately from evictions on a reasoning only quiet run", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const hooks = await loadPluginHooksWithMetricsLog(metricsLogPathIn(metricsDir))
+
+    const bundle = buildBundle([
+      [reasoningPart(REASONING_COLD_TEXT), pathToolPart("/data/quiet.txt", APPEARANCE_ONLY_OUTPUT_BYTES)],
+      ...fillerMessages(),
+    ])
+    await runTransform(hooks, bundle)
+
+    const lines = metricsLinesIn(metricsLogPathIn(metricsDir))
+    assert.equal(lines.length, STATS_LOG_FILE_LINES)
+    assert.equal(lines[0].reasoningExpiredThisRun, EXPIRED_REASONING_SINGLE_COUNT)
+    assert.equal(lines[0].reasoningBytesExpiredThisRun, REASONING_COLD_TEXT.length)
+    assert.deepEqual(lines[0].evictedThisRun, [])
+    assert.equal(lines[0].dedupedThisRun, 0)
+    assert.deepEqual(lines[0].totals, {
+      ...STATS_ZEROED_COUNTERS,
+      reasoningExpired: EXPIRED_REASONING_SINGLE_COUNT,
+      reasoningBytesExpired: REASONING_COLD_TEXT.length,
+    })
   } finally {
     cleanupMetricsDir(metricsDir)
   }
