@@ -178,6 +178,32 @@ const ELLIPSIS_MARKER = "…"
 const HEREDOC_LINE = "printf segment\n"
 const HEREDOC_LINE_REPEAT = 200
 const HEREDOC_COMMAND = HEREDOC_LINE.repeat(HEREDOC_LINE_REPEAT)
+const DIGEST_POINTER_LEAD = " Output digest: "
+const DIGEST_SENTENCE_TAIL = "."
+const DIGEST_PIECE_SEPARATOR = " | "
+const DIGEST_FIRST_LABEL = "first"
+const DIGEST_LAST_LABEL = "last"
+const DIGEST_HEAD_LABEL = "head"
+const DIGEST_TAIL_LABEL = "tail"
+const MAX_DIGEST_CHARS = 200
+const GLOB_TOOL = "glob"
+const DIGEST_READ_PATH = "/data/digest-read.txt"
+const DIGEST_READ_OFFSET_LINES = 5
+const DIGEST_READ_LIMIT_LINES = 10
+const DIGEST_READ_FIRST_LINE = "first line of the digested file"
+const DIGEST_READ_LAST_LINE = "last line of the digested file"
+const DIGEST_MIDDLE_FILL_CHARS = 2100
+const DIGEST_BASH_COMMAND = "make build"
+const DIGEST_BASH_HEAD_LINE = "build error: module missing"
+const DIGEST_BASH_TAIL_LINE = "exit status 1"
+const DIGEST_EXCERPT_PATTERN = "digest-excerpt"
+const DIGEST_EXCERPT_HEAD_LINE = "head excerpt sentinel line"
+const DIGEST_BOUNDARY_FILL_CHAR = "E"
+const DIGEST_OVERBOUND_SENTINEL = "BEYOND-BOUND-SECRET"
+const DIGEST_VARIANT_FIRST_LINE_A = "variant one first line"
+const DIGEST_VARIANT_FIRST_LINE_B = "variant two first line"
+const DIGEST_VARIANT_PATH = "/data/digest-variant.txt"
+const DIGEST_DETERMINISM_PATH = "/data/digest-determinism.txt"
 
 const hintLineFor = (subjects: string[]): string =>
   `${HINT_MARKER} ${HINT_LABEL} ${subjects.join(HINT_SUBJECT_SEPARATOR)}`
@@ -386,6 +412,35 @@ const runTransform = async (hooks: HookMap, bundle: StrictBundle): Promise<void>
 const reloadPointerFor = (subject: string): string =>
   `${RELOAD_POINTER_LEAD} ${RELOAD_TOOL_NAME} (subject "${subject}").`
 
+const digestLinesOf = (output: string): string[] => output.split(/\r\n|\r|\n/)
+
+const boundedDigestOf = (text: string): string =>
+  text.length > MAX_DIGEST_CHARS
+    ? `${text.slice(0, MAX_DIGEST_CHARS - ELLIPSIS_MARKER.length)}${ELLIPSIS_MARKER}`
+    : text
+
+const digestPreviewFor = (label: string, line: string): string => `${label} "${line}"`
+
+const outputDigestFor = (tool: string, subject: string, output: string): string => {
+  const lines = digestLinesOf(output)
+  const headLine = lines[0]
+  const tailLine = lines[lines.length - 1]
+  if (tool === READ_TOOL) {
+    return boundedDigestOf(
+      [subject, digestPreviewFor(DIGEST_FIRST_LABEL, headLine), digestPreviewFor(DIGEST_LAST_LABEL, tailLine)].join(DIGEST_PIECE_SEPARATOR),
+    )
+  }
+  if (tool === BASH_TOOL) {
+    return boundedDigestOf(
+      [subject, digestPreviewFor(DIGEST_HEAD_LABEL, headLine), digestPreviewFor(DIGEST_TAIL_LABEL, tailLine)].join(DIGEST_PIECE_SEPARATOR),
+    )
+  }
+  return boundedDigestOf(lines.join(" "))
+}
+
+const digestSentenceFor = (tool: string, subject: string, output: string): string =>
+  `${DIGEST_POINTER_LEAD}${outputDigestFor(tool, subject, output)}${DIGEST_SENTENCE_TAIL}`
+
 const stashMissFor = (subject: string): string =>
   `${STASH_MARKER} ${STASH_MISS_LEAD} "${subject}"; ${STASH_MISS_HINT}.`
 
@@ -555,7 +610,7 @@ test("transform refreshes a path output last touch to the message index of the l
 
   assert.equal(
     toolPartAt(bundle.messages[0], 0).state.output,
-    `${TOMBSTONE_MARKER} read ${REFRESHED_PATH} (2048 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${reloadPointerFor(REFRESHED_PATH)}`,
+    `${TOMBSTONE_MARKER} read ${REFRESHED_PATH} (2048 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${digestSentenceFor(READ_TOOL, REFRESHED_PATH, outputOfBytes(MIN_EVICTABLE_BYTES))}${reloadPointerFor(REFRESHED_PATH)}`,
   )
 })
 
@@ -573,7 +628,7 @@ test("transform refreshes a bash entry last touch on exact command match", async
 
   assert.equal(
     toolPartAt(bundle.messages[0], 0).state.output,
-    `${TOMBSTONE_MARKER} bash ${BASH_ENTRY_COMMAND} (2048 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${reloadPointerFor(BASH_ENTRY_COMMAND)}`,
+    `${TOMBSTONE_MARKER} bash ${BASH_ENTRY_COMMAND} (2048 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${digestSentenceFor(BASH_TOOL, BASH_ENTRY_COMMAND, outputOfBytes(MIN_EVICTABLE_BYTES))}${reloadPointerFor(BASH_ENTRY_COMMAND)}`,
   )
 })
 
@@ -607,7 +662,7 @@ test("transform evicts a bash entry when the substring match is blocked at exact
 
   assert.equal(
     toolPartAt(bundle.messages[0], 0).state.output,
-    `${TOMBSTONE_MARKER} bash ${SHORT_SUBSTRING_ENTRY_COMMAND} (2048 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${reloadPointerFor(SHORT_SUBSTRING_ENTRY_COMMAND)}`,
+    `${TOMBSTONE_MARKER} bash ${SHORT_SUBSTRING_ENTRY_COMMAND} (2048 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${digestSentenceFor(BASH_TOOL, SHORT_SUBSTRING_ENTRY_COMMAND, outputOfBytes(MIN_EVICTABLE_BYTES))}${reloadPointerFor(SHORT_SUBSTRING_ENTRY_COMMAND)}`,
   )
 })
 
@@ -649,7 +704,7 @@ test("transform evicts outputs exactly at the size floor", async () => {
 
   assert.equal(
     toolPartAt(bundle.messages[0], 0).state.output,
-    `${TOMBSTONE_MARKER} read /data/floor.txt (2048 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${reloadPointerFor("/data/floor.txt")}`,
+    `${TOMBSTONE_MARKER} read /data/floor.txt (2048 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${digestSentenceFor(READ_TOOL, "/data/floor.txt", outputOfBytes(MIN_EVICTABLE_BYTES))}${reloadPointerFor("/data/floor.txt")}`,
   )
 })
 
@@ -670,7 +725,7 @@ test("transform writes a tombstone naming the tool first subject byte count and 
   await runTransform(hooks, bundle)
 
   const output = toolPartAt(bundle.messages[0], 0).state.output
-  assert.equal(output, `${TOMBSTONE_MARKER} read /data/first.txt (3000 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${reloadPointerFor("/data/first.txt")}`)
+  assert.equal(output, `${TOMBSTONE_MARKER} read /data/first.txt (3000 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${digestSentenceFor(READ_TOOL, "/data/first.txt", outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))}${reloadPointerFor("/data/first.txt")}`)
   assert.ok(!output.includes("/data/second.txt"))
 })
 
@@ -686,8 +741,146 @@ test("transform writes unknown target into the tombstone for an entry without su
 
   assert.equal(
     toolPartAt(bundle.messages[0], 0).state.output,
-    `${TOMBSTONE_MARKER} read unknown target (3000 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${reloadPointerFor(UNKNOWN_TARGET_LABEL)}`,
+    `${TOMBSTONE_MARKER} read unknown target (3000 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${digestSentenceFor(READ_TOOL, UNKNOWN_TARGET_LABEL, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))}${reloadPointerFor(UNKNOWN_TARGET_LABEL)}`,
   )
+})
+
+test("transform writes a read digest naming the ranged path and previews of the first and last output lines", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const subject = `${DIGEST_READ_PATH}:${DIGEST_READ_OFFSET_LINES}-${DIGEST_READ_OFFSET_LINES + DIGEST_READ_LIMIT_LINES}`
+  const output = [DIGEST_READ_FIRST_LINE, outputOfBytes(DIGEST_MIDDLE_FILL_CHARS), DIGEST_READ_LAST_LINE].join("\n")
+  const bundle = buildBundle([
+    [
+      completedToolPart(
+        READ_TOOL,
+        {
+          [PATH_INPUT_KEY]: DIGEST_READ_PATH,
+          [OFFSET_INPUT_KEY]: DIGEST_READ_OFFSET_LINES,
+          [LIMIT_INPUT_KEY]: DIGEST_READ_LIMIT_LINES,
+        },
+        output,
+      ),
+    ],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  const tombstone = toolPartAt(bundle.messages[0], 0).state.output
+  const digest = outputDigestFor(READ_TOOL, subject, output)
+  assert.ok(digest.includes(`${DIGEST_FIRST_LABEL} "${DIGEST_READ_FIRST_LINE}"`))
+  assert.ok(digest.includes(`${DIGEST_LAST_LABEL} "${DIGEST_READ_LAST_LINE}"`))
+  assert.ok(digest.includes(subject))
+  assert.ok(!digest.includes("\n"))
+  assert.equal(
+    tombstone,
+    `${TOMBSTONE_MARKER} read ${subject} (${output.length} bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${digestSentenceFor(READ_TOOL, subject, output)}${reloadPointerFor(subject)}`,
+  )
+})
+
+test("transform writes a bash digest naming the command with head and tail output lines collapsed to one line", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const output = [DIGEST_BASH_HEAD_LINE, outputOfBytes(DIGEST_MIDDLE_FILL_CHARS), DIGEST_BASH_TAIL_LINE].join("\r\n")
+  const bundle = buildBundle([[completedToolPart(BASH_TOOL, { command: DIGEST_BASH_COMMAND }, output)], ...fillerMessages()])
+  await runTransform(hooks, bundle)
+
+  const tombstone = toolPartAt(bundle.messages[0], 0).state.output
+  const digest = outputDigestFor(BASH_TOOL, DIGEST_BASH_COMMAND, output)
+  assert.ok(digest.includes(`${DIGEST_HEAD_LABEL} "${DIGEST_BASH_HEAD_LINE}"`))
+  assert.ok(digest.includes(`${DIGEST_TAIL_LABEL} "${DIGEST_BASH_TAIL_LINE}"`))
+  assert.ok(digest.includes(DIGEST_BASH_COMMAND))
+  assert.ok(!tombstone.includes("\n"))
+  assert.ok(!tombstone.includes("\r"))
+  assert.equal(
+    tombstone,
+    `${TOMBSTONE_MARKER} bash ${DIGEST_BASH_COMMAND} (${output.length} bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${digestSentenceFor(BASH_TOOL, DIGEST_BASH_COMMAND, output)}${reloadPointerFor(DIGEST_BASH_COMMAND)}`,
+  )
+})
+
+test("transform writes a head excerpt digest for tools that are neither read nor bash", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const output = `${DIGEST_EXCERPT_HEAD_LINE}\n${outputOfBytes(DIGEST_MIDDLE_FILL_CHARS)}`
+  const bundle = buildBundle([
+    [completedToolPart(GLOB_TOOL, { [PATTERN_INPUT_KEY]: DIGEST_EXCERPT_PATTERN }, output)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  const tombstone = toolPartAt(bundle.messages[0], 0).state.output
+  const digest = outputDigestFor(GLOB_TOOL, DIGEST_EXCERPT_PATTERN, output)
+  assert.ok(digest.startsWith(DIGEST_EXCERPT_HEAD_LINE))
+  assert.ok(!digest.includes("\n"))
+  assert.equal(
+    tombstone,
+    `${TOMBSTONE_MARKER} glob ${DIGEST_EXCERPT_PATTERN} (${output.length} bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${digestSentenceFor(GLOB_TOOL, DIGEST_EXCERPT_PATTERN, output)}${reloadPointerFor(DIGEST_EXCERPT_PATTERN)}`,
+  )
+})
+
+test("transform caps the digest at the bound exactly and leaks nothing beyond it", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const output = `${DIGEST_BOUNDARY_FILL_CHAR.repeat(MAX_DIGEST_CHARS)}${DIGEST_OVERBOUND_SENTINEL}${outputOfBytes(DIGEST_MIDDLE_FILL_CHARS)}`
+  const bundle = buildBundle([
+    [completedToolPart(GLOB_TOOL, { [PATTERN_INPUT_KEY]: DIGEST_EXCERPT_PATTERN }, output)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  const tombstone = toolPartAt(bundle.messages[0], 0).state.output
+  const digestStart = tombstone.indexOf(DIGEST_POINTER_LEAD) + DIGEST_POINTER_LEAD.length
+  const digest = tombstone.slice(digestStart, tombstone.indexOf(DIGEST_SENTENCE_TAIL, digestStart))
+  assert.equal(digest.length, MAX_DIGEST_CHARS)
+  assert.ok(digest.endsWith(ELLIPSIS_MARKER))
+  assert.ok(digest.startsWith(DIGEST_BOUNDARY_FILL_CHAR.repeat(MAX_DIGEST_CHARS - ELLIPSIS_MARKER.length)))
+  assert.ok(!digest.includes(DIGEST_OVERBOUND_SENTINEL))
+})
+
+test("transform derives an identical tombstone digest from identical evicted content in two sessions", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+  await setContextLimit(hooks, SESSION_ID_B, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const sessionA = buildBundle([[pathToolPart(DIGEST_DETERMINISM_PATH, MIN_EVICTABLE_BYTES)], ...fillerMessages()], SESSION_ID)
+  const sessionB = buildBundle([[pathToolPart(DIGEST_DETERMINISM_PATH, MIN_EVICTABLE_BYTES)], ...fillerMessages()], SESSION_ID_B)
+  await runTransform(hooks, sessionB)
+  await runTransform(hooks, sessionA)
+
+  assert.equal(toolPartAt(sessionA.messages[0], 0).state.output, toolPartAt(sessionB.messages[0], 0).state.output)
+})
+
+test("transform derives distinct digests from evicted content that differs only in its first line", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+  await setContextLimit(hooks, SESSION_ID_B, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const outputA = `${DIGEST_VARIANT_FIRST_LINE_A}\n${outputOfBytes(DIGEST_MIDDLE_FILL_CHARS)}`
+  const outputB = `${DIGEST_VARIANT_FIRST_LINE_B}\n${outputOfBytes(DIGEST_MIDDLE_FILL_CHARS)}`
+  const sessionA = buildBundle(
+    [[completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: DIGEST_VARIANT_PATH }, outputA)], ...fillerMessages()],
+    SESSION_ID,
+  )
+  const sessionB = buildBundle(
+    [[completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: DIGEST_VARIANT_PATH }, outputB)], ...fillerMessages()],
+    SESSION_ID_B,
+  )
+  await runTransform(hooks, sessionB)
+  await runTransform(hooks, sessionA)
+
+  const digestOf = (tombstone: string): string => {
+    const digestStart = tombstone.indexOf(DIGEST_POINTER_LEAD) + DIGEST_POINTER_LEAD.length
+    return tombstone.slice(digestStart, tombstone.indexOf(RELOAD_POINTER_LEAD, digestStart))
+  }
+  const tombstoneA = toolPartAt(sessionA.messages[0], 0).state.output
+  const tombstoneB = toolPartAt(sessionB.messages[0], 0).state.output
+  assert.ok(tombstoneA.startsWith(TOMBSTONE_MARKER))
+  assert.ok(tombstoneB.startsWith(TOMBSTONE_MARKER))
+  assert.notEqual(digestOf(tombstoneA), digestOf(tombstoneB))
 })
 
 test("transform skips outputs already starting with the eviction marker", async () => {
@@ -1012,7 +1205,7 @@ test("transform renders a read range subject as path start end in the tombstone"
 
   assert.equal(
     toolPartAt(bundle.messages[0], 0).state.output,
-    `${TOMBSTONE_MARKER} read ${RANGE_PATH}:${READ_OFFSET_LINES}-${READ_OFFSET_LINES + READ_LIMIT_LINES} (3000 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${reloadPointerFor(`${RANGE_PATH}:${READ_OFFSET_LINES}-${READ_OFFSET_LINES + READ_LIMIT_LINES}`)}`,
+    `${TOMBSTONE_MARKER} read ${RANGE_PATH}:${READ_OFFSET_LINES}-${READ_OFFSET_LINES + READ_LIMIT_LINES} (3000 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${digestSentenceFor(READ_TOOL, `${RANGE_PATH}:${READ_OFFSET_LINES}-${READ_OFFSET_LINES + READ_LIMIT_LINES}`, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))}${reloadPointerFor(`${RANGE_PATH}:${READ_OFFSET_LINES}-${READ_OFFSET_LINES + READ_LIMIT_LINES}`)}`,
   )
 })
 
@@ -1034,7 +1227,7 @@ test("transform renders a grep pattern subject in the tombstone", async () => {
 
   assert.equal(
     toolPartAt(bundle.messages[0], 0).state.output,
-    `${TOMBSTONE_MARKER} grep ${PATTERN_QUERY} (3000 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${reloadPointerFor(PATTERN_QUERY)}`,
+    `${TOMBSTONE_MARKER} grep ${PATTERN_QUERY} (3000 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${digestSentenceFor(GREP_TOOL, PATTERN_QUERY, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))}${reloadPointerFor(PATTERN_QUERY)}`,
   )
 })
 
@@ -1056,7 +1249,7 @@ test("transform still extracts a pattern subject when include is not a string", 
 
   assert.equal(
     toolPartAt(bundle.messages[0], 0).state.output,
-    `${TOMBSTONE_MARKER} grep ${PATTERN_QUERY} (3000 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${reloadPointerFor(PATTERN_QUERY)}`,
+    `${TOMBSTONE_MARKER} grep ${PATTERN_QUERY} (3000 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${digestSentenceFor(GREP_TOOL, PATTERN_QUERY, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))}${reloadPointerFor(PATTERN_QUERY)}`,
   )
 })
 
@@ -1084,7 +1277,7 @@ test("transform refreshes a ranged entry when a whole path call hits the same pa
 
   assert.equal(
     toolPartAt(bundle.messages[0], 0).state.output,
-    `${TOMBSTONE_MARKER} read ${REFRESHED_PATH}:${RANGED_ENTRY_OFFSET}-${RANGED_ENTRY_OFFSET + RANGED_ENTRY_LIMIT} (2048 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${reloadPointerFor(`${REFRESHED_PATH}:${RANGED_ENTRY_OFFSET}-${RANGED_ENTRY_OFFSET + RANGED_ENTRY_LIMIT}`)}`,
+    `${TOMBSTONE_MARKER} read ${REFRESHED_PATH}:${RANGED_ENTRY_OFFSET}-${RANGED_ENTRY_OFFSET + RANGED_ENTRY_LIMIT} (2048 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${digestSentenceFor(READ_TOOL, `${REFRESHED_PATH}:${RANGED_ENTRY_OFFSET}-${RANGED_ENTRY_OFFSET + RANGED_ENTRY_LIMIT}`, outputOfBytes(MIN_EVICTABLE_BYTES))}${reloadPointerFor(`${REFRESHED_PATH}:${RANGED_ENTRY_OFFSET}-${RANGED_ENTRY_OFFSET + RANGED_ENTRY_LIMIT}`)}`,
   )
 })
 
@@ -1112,7 +1305,7 @@ test("transform refreshes a whole path entry when a ranged call hits the same pa
 
   assert.equal(
     toolPartAt(bundle.messages[0], 0).state.output,
-    `${TOMBSTONE_MARKER} read ${REFRESHED_PATH} (2048 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${reloadPointerFor(REFRESHED_PATH)}`,
+    `${TOMBSTONE_MARKER} read ${REFRESHED_PATH} (2048 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${digestSentenceFor(READ_TOOL, REFRESHED_PATH, outputOfBytes(MIN_EVICTABLE_BYTES))}${reloadPointerFor(REFRESHED_PATH)}`,
   )
 })
 
@@ -1136,7 +1329,7 @@ test("transform refreshes a pattern entry regardless of its include qualifier", 
 
   assert.equal(
     toolPartAt(bundle.messages[0], 0).state.output,
-    `${TOMBSTONE_MARKER} grep ${PATTERN_QUERY} (2048 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${reloadPointerFor(PATTERN_QUERY)}`,
+    `${TOMBSTONE_MARKER} grep ${PATTERN_QUERY} (2048 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${digestSentenceFor(GREP_TOOL, PATTERN_QUERY, outputOfBytes(MIN_EVICTABLE_BYTES))}${reloadPointerFor(PATTERN_QUERY)}`,
   )
 })
 
@@ -1464,7 +1657,7 @@ test("read_evicted returns the full original output named by the tombstone after
 
   assert.equal(
     toolPartAt(bundle.messages[0], 0).state.output,
-    `${TOMBSTONE_MARKER} read /data/stashed.txt (3000 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${reloadPointerFor("/data/stashed.txt")}`,
+    `${TOMBSTONE_MARKER} read /data/stashed.txt (3000 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${digestSentenceFor(READ_TOOL, "/data/stashed.txt", outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))}${reloadPointerFor("/data/stashed.txt")}`,
   )
   assert.equal(await readEvicted(hooks, "/data/stashed.txt", SESSION_ID), original)
 })
@@ -2399,7 +2592,7 @@ test("transform truncates a multi kilobyte heredoc subject in the tombstone and 
   assert.ok(truncated.endsWith(ELLIPSIS_MARKER))
   assert.equal(
     toolPartAt(bundle.messages[0], 0).state.output,
-    `${TOMBSTONE_MARKER} bash ${truncated} (2048 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${reloadPointerFor(truncated)}`,
+    `${TOMBSTONE_MARKER} bash ${truncated} (2048 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${digestSentenceFor(BASH_TOOL, truncated, outputOfBytes(MIN_EVICTABLE_BYTES))}${reloadPointerFor(truncated)}`,
   )
   assert.equal(await readEvicted(hooks, truncated, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
 })
@@ -3098,8 +3291,9 @@ const evictionTombstoneFor = (
   bytes: number,
   messagesAgo: number,
   attachmentsDropped: boolean,
+  output: string,
 ): string =>
-  `${TOMBSTONE_MARKER} ${tool} ${subject} (${bytes} bytes${attachmentsDropped ? `, ${TOMBSTONE_ATTACHMENTS_NOTICE}` : ""}, ~${messagesAgo} messages ago)${TOMBSTONE_SUFFIX}`
+  `${TOMBSTONE_MARKER} ${tool} ${subject} (${bytes} bytes${attachmentsDropped ? `, ${TOMBSTONE_ATTACHMENTS_NOTICE}` : ""}, ~${messagesAgo} messages ago)${TOMBSTONE_SUFFIX}${digestSentenceFor(tool, subject, output)}`
 
 const attachmentSummaryFor = (mime: string, uriChars: number): string => `${mime} data URI ${uriChars} chars`
 
@@ -3123,7 +3317,7 @@ test("transform evicts an attachment bearing output writes the attachments dropp
 
   assert.equal(
     toolPartAt(bundle.messages[0], 0).state.output,
-    `${evictionTombstoneFor(READ_TOOL, ATTACHED_PATH, MIN_EVICTABLE_BYTES, ATTACHED_TOMBSTONE_MESSAGES_AGO, true)}${reloadPointerFor(ATTACHED_PATH)}`,
+    `${evictionTombstoneFor(READ_TOOL, ATTACHED_PATH, MIN_EVICTABLE_BYTES, ATTACHED_TOMBSTONE_MESSAGES_AGO, true, outputOfBytes(MIN_EVICTABLE_BYTES))}${reloadPointerFor(ATTACHED_PATH)}`,
   )
   assert.equal(attachmentsOf(bundle.messages[0], 0), undefined)
 })
@@ -3143,12 +3337,12 @@ test("transform keeps the no attachment sibling tombstone in the plain format wh
 
   assert.equal(
     toolPartAt(bundle.messages[0], 0).state.output,
-    `${evictionTombstoneFor(READ_TOOL, ATTACHED_PATH, MIN_EVICTABLE_BYTES, ATTACHED_TOMBSTONE_MESSAGES_AGO, true)}${reloadPointerFor(ATTACHED_PATH)}`,
+    `${evictionTombstoneFor(READ_TOOL, ATTACHED_PATH, MIN_EVICTABLE_BYTES, ATTACHED_TOMBSTONE_MESSAGES_AGO, true, outputOfBytes(MIN_EVICTABLE_BYTES))}${reloadPointerFor(ATTACHED_PATH)}`,
   )
   assert.equal(attachmentsOf(bundle.messages[0], 0), undefined)
   assert.equal(
     toolPartAt(bundle.messages[0], 1).state.output,
-    `${evictionTombstoneFor(READ_TOOL, SIBLING_PLAIN_PATH, MIN_EVICTABLE_BYTES, ATTACHED_TOMBSTONE_MESSAGES_AGO, false)}${reloadPointerFor(SIBLING_PLAIN_PATH)}`,
+    `${evictionTombstoneFor(READ_TOOL, SIBLING_PLAIN_PATH, MIN_EVICTABLE_BYTES, ATTACHED_TOMBSTONE_MESSAGES_AGO, false, outputOfBytes(MIN_EVICTABLE_BYTES))}${reloadPointerFor(SIBLING_PLAIN_PATH)}`,
   )
   assert.equal(Object.hasOwn(toolPartAt(bundle.messages[0], 1).state, ATTACHMENTS_STATE_KEY), false)
 })
