@@ -179,7 +179,15 @@ type ErrorToolPart = {
 
 type ReasoningPart = { type: "reasoning"; text: string; metadata?: Record<string, unknown> }
 
-type MessagePart = TextPart | CompletedToolPart | PendingToolPart | ErrorToolPart | ReasoningPart
+type AttachmentItem = Record<string, string>
+
+type AttachedToolPart = {
+  type: "tool"
+  tool: string
+  state: { status: "completed"; input: Record<string, unknown>; output: string; attachments: AttachmentItem[] }
+}
+
+type MessagePart = TextPart | CompletedToolPart | PendingToolPart | ErrorToolPart | ReasoningPart | AttachedToolPart
 
 type StatefulToolPart = { state: { input: unknown } }
 
@@ -2462,7 +2470,7 @@ test("metrics log appends one eventful jsonl line with expected fields and nothi
     assert.equal(line.watermarkTokens, tokensForChars(STANDARD_BUNDLE_CHARS) - OVER_BY_ONE_TOKENS)
     assert.equal(line.deficitTokens, OVER_BY_ONE_TOKENS)
     assert.deepEqual(line.evictedThisRun, [
-      { tool: READ_TOOL, subject: STATS_LOGGED_SUBJECT, bytes: MIN_EVICTABLE_BYTES, messagesAgo: 5 },
+      { tool: READ_TOOL, subject: STATS_LOGGED_SUBJECT, bytes: MIN_EVICTABLE_BYTES, attachmentBytes: 0, messagesAgo: 5 },
     ])
     assert.equal(line.dedupedThisRun, 0)
     assert.equal(line.postEvictionTouchesThisRun, 0)
@@ -2724,6 +2732,236 @@ test("metrics log counts expired reasoning bytes separately from evictions on a 
       ...STATS_ZEROED_COUNTERS,
       reasoningExpired: EXPIRED_REASONING_SINGLE_COUNT,
       reasoningBytesExpired: REASONING_COLD_TEXT.length,
+    })
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+const ATTACHMENTS_STATE_KEY = "attachments"
+const ATTACHMENT_ID_KEY = "id"
+const ATTACHMENT_MESSAGE_ID_KEY = "messageID"
+const ATTACHMENT_MIME_KEY = "mime"
+const ATTACHMENT_SESSION_ID_KEY = "sessionID"
+const ATTACHMENT_TYPE_KEY = "type"
+const ATTACHMENT_TYPE_FILE = "file"
+const ATTACHMENT_URL_KEY = "url"
+const ATTACHMENT_URL_PREFIX = "data"
+const ATTACHMENT_URL_ENCODING = "base64"
+const ATTACHMENT_URL_PAYLOAD_CHAR = "A"
+const ATTACHMENT_MIME_PNG = "image/png"
+const ATTACHMENT_MIME_JPEG = "image/jpeg"
+const ATTACHMENT_PAYLOAD_CHARS_PRIMARY = 12000
+const ATTACHMENT_PAYLOAD_CHARS_SECONDARY = 300
+const ATTACHMENT_CALL_ID_OLDER = "call_older"
+const ATTACHMENT_CALL_ID_NEWER = "call_newer"
+const ATTACHMENT_CALL_ID_PRIMARY = "call_primary"
+const ATTACHMENT_CALL_ID_DUAL = "call_dual"
+const ATTACHMENT_CALL_ID_MIXED = "call_mixed"
+const ATTACHMENT_CALL_ID_LOGGED = "call_logged"
+const ATTACHMENT_CALL_ID_COUNTED = "call_counted"
+const ATTACHMENT_MESSAGE_ID = "msg_lru_attachment"
+const ATTACHED_PATH = "/data/attached.txt"
+const TOMBSTONE_ATTACHMENTS_NOTICE = "attachments dropped"
+const STASH_ATTACHMENTS_LEAD = "attachments evicted with this output"
+const STASH_ATTACHMENT_DROPPED_TAIL = "payloads were dropped during eviction; re-run the tool to regenerate them"
+const ATTACHED_MIXED_TOOL_PART_COUNT = 2
+const ATTACHED_MIXED_BUNDLE_CHARS =
+  ATTACHED_MIXED_TOOL_PART_COUNT * MIN_EVICTABLE_BYTES + RECENT_WINDOW_FILLER_MESSAGES * FILLER_TEXT_CHARS
+const ATTACHED_TOMBSTONE_MESSAGES_AGO = 5
+const SIBLING_PLAIN_PATH = "/data/plain-sibling.txt"
+
+const attachmentUrlOf = (mime: string, payloadChars: number): string =>
+  `${ATTACHMENT_URL_PREFIX}:${mime};${ATTACHMENT_URL_ENCODING},${ATTACHMENT_URL_PAYLOAD_CHAR.repeat(payloadChars)}`
+
+const ATTACHED_URL_PRIMARY_CHARS = attachmentUrlOf(ATTACHMENT_MIME_PNG, ATTACHMENT_PAYLOAD_CHARS_PRIMARY).length
+const ATTACHED_URL_SECONDARY_CHARS = attachmentUrlOf(ATTACHMENT_MIME_JPEG, ATTACHMENT_PAYLOAD_CHARS_SECONDARY).length
+
+const attachmentItemOf = (mime: string, payloadChars: number, callID: string): AttachmentItem => ({
+  [ATTACHMENT_ID_KEY]: `att_${callID}`,
+  [ATTACHMENT_MESSAGE_ID_KEY]: ATTACHMENT_MESSAGE_ID,
+  [ATTACHMENT_MIME_KEY]: mime,
+  [ATTACHMENT_SESSION_ID_KEY]: SESSION_ID,
+  [ATTACHMENT_TYPE_KEY]: ATTACHMENT_TYPE_FILE,
+  [ATTACHMENT_URL_KEY]: attachmentUrlOf(mime, payloadChars),
+})
+
+const completedToolPartWithAttachments = (
+  tool: string,
+  input: Record<string, unknown>,
+  output: string,
+  attachments: AttachmentItem[],
+): AttachedToolPart => ({
+  type: "tool",
+  tool,
+  state: { status: "completed", input, output, [ATTACHMENTS_STATE_KEY]: attachments },
+})
+
+const attachmentsOf = (message: StrictMessage, partIndex: number): unknown =>
+  (message.parts[partIndex] as { state: { attachments?: unknown } }).state.attachments
+
+const evictionTombstoneFor = (
+  tool: string,
+  subject: string,
+  bytes: number,
+  messagesAgo: number,
+  attachmentsDropped: boolean,
+): string =>
+  `${TOMBSTONE_MARKER} ${tool} ${subject} (${bytes} bytes${attachmentsDropped ? `, ${TOMBSTONE_ATTACHMENTS_NOTICE}` : ""}, ~${messagesAgo} messages ago)${TOMBSTONE_SUFFIX}`
+
+const attachmentSummaryFor = (mime: string, uriChars: number): string => `${mime} data URI ${uriChars} chars`
+
+const attachmentManifestLineFor = (summaries: string[]): string =>
+  `${STASH_MARKER} ${STASH_ATTACHMENTS_LEAD}: ${summaries.join(HINT_SUBJECT_SEPARATOR)}; ${STASH_ATTACHMENT_DROPPED_TAIL}.`
+
+const attachedReadPart = (callID: string, payloadChars: number): AttachedToolPart =>
+  completedToolPartWithAttachments(
+    READ_TOOL,
+    { [PATH_INPUT_KEY]: ATTACHED_PATH },
+    outputOfBytes(MIN_EVICTABLE_BYTES),
+    [attachmentItemOf(ATTACHMENT_MIME_PNG, payloadChars, callID)],
+  )
+
+test("transform evicts an attachment bearing output writes the attachments dropped clause and removes the state attachments", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+  const bundle = buildBundle([[attachedReadPart(ATTACHMENT_CALL_ID_PRIMARY, ATTACHMENT_PAYLOAD_CHARS_PRIMARY)], ...fillerMessages()])
+  await runTransform(hooks, bundle)
+
+  assert.equal(
+    toolPartAt(bundle.messages[0], 0).state.output,
+    `${evictionTombstoneFor(READ_TOOL, ATTACHED_PATH, MIN_EVICTABLE_BYTES, ATTACHED_TOMBSTONE_MESSAGES_AGO, true)}${reloadPointerFor(ATTACHED_PATH)}`,
+  )
+  assert.equal(attachmentsOf(bundle.messages[0], 0), undefined)
+})
+
+test("transform keeps the no attachment sibling tombstone in the plain format while evicting an attached sibling", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(ATTACHED_MIXED_BUNDLE_CHARS, TWO_ENTRY_DEFICIT_TOKENS))
+
+  const bundle = buildBundle([
+    [
+      attachedReadPart(ATTACHMENT_CALL_ID_MIXED, ATTACHMENT_PAYLOAD_CHARS_PRIMARY),
+      pathToolPart(SIBLING_PLAIN_PATH, MIN_EVICTABLE_BYTES),
+    ],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(
+    toolPartAt(bundle.messages[0], 0).state.output,
+    `${evictionTombstoneFor(READ_TOOL, ATTACHED_PATH, MIN_EVICTABLE_BYTES, ATTACHED_TOMBSTONE_MESSAGES_AGO, true)}${reloadPointerFor(ATTACHED_PATH)}`,
+  )
+  assert.equal(attachmentsOf(bundle.messages[0], 0), undefined)
+  assert.equal(
+    toolPartAt(bundle.messages[0], 1).state.output,
+    `${evictionTombstoneFor(READ_TOOL, SIBLING_PLAIN_PATH, MIN_EVICTABLE_BYTES, ATTACHED_TOMBSTONE_MESSAGES_AGO, false)}${reloadPointerFor(SIBLING_PLAIN_PATH)}`,
+  )
+  assert.equal(Object.hasOwn(toolPartAt(bundle.messages[0], 1).state, ATTACHMENTS_STATE_KEY), false)
+})
+
+test("read_evicted returns the original output plus a manifest naming the dropped attachment payload after an attachment bearing eviction", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+  const bundle = buildBundle([[attachedReadPart(ATTACHMENT_CALL_ID_PRIMARY, ATTACHMENT_PAYLOAD_CHARS_PRIMARY)], ...fillerMessages()])
+  await runTransform(hooks, bundle)
+
+  assert.equal(
+    await readEvicted(hooks, ATTACHED_PATH, SESSION_ID),
+    `${outputOfBytes(MIN_EVICTABLE_BYTES)}\n${attachmentManifestLineFor([attachmentSummaryFor(ATTACHMENT_MIME_PNG, ATTACHED_URL_PRIMARY_CHARS)])}`,
+  )
+})
+
+test("read_evicted lists every attachment in the manifest when an eviction drops multiple attachments", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+  const bundle = buildBundle([
+    [
+      completedToolPartWithAttachments(READ_TOOL, { [PATH_INPUT_KEY]: ATTACHED_PATH }, outputOfBytes(MIN_EVICTABLE_BYTES), [
+        attachmentItemOf(ATTACHMENT_MIME_PNG, ATTACHMENT_PAYLOAD_CHARS_PRIMARY, ATTACHMENT_CALL_ID_DUAL),
+        attachmentItemOf(ATTACHMENT_MIME_JPEG, ATTACHMENT_PAYLOAD_CHARS_SECONDARY, ATTACHMENT_CALL_ID_DUAL),
+      ]),
+    ],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(
+    await readEvicted(hooks, ATTACHED_PATH, SESSION_ID),
+    `${outputOfBytes(MIN_EVICTABLE_BYTES)}\n${attachmentManifestLineFor([
+      attachmentSummaryFor(ATTACHMENT_MIME_PNG, ATTACHED_URL_PRIMARY_CHARS),
+      attachmentSummaryFor(ATTACHMENT_MIME_JPEG, ATTACHED_URL_SECONDARY_CHARS),
+    ])}`,
+  )
+})
+
+test("transform strips attachments from a dedup tombstoned older call while the retained copy keeps its attachments", async () => {
+  const hooks = await loadPluginHooks()
+
+  const olderPart = completedToolPartWithAttachments(
+    READ_TOOL,
+    { [PATH_INPUT_KEY]: DEDUP_PATH },
+    outputOfBytes(THREE_ENTRY_OUTPUT_BYTES),
+    [attachmentItemOf(ATTACHMENT_MIME_PNG, ATTACHMENT_PAYLOAD_CHARS_PRIMARY, ATTACHMENT_CALL_ID_OLDER)],
+  )
+  const newerPart = completedToolPartWithAttachments(
+    READ_TOOL,
+    { [PATH_INPUT_KEY]: DEDUP_PATH },
+    outputOfBytes(THREE_ENTRY_OUTPUT_BYTES),
+    [attachmentItemOf(ATTACHMENT_MIME_JPEG, ATTACHMENT_PAYLOAD_CHARS_SECONDARY, ATTACHMENT_CALL_ID_NEWER)],
+  )
+  const bundle = buildBundle([[olderPart], ...fillerMessages(2), [newerPart], ...fillerMessages(2)])
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, dedupTombstoneFor(READ_TOOL, 3))
+  assert.equal(attachmentsOf(bundle.messages[0], 0), undefined)
+  assert.equal(toolPartAt(bundle.messages[3], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
+  assert.deepEqual(attachmentsOf(bundle.messages[3], 0), [
+    attachmentItemOf(ATTACHMENT_MIME_JPEG, ATTACHMENT_PAYLOAD_CHARS_SECONDARY, ATTACHMENT_CALL_ID_NEWER),
+  ])
+})
+
+test("lru_stats counts attachment payload characters in bytesReclaimed for an attachment bearing eviction", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+  const bundle = buildBundle([[attachedReadPart(ATTACHMENT_CALL_ID_COUNTED, ATTACHMENT_PAYLOAD_CHARS_PRIMARY)], ...fillerMessages()])
+  await runTransform(hooks, bundle)
+
+  assert.deepEqual(countersOf(await lruStats(hooks, SESSION_ID)), {
+    ...STATS_ZEROED_COUNTERS,
+    evictions: 1,
+    bytesReclaimed: MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS,
+  })
+})
+
+test("metrics log records attachmentBytes on each evicted entry and adds the payload to the reclaimed totals", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const hooks = await loadPluginHooksWithMetricsLog(metricsLogPathIn(metricsDir))
+    await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+    const bundle = buildBundle([[attachedReadPart(ATTACHMENT_CALL_ID_LOGGED, ATTACHMENT_PAYLOAD_CHARS_PRIMARY)], ...fillerMessages()])
+    await runTransform(hooks, bundle)
+
+    const lines = metricsLinesIn(metricsLogPathIn(metricsDir))
+    assert.equal(lines.length, STATS_LOG_FILE_LINES)
+    assert.deepEqual(lines[0].evictedThisRun, [
+      {
+        tool: READ_TOOL,
+        subject: ATTACHED_PATH,
+        bytes: MIN_EVICTABLE_BYTES,
+        attachmentBytes: ATTACHED_URL_PRIMARY_CHARS,
+        messagesAgo: ATTACHED_TOMBSTONE_MESSAGES_AGO,
+      },
+    ])
+    assert.deepEqual(lines[0].totals, {
+      ...STATS_ZEROED_COUNTERS,
+      evictions: 1,
+      bytesReclaimed: MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS,
     })
   } finally {
     cleanupMetricsDir(metricsDir)
