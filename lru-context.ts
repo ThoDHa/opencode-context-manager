@@ -16,7 +16,14 @@ const DEFAULT_RECENT_WINDOW_MESSAGES = 4
 const DEFAULT_MIN_EVICTABLE_BYTES = 2048
 const DEFAULT_HINT_SUBJECTS = 10
 const DEFAULT_PROTECTED_TOOLS = ["task", "todowrite"]
+const DEFAULT_PROTECTED_PATTERNS: string[] = []
 const PATH_INPUT_KEYS = ["filePath", "path", "file", "directory"]
+const GLOB_DOUBLESTAR_TRAILING_SLASH = "**/"
+const GLOB_DOUBLESTAR = "**"
+const GLOB_SINGLE_STAR = "*"
+const GLOB_QUESTION_MARK = "?"
+const REGEX_SPECIAL_CHARACTERS = /[.*+?^${}()|[\]\\]/g
+const PATH_SEGMENT_SEPARATOR = "/"
 const BASH_TOOL_NAME = "bash"
 const COMMAND_INPUT_KEY = "command"
 const OFFSET_INPUT_KEY = "offset"
@@ -87,124 +94,17 @@ type LruContextOptions = {
   modelContextTokens?: Record<string, number>
   hintSubjects?: number
   protectedTools?: string[]
+  protectedPatterns?: string[]
   metricsLog?: boolean
   metricsPath?: string
 }
 
-type ResolvedOptions = Omit<Required<LruContextOptions>, "defaultContextTokens" | "modelContextTokens"> & {
+type CompiledGlob = { regexp: RegExp; matchesSegments: boolean }
+
+type ResolvedOptions = Omit<Required<LruContextOptions>, "defaultContextTokens" | "modelContextTokens" | "protectedPatterns"> & {
   defaultContextTokens?: number
   modelContextTokens: Record<string, number>
-}
-
-type SubjectRange = { start: number; end: number }
-
-type Subject = {
-  path: string
-  range?: SubjectRange
-}
-
-type ToolAppearance = {
-  msgIndex: number
-  tool: string
-  subjects: Subject[]
-}
-
-type EvictableEntry = {
-  stateRef: { output: string; attachments?: unknown }
-  tool: string
-  msgIndex: number
-  partIndex: number
-  lastTouch: number
-  bytes: number
-  attachmentBytes: number
-  subjects: Subject[]
-}
-
-type HotSubject = { subject: Subject; lastTouch: number }
-
-type EvictionResult = {
-  hotSubjects: HotSubject[]
-  appearances: ToolAppearance[]
-  estimatedTokens: number
-  watermarkTokens: number | null
-  deficitTokens: number | null
-  evicted: EvictedEntryInfo[]
-  stashDropped: number
-}
-
-type EvictedEntryInfo = {
-  tool: string
-  subject: string
-  subjects: Subject[]
-  bytes: number
-  attachmentBytes: number
-  messagesAgo: number
-}
-
-type LastRunMetrics = { estimatedTokens: number; watermarkTokens: number | null; deficitTokens: number | null }
-
-type ReasoningExpiry = { parts: number; bytes: number }
-
-type ContextTokensSource =
-  | typeof CONTEXT_TOKENS_SOURCE_OVERRIDE
-  | typeof CONTEXT_TOKENS_SOURCE_MODEL
-  | typeof CONTEXT_TOKENS_SOURCE_DEFAULT
-  | typeof CONTEXT_TOKENS_SOURCE_UNKNOWN
-
-type SessionBudgetEntry = { tokens: number; source: ContextTokensSource }
-
-type SessionBudget = { tokens: number | null; source: ContextTokensSource }
-
-type ChatParamsModel = { providerID?: string; modelID?: string; limit?: { context?: number } }
-
-type SessionMetrics = {
-  evictions: number
-  bytesReclaimed: number
-  stashHits: number
-  stashMisses: number
-  stashDropped: number
-  deduped: number
-  reasoningExpired: number
-  reasoningBytesExpired: number
-  postEvictionTouches: number
-  evictedSubjects: Subject[]
-  touchScanThrough: number
-  stashReadsLoggedThrough: number
-  lastRun?: LastRunMetrics
-  logWriteError?: string
-}
-
-type MetricsStore = Map<string, SessionMetrics>
-
-type StatsSource = {
-  options: ResolvedOptions
-  limits: Map<string, SessionBudgetEntry>
-  stashes: StashStore
-  metrics: MetricsStore
-}
-
-type RetainedDuplicate = { msgIndex: number; tool: string; supersedes: boolean }
-
-type DedupTarget = { stateRef: { output: string; attachments?: unknown }; tool: string; input: Record<string, unknown> }
-
-type MessageBundle = {
-  info: { sessionID?: string }
-  parts: Array<Record<string, unknown>>
-}
-
-type StashEntry = {
-  output: string
-  tool: string
-  subject: string
-  msgIndex: number
-  partIndex: number
-  attachments?: unknown[]
-}
-
-type SessionStash = Map<string, StashEntry>
-
-type StashStore = Map<string, SessionStash>
-
+  protectedPatterns: CompiledGlob[]
 const modelContextTokensOf = (raw: Record<string, number> | undefined): Record<string, number> => {
   if (typeof raw !== "object" || raw === null) return {}
   const resolved: Record<string, number> = {}
@@ -214,28 +114,81 @@ const modelContextTokensOf = (raw: Record<string, number> | undefined): Record<s
   return resolved
 }
 
-const resolveOptions = (raw: LruContextOptions = {}): ResolvedOptions => ({
-  watermark: typeof raw.watermark === "number" && raw.watermark > 0 && raw.watermark < 1 ? raw.watermark : DEFAULT_WATERMARK_RATIO,
-  recentWindow: typeof raw.recentWindow === "number" && raw.recentWindow >= 0 ? Math.floor(raw.recentWindow) : DEFAULT_RECENT_WINDOW_MESSAGES,
-  minEvictableBytes: typeof raw.minEvictableBytes === "number" && raw.minEvictableBytes >= 0 ? raw.minEvictableBytes : DEFAULT_MIN_EVICTABLE_BYTES,
-  defaultContextTokens:
-    typeof raw.defaultContextTokens === "number" && Number.isFinite(raw.defaultContextTokens) && raw.defaultContextTokens > 0
-      ? raw.defaultContextTokens
-      : undefined,
-  modelContextTokens: modelContextTokensOf(raw.modelContextTokens),
-  hintSubjects:
-    typeof raw.hintSubjects === "number" && Number.isInteger(raw.hintSubjects) && raw.hintSubjects >= 0
-      ? raw.hintSubjects
-      : DEFAULT_HINT_SUBJECTS,
-  protectedTools:
-    Array.isArray(raw.protectedTools) && raw.protectedTools.every((tool) => typeof tool === "string" && tool.length > 0)
-      ? raw.protectedTools
-      : DEFAULT_PROTECTED_TOOLS,
-  metricsLog: typeof raw.metricsLog === "boolean" ? raw.metricsLog : DEFAULT_METRICS_LOG_ENABLED,
-  metricsPath: typeof raw.metricsPath === "string" && raw.metricsPath.length > 0 ? raw.metricsPath : DEFAULT_METRICS_PATH,
-})
+const resolveOptions = (raw: LruContextOptions = {}): ResolvedOptions => {
+  const protectedPatterns =
+    Array.isArray(raw.protectedPatterns) && raw.protectedPatterns.every((pattern) => typeof pattern === "string" && pattern.length > 0)
+      ? raw.protectedPatterns
+      : DEFAULT_PROTECTED_PATTERNS
+  return {
+    watermark: typeof raw.watermark === "number" && raw.watermark > 0 && raw.watermark < 1 ? raw.watermark : DEFAULT_WATERMARK_RATIO,
+    recentWindow: typeof raw.recentWindow === "number" && raw.recentWindow >= 0 ? Math.floor(raw.recentWindow) : DEFAULT_RECENT_WINDOW_MESSAGES,
+    minEvictableBytes: typeof raw.minEvictableBytes === "number" && raw.minEvictableBytes >= 0 ? raw.minEvictableBytes : DEFAULT_MIN_EVICTABLE_BYTES,
+    defaultContextTokens:
+      typeof raw.defaultContextTokens === "number" && Number.isFinite(raw.defaultContextTokens) && raw.defaultContextTokens > 0
+        ? raw.defaultContextTokens
+        : undefined,
+    modelContextTokens: modelContextTokensOf(raw.modelContextTokens),
+    hintSubjects:
+      typeof raw.hintSubjects === "number" && Number.isInteger(raw.hintSubjects) && raw.hintSubjects >= 0
+        ? raw.hintSubjects
+        : DEFAULT_HINT_SUBJECTS,
+    protectedTools:
+      Array.isArray(raw.protectedTools) && raw.protectedTools.every((tool) => typeof tool === "string" && tool.length > 0)
+        ? raw.protectedTools
+        : DEFAULT_PROTECTED_TOOLS,
+    protectedPatterns: protectedPatterns.flatMap((pattern) => {
+      const compiled = compiledGlobOf(pattern)
+      return compiled === undefined ? [] : [compiled]
+    }),
+    metricsLog: typeof raw.metricsLog === "boolean" ? raw.metricsLog : DEFAULT_METRICS_LOG_ENABLED,
+    metricsPath: typeof raw.metricsPath === "string" && raw.metricsPath.length > 0 ? raw.metricsPath : DEFAULT_METRICS_PATH,
+  }
+}
 
 const isProtectedTool = (tool: string, options: ResolvedOptions): boolean => options.protectedTools.includes(tool)
+
+const globSourceOf = (pattern: string): string => {
+  let source = ""
+  let index = 0
+  while (index < pattern.length) {
+    if (pattern.startsWith(GLOB_DOUBLESTAR_TRAILING_SLASH, index)) {
+      source += "(?:.*/)?"
+      index += GLOB_DOUBLESTAR_TRAILING_SLASH.length
+    } else if (pattern.startsWith(GLOB_DOUBLESTAR, index)) {
+      source += ".*"
+      index += GLOB_DOUBLESTAR.length
+    } else if (pattern.startsWith(GLOB_SINGLE_STAR, index)) {
+      source += "[^/]*"
+      index += GLOB_SINGLE_STAR.length
+    } else if (pattern.startsWith(GLOB_QUESTION_MARK, index)) {
+      source += "[^/]"
+      index += GLOB_QUESTION_MARK.length
+    } else {
+      source += pattern.charAt(index).replace(REGEX_SPECIAL_CHARACTERS, "\\$&")
+      index += 1
+    }
+  }
+  return source
+}
+
+const compiledGlobOf = (pattern: string): CompiledGlob | undefined => {
+  try {
+    return { regexp: new RegExp(`^${globSourceOf(pattern)}$`), matchesSegments: !pattern.includes(PATH_SEGMENT_SEPARATOR) }
+  } catch {
+    // An uncompilable pattern protects nothing instead of breaking option
+    // resolution: invalid patterns keep their skip-silently semantics.
+    return undefined
+  }
+}
+
+const globMatches = (compiled: CompiledGlob, value: string): boolean => {
+  if (compiled.regexp.test(value)) return true
+  if (compiled.matchesSegments === false) return false
+  return value.split(PATH_SEGMENT_SEPARATOR).some((segment) => segment.length > 0 && compiled.regexp.test(segment))
+}
+
+const isPatternProtected = (subjects: Subject[], options: ResolvedOptions): boolean =>
+  options.protectedPatterns.some((compiled) => subjects.some((subject) => globMatches(compiled, subject.path)))
 
 const hotFromIndexOf = (messages: MessageBundle[], options: ResolvedOptions): number =>
   messages.length - options.recentWindow
@@ -794,6 +747,7 @@ const evictLeastRecentlyUsed = (
   const evictable = entries
     .filter((entry) => !isProtectedTool(entry.tool, options))
     .filter((entry) => entry.lastTouch < hotFromIndex)
+    .filter((entry) => !isPatternProtected(entry.subjects, options))
     .sort((a, b) => a.lastTouch - b.lastTouch || b.bytes - a.bytes)
 
   const estimatedTokens = estimateTokens(messages)
