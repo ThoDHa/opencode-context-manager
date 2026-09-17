@@ -187,6 +187,14 @@ type EvictedEntryInfo = {
 
 type LastRunMetrics = { estimatedTokens: number; watermarkTokens: number | null; deficitTokens: number | null }
 
+type RunOutcome = {
+  eviction: EvictionResult
+  deduped: number
+  touches: number
+  reasoningExpired: ReasoningExpiry
+  fenceEvicted: FenceEviction
+}
+
 type ReasoningExpiry = { parts: number; bytes: number }
 
 type ContextTokensSource =
@@ -531,7 +539,7 @@ const estimateTokens = (messages: MessageBundle[]): number => {
   let chars = 0
   for (const message of messages) {
     for (const part of message.parts) {
-      if (part["type"] === "text" && typeof part["text"] === "string") {
+      if (part["type"] === TEXT_PART_TYPE && typeof part["text"] === "string") {
         chars += part["text"].length
       } else {
         const outputRef = completedOutputOf(part)
@@ -580,7 +588,7 @@ const stripLegacyHintParts = (messages: MessageBundle[]): void => {
     for (let partIndex = message.parts.length - 1; partIndex >= 0; partIndex -= 1) {
       const part = message.parts[partIndex]
       const text = part["text"]
-      if (part["type"] === "text" && typeof text === "string" && text.startsWith(HINT_LINE_PREFIX)) {
+      if (part["type"] === TEXT_PART_TYPE && typeof text === "string" && text.startsWith(HINT_LINE_PREFIX)) {
         message.parts.splice(partIndex, 1)
       }
     }
@@ -680,13 +688,14 @@ const evictLargeUserFences = (messages: MessageBundle[], options: ResolvedOption
       const text = part["text"]
       if (typeof text !== "string") continue
       const lines = text.split("\n")
-      const lineStarts = lineStartsOf(text)
+      let lineStarts: number[] | undefined
       const plans: FenceReplacement[] = []
       for (const span of fenceSpansIn(lines)) {
         const contentLines = span.endLine - span.startLine - 1
         if (contentLines <= minBlockLines) continue
         const firstLine = fenceFirstNonEmptyLineOf(lines, span.startLine, span.endLine)
         if (firstLine === undefined) continue
+        if (lineStarts === undefined) lineStarts = lineStartsOf(text)
         const startOffset = lineStarts[span.startLine]
         const endOffset = span.endLine + 1 < lineStarts.length ? lineStarts[span.endLine + 1] : text.length
         const blockText = text.slice(startOffset, endOffset)
@@ -898,7 +907,8 @@ const countPostEvictionTouches = (metrics: SessionMetrics, appearances: ToolAppe
   return touches
 }
 
-const recordRunOutcome = (metrics: SessionMetrics, eviction: EvictionResult, dedupedThisRun: number, touchesThisRun: number, reasoningExpiredThisRun: ReasoningExpiry, fenceEvictedThisRun: FenceEviction): void => {
+const recordRunOutcome = (metrics: SessionMetrics, run: RunOutcome): void => {
+  const { eviction, deduped: dedupedThisRun, touches: touchesThisRun, reasoningExpired: reasoningExpiredThisRun, fenceEvicted: fenceEvictedThisRun } = run
   metrics.lastRun = {
     estimatedTokens: eviction.estimatedTokens,
     watermarkTokens: eviction.watermarkTokens,
@@ -925,12 +935,9 @@ const recordMetricsLine = async (
   metrics: SessionMetrics,
   sessionKey: string,
   budget: SessionBudget,
-  eviction: EvictionResult,
-  dedupedThisRun: number,
-  touchesThisRun: number,
-  reasoningExpiredThisRun: ReasoningExpiry,
-  fenceEvictedThisRun: FenceEviction,
+  run: RunOutcome,
 ): Promise<void> => {
+  const { eviction, deduped: dedupedThisRun, touches: touchesThisRun, reasoningExpired: reasoningExpiredThisRun, fenceEvicted: fenceEvictedThisRun } = run
   const stashReadsSinceLastLine = metrics.stashHits + metrics.stashMisses - metrics.stashReadsLoggedThrough
   const isEventful =
     eviction.evicted.length > 0 || dedupedThisRun > 0 || touchesThisRun > 0 || reasoningExpiredThisRun.parts > 0 || fenceEvictedThisRun.blocks > 0 || stashReadsSinceLastLine > 0
@@ -991,7 +998,7 @@ const captureBudgetOf = (model: ChatParamsModel | undefined, overrides: Record<s
   const override = modelKey === undefined ? undefined : overrides[modelKey]
   if (override !== undefined) return { tokens: override, source: CONTEXT_TOKENS_SOURCE_OVERRIDE }
   const reported = model?.limit?.context
-  if (typeof reported === "number" && reported > 0) return { tokens: reported, source: CONTEXT_TOKENS_SOURCE_MODEL }
+  if (typeof reported === "number" && Number.isFinite(reported) && reported > 0) return { tokens: reported, source: CONTEXT_TOKENS_SOURCE_MODEL }
   return undefined
 }
 
@@ -1253,9 +1260,16 @@ export default (async (_input, rawOptions) => {
           ? measureWithoutEvicting(messages, options)
           : evictLeastRecentlyUsed(messages, options, budget.tokens * options.watermark, sessionStash)
       const touchesThisRun = countPostEvictionTouches(sessionMetrics, eviction.appearances)
-      recordRunOutcome(sessionMetrics, eviction, dedupedThisRun, touchesThisRun, reasoningExpiredThisRun, fenceEvictedThisRun)
+      const runOutcome: RunOutcome = {
+        eviction,
+        deduped: dedupedThisRun,
+        touches: touchesThisRun,
+        reasoningExpired: reasoningExpiredThisRun,
+        fenceEvicted: fenceEvictedThisRun,
+      }
+      recordRunOutcome(sessionMetrics, runOutcome)
       storeHint(hintBySession, sessionKey, eviction.hotSubjects, options.hintSubjects)
-      await recordMetricsLine(options, sessionMetrics, sessionKey, budget, eviction, dedupedThisRun, touchesThisRun, reasoningExpiredThisRun, fenceEvictedThisRun)
+      await recordMetricsLine(options, sessionMetrics, sessionKey, budget, runOutcome)
     },
     "experimental.chat.system.transform": async (input: { sessionID?: string }, output: { system: string[] }) => {
       deliverHint(hintBySession, input, output)
