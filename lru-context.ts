@@ -10,6 +10,14 @@ const HINT_LINE_PREFIX = `${HINT_MARKER} ${HINT_LABEL}`
 const SUBJECT_SEPARATOR = ", "
 const MAX_RENDERED_SUBJECT_CHARS = 160
 const ELLIPSIS_MARKER = "…"
+const READ_TOOL_NAME = "read"
+const MAX_DIGEST_CHARS = 200
+const DIGEST_PIECE_SEPARATOR = " | "
+const DIGEST_FIRST_PREVIEW_LABEL = "first"
+const DIGEST_LAST_PREVIEW_LABEL = "last"
+const DIGEST_HEAD_PREVIEW_LABEL = "head"
+const DIGEST_TAIL_PREVIEW_LABEL = "tail"
+const NEWLINE_SPLIT_PATTERN = /\r\n|\r|\n/
 const CHARS_PER_TOKEN = 4
 const DEFAULT_WATERMARK_RATIO = 0.5
 const DEFAULT_RECENT_WINDOW_MESSAGES = 4
@@ -48,6 +56,8 @@ const RELOAD_ARG_SCHEMA: Record<string, string> = {
   description: RELOAD_ARG_DESCRIPTION,
 }
 const RELOAD_POINTER_LEAD = " Evicted output stashed; reload it with"
+const DIGEST_POINTER_LEAD = " Output digest: "
+const DIGEST_POINTER_TAIL = "."
 const STASH_MARKER = "[lru-stash]"
 const STASH_OLDER_LEAD = "older matches for subject"
 const STASH_MESSAGE_LABEL = "at message"
@@ -493,8 +503,30 @@ const stripLegacyHintParts = (messages: MessageBundle[]): void => {
   }
 }
 
-const buildTombstone = (tool: string, subject: string, bytes: number, messagesAgo: number, attachmentsDropped: boolean): string =>
-  `${EVICTION_MARKER} ${tool} ${subject} (${bytes} bytes${attachmentsDropped ? `, ${TOMBSTONE_ATTACHMENTS_NOTICE}` : ""}, ~${messagesAgo} messages ago) was evicted to reclaim context; re-run the tool to reload its output.`
+const boundedDigestOf = (text: string): string =>
+  text.length > MAX_DIGEST_CHARS ? `${text.slice(0, MAX_DIGEST_CHARS - ELLIPSIS_MARKER.length)}${ELLIPSIS_MARKER}` : text
+
+const digestPreviewOf = (label: string, line: string): string => `${label} "${line}"`
+
+const buildOutputDigest = (tool: string, subject: string, output: string): string => {
+  const lines = output.split(NEWLINE_SPLIT_PATTERN)
+  const headLine = lines[0]
+  const tailLine = lines[lines.length - 1]
+  if (tool === READ_TOOL_NAME) {
+    return boundedDigestOf(
+      [subject, digestPreviewOf(DIGEST_FIRST_PREVIEW_LABEL, headLine), digestPreviewOf(DIGEST_LAST_PREVIEW_LABEL, tailLine)].join(DIGEST_PIECE_SEPARATOR),
+    )
+  }
+  if (tool === BASH_TOOL_NAME) {
+    return boundedDigestOf(
+      [subject, digestPreviewOf(DIGEST_HEAD_PREVIEW_LABEL, headLine), digestPreviewOf(DIGEST_TAIL_PREVIEW_LABEL, tailLine)].join(DIGEST_PIECE_SEPARATOR),
+    )
+  }
+  return boundedDigestOf(lines.join(" "))
+}
+
+const buildTombstone = (tool: string, subject: string, bytes: number, messagesAgo: number, attachmentsDropped: boolean, digest: string): string =>
+  `${EVICTION_MARKER} ${tool} ${subject} (${bytes} bytes${attachmentsDropped ? `, ${TOMBSTONE_ATTACHMENTS_NOTICE}` : ""}, ~${messagesAgo} messages ago) was evicted to reclaim context; re-run the tool to reload its output.${DIGEST_POINTER_LEAD}${digest}${DIGEST_POINTER_TAIL}`
 
 const buildReloadPointer = (subject: string): string =>
   `${RELOAD_POINTER_LEAD} ${RELOAD_TOOL_NAME} (subject "${subject}").`
@@ -872,7 +904,8 @@ const evictLeastRecentlyUsed = (
       const subject = entry.subjects.length > 0 ? renderSubject(entry.subjects[0]) : UNKNOWN_TARGET_LABEL
       const messagesAgo = messages.length - entry.lastTouch
       const droppedAttachments = nonEmptyAttachmentsOf(entry.stateRef)
-      const tombstone = buildTombstone(entry.tool, subject, entry.bytes, messagesAgo, droppedAttachments !== undefined)
+      const digest = buildOutputDigest(entry.tool, subject, entry.stateRef.output)
+      const tombstone = buildTombstone(entry.tool, subject, entry.bytes, messagesAgo, droppedAttachments !== undefined, digest)
       const stashed: StashEntry = {
         output: entry.stateRef.output,
         tool: entry.tool,
