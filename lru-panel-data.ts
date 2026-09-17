@@ -15,9 +15,11 @@ const KILOBYTE_DECIMALS = 1
 const KILOTOKEN_DECIMALS = 1
 const MEGATOKEN_DECIMALS = 2
 
+const BUDGET_SOURCE_OVERRIDE = "override"
 const BUDGET_SOURCE_MODEL = "model"
 const BUDGET_SOURCE_DEFAULT = "default"
 const BUDGET_SOURCE_UNKNOWN = "unknown"
+const BUDGET_SOURCE_LABEL_OVERRIDE = "per-model override"
 const BUDGET_SOURCE_LABEL_MODEL = "per-model limit"
 const BUDGET_SOURCE_LABEL_DEFAULT = "plugin default"
 const BUDGET_SOURCE_LABEL_UNKNOWN = "inactive (no budget)"
@@ -36,6 +38,9 @@ export type PanelTotals = {
   stashMisses: number
   stashDropped: number
   deduped: number
+  reasoningExpired: number
+  reasoningBytesExpired: number
+  fenceEvicted: number
   postEvictionTouches: number
 }
 
@@ -125,6 +130,9 @@ const parseTotals = (value: unknown): PanelTotals | undefined => {
   if (!isFiniteNumber(value["stashMisses"])) return undefined
   if (!isFiniteNumber(value["stashDropped"])) return undefined
   if (!isFiniteNumber(value["deduped"])) return undefined
+  if (!isFiniteNumber(value["reasoningExpired"])) return undefined
+  if (!isFiniteNumber(value["reasoningBytesExpired"])) return undefined
+  if (!isFiniteNumber(value["fenceEvicted"])) return undefined
   if (!isFiniteNumber(value["postEvictionTouches"])) return undefined
   return {
     evictions: value["evictions"],
@@ -133,6 +141,9 @@ const parseTotals = (value: unknown): PanelTotals | undefined => {
     stashMisses: value["stashMisses"],
     stashDropped: value["stashDropped"],
     deduped: value["deduped"],
+    reasoningExpired: value["reasoningExpired"],
+    reasoningBytesExpired: value["reasoningBytesExpired"],
+    fenceEvicted: value["fenceEvicted"],
     postEvictionTouches: value["postEvictionTouches"],
   }
 }
@@ -265,6 +276,7 @@ export const loadPanelData = async (options: LoadPanelDataOptions = {}): Promise
 }
 
 export const budgetSourceLabel = (source: string): string => {
+  if (source === BUDGET_SOURCE_OVERRIDE) return BUDGET_SOURCE_LABEL_OVERRIDE
   if (source === BUDGET_SOURCE_MODEL) return BUDGET_SOURCE_LABEL_MODEL
   if (source === BUDGET_SOURCE_DEFAULT) return BUDGET_SOURCE_LABEL_DEFAULT
   return BUDGET_SOURCE_LABEL_UNKNOWN
@@ -302,9 +314,8 @@ const budgetText = (current: SessionPanel): string => {
 
 const lastRunText = (current: SessionPanel): string => {
   const estimate = `~${formatTokenCount(current.lastRun.estimatedTokens)} estimated`
-  if (current.lastRun.watermarkTokens === null) return `last run: ${estimate}, no watermark (unknown budget)`
+  if (current.lastRun.watermarkTokens === null || current.lastRun.deficitTokens === null) return `last run: ${estimate}, no watermark`
   const watermark = `~${formatTokenCount(current.lastRun.watermarkTokens)} watermark`
-  if (current.lastRun.deficitTokens === null) return `last run: ${estimate} vs ${watermark}`
   if (current.lastRun.deficitTokens > 0) {
     return `last run: ${estimate} vs ${watermark} (over by ~${formatTokenCount(current.lastRun.deficitTokens)})`
   }
@@ -312,7 +323,7 @@ const lastRunText = (current: SessionPanel): string => {
 }
 
 const countersText = (current: SessionPanel): string =>
-  `evictions: ${current.totals.evictions} (${formatBytes(current.totals.bytesReclaimed)} reclaimed), dedup: ${current.totals.deduped}, touches: ${current.totals.postEvictionTouches}`
+  `evictions: ${current.totals.evictions} (${formatBytes(current.totals.bytesReclaimed)} reclaimed), fences: ${current.totals.fenceEvicted}, dedup: ${current.totals.deduped}, reasoning: ${current.totals.reasoningExpired} (${formatBytes(current.totals.reasoningBytesExpired)}), touches: ${current.totals.postEvictionTouches}`
 
 const stashText = (current: SessionPanel): string =>
   `stash reads: ${current.stashReads} (${current.totals.stashHits} hits / ${current.totals.stashMisses} misses), dropped: ${current.totals.stashDropped}`
