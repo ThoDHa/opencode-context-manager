@@ -66,9 +66,11 @@ const STATS_TOOL_NAME = "lru_stats"
 const STATS_TOOL_DESCRIPTION =
   "Return live metrics for the LRU context manager in this session: eviction counters, expired reasoning counts, post-eviction touches, stash occupancy, the effective context budget, and the most recent transform run's token estimate."
 const JSON_INDENT_SPACES = 2
+const CONTEXT_TOKENS_SOURCE_OVERRIDE = "override"
 const CONTEXT_TOKENS_SOURCE_MODEL = "model"
 const CONTEXT_TOKENS_SOURCE_DEFAULT = "default"
 const CONTEXT_TOKENS_SOURCE_UNKNOWN = "unknown"
+const MODEL_KEY_SEPARATOR = "/"
 const ATTACHMENTS_STATE_KEY = "attachments"
 const ATTACHMENT_URL_KEY = "url"
 const ATTACHMENT_MIME_KEY = "mime"
@@ -82,13 +84,17 @@ type LruContextOptions = {
   recentWindow?: number
   minEvictableBytes?: number
   defaultContextTokens?: number
+  modelContextTokens?: Record<string, number>
   hintSubjects?: number
   protectedTools?: string[]
   metricsLog?: boolean
   metricsPath?: string
 }
 
-type ResolvedOptions = Omit<Required<LruContextOptions>, "defaultContextTokens"> & { defaultContextTokens?: number }
+type ResolvedOptions = Omit<Required<LruContextOptions>, "defaultContextTokens" | "modelContextTokens"> & {
+  defaultContextTokens?: number
+  modelContextTokens: Record<string, number>
+}
 
 type SubjectRange = { start: number; end: number }
 
@@ -140,11 +146,16 @@ type LastRunMetrics = { estimatedTokens: number; watermarkTokens: number | null;
 type ReasoningExpiry = { parts: number; bytes: number }
 
 type ContextTokensSource =
+  | typeof CONTEXT_TOKENS_SOURCE_OVERRIDE
   | typeof CONTEXT_TOKENS_SOURCE_MODEL
   | typeof CONTEXT_TOKENS_SOURCE_DEFAULT
   | typeof CONTEXT_TOKENS_SOURCE_UNKNOWN
 
+type SessionBudgetEntry = { tokens: number; source: ContextTokensSource }
+
 type SessionBudget = { tokens: number | null; source: ContextTokensSource }
+
+type ChatParamsModel = { providerID?: string; modelID?: string; limit?: { context?: number } }
 
 type SessionMetrics = {
   evictions: number
@@ -167,7 +178,7 @@ type MetricsStore = Map<string, SessionMetrics>
 
 type StatsSource = {
   options: ResolvedOptions
-  limits: Map<string, number>
+  limits: Map<string, SessionBudgetEntry>
   stashes: StashStore
   metrics: MetricsStore
 }
@@ -194,12 +205,24 @@ type SessionStash = Map<string, StashEntry>
 
 type StashStore = Map<string, SessionStash>
 
+const modelContextTokensOf = (raw: Record<string, number> | undefined): Record<string, number> => {
+  if (typeof raw !== "object" || raw === null) return {}
+  const resolved: Record<string, number> = {}
+  for (const [key, tokens] of Object.entries(raw)) {
+    if (typeof tokens === "number" && Number.isFinite(tokens) && tokens > 0) resolved[key] = tokens
+  }
+  return resolved
+}
+
 const resolveOptions = (raw: LruContextOptions = {}): ResolvedOptions => ({
   watermark: typeof raw.watermark === "number" && raw.watermark > 0 && raw.watermark < 1 ? raw.watermark : DEFAULT_WATERMARK_RATIO,
   recentWindow: typeof raw.recentWindow === "number" && raw.recentWindow >= 0 ? Math.floor(raw.recentWindow) : DEFAULT_RECENT_WINDOW_MESSAGES,
   minEvictableBytes: typeof raw.minEvictableBytes === "number" && raw.minEvictableBytes >= 0 ? raw.minEvictableBytes : DEFAULT_MIN_EVICTABLE_BYTES,
   defaultContextTokens:
-    typeof raw.defaultContextTokens === "number" && raw.defaultContextTokens > 0 ? raw.defaultContextTokens : undefined,
+    typeof raw.defaultContextTokens === "number" && Number.isFinite(raw.defaultContextTokens) && raw.defaultContextTokens > 0
+      ? raw.defaultContextTokens
+      : undefined,
+  modelContextTokens: modelContextTokensOf(raw.modelContextTokens),
   hintSubjects:
     typeof raw.hintSubjects === "number" && Number.isInteger(raw.hintSubjects) && raw.hintSubjects >= 0
       ? raw.hintSubjects
@@ -631,8 +654,25 @@ const recordMetricsLine = async (
   }
 }
 
-const resolveSessionBudget = (sessionLimit: number | undefined, explicitDefault: number | undefined): SessionBudget => {
-  if (sessionLimit !== undefined) return { tokens: sessionLimit, source: CONTEXT_TOKENS_SOURCE_MODEL }
+const modelKeyOf = (model: ChatParamsModel | undefined): string | undefined => {
+  const providerID = model?.providerID
+  const modelID = model?.modelID
+  if (typeof providerID !== "string" || providerID.length === 0) return undefined
+  if (typeof modelID !== "string" || modelID.length === 0) return undefined
+  return `${providerID}${MODEL_KEY_SEPARATOR}${modelID}`
+}
+
+const captureBudgetOf = (model: ChatParamsModel | undefined, overrides: Record<string, number>): SessionBudgetEntry | undefined => {
+  const modelKey = modelKeyOf(model)
+  const override = modelKey === undefined ? undefined : overrides[modelKey]
+  if (override !== undefined) return { tokens: override, source: CONTEXT_TOKENS_SOURCE_OVERRIDE }
+  const reported = model?.limit?.context
+  if (typeof reported === "number" && reported > 0) return { tokens: reported, source: CONTEXT_TOKENS_SOURCE_MODEL }
+  return undefined
+}
+
+const resolveSessionBudget = (sessionEntry: SessionBudgetEntry | undefined, explicitDefault: number | undefined): SessionBudget => {
+  if (sessionEntry !== undefined) return sessionEntry
   if (explicitDefault !== undefined) return { tokens: explicitDefault, source: CONTEXT_TOKENS_SOURCE_DEFAULT }
   return { tokens: null, source: CONTEXT_TOKENS_SOURCE_UNKNOWN }
 }
@@ -651,6 +691,7 @@ const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
       recentWindow: source.options.recentWindow,
       minEvictableBytes: source.options.minEvictableBytes,
       defaultContextTokens: source.options.defaultContextTokens ?? null,
+      modelContextTokens: source.options.modelContextTokens,
       metricsLog: source.options.metricsLog,
       metricsPath: source.options.metricsPath,
     },
@@ -833,7 +874,7 @@ const deliverHint = (hintBySession: Map<string, string>, input: unknown, output:
 
 export default (async (_input, rawOptions) => {
   const options = resolveOptions(rawOptions as LruContextOptions)
-  const contextTokensBySession = new Map<string, number>()
+  const contextTokensBySession = new Map<string, SessionBudgetEntry>()
   const stashBySession = new Map<string, SessionStash>()
   const hintBySession = new Map<string, string>()
   const metricsBySession: MetricsStore = new Map()
@@ -856,10 +897,10 @@ export default (async (_input, rawOptions) => {
     executeLruStats({ options, limits: contextTokensBySession, stashes: stashBySession, metrics: metricsBySession }, toolContext)
 
   return {
-    "chat.params": async (input: { sessionID: string; model?: { limit?: { context?: number } } }) => {
-      const context = input.model?.limit?.context
-      if (typeof context === "number" && context > 0)
-        rememberSessionValue(contextTokensBySession, input.sessionID, context, MAX_LIMIT_SESSIONS)
+    "chat.params": async (input: { sessionID: string; model?: ChatParamsModel }) => {
+      const captured = captureBudgetOf(input.model, options.modelContextTokens)
+      if (captured !== undefined)
+        rememberSessionValue(contextTokensBySession, input.sessionID, captured, MAX_LIMIT_SESSIONS)
     },
     "experimental.chat.messages.transform": async (_input: unknown, output: { messages: MessageBundle[] }) => {
       const messages = output.messages
