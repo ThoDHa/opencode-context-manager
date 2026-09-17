@@ -105,6 +105,117 @@ type ResolvedOptions = Omit<Required<LruContextOptions>, "defaultContextTokens" 
   defaultContextTokens?: number
   modelContextTokens: Record<string, number>
   protectedPatterns: CompiledGlob[]
+}
+
+type SubjectRange = { start: number; end: number }
+
+type Subject = {
+  path: string
+  range?: SubjectRange
+}
+
+type ToolAppearance = {
+  msgIndex: number
+  tool: string
+  subjects: Subject[]
+}
+
+type EvictableEntry = {
+  stateRef: { output: string; attachments?: unknown }
+  tool: string
+  msgIndex: number
+  partIndex: number
+  lastTouch: number
+  bytes: number
+  attachmentBytes: number
+  subjects: Subject[]
+}
+
+type HotSubject = { subject: Subject; lastTouch: number }
+
+type EvictionResult = {
+  hotSubjects: HotSubject[]
+  appearances: ToolAppearance[]
+  estimatedTokens: number
+  watermarkTokens: number | null
+  deficitTokens: number | null
+  evicted: EvictedEntryInfo[]
+  stashDropped: number
+}
+
+type EvictedEntryInfo = {
+  tool: string
+  subject: string
+  subjects: Subject[]
+  bytes: number
+  attachmentBytes: number
+  messagesAgo: number
+}
+
+type LastRunMetrics = { estimatedTokens: number; watermarkTokens: number | null; deficitTokens: number | null }
+
+type ReasoningExpiry = { parts: number; bytes: number }
+
+type ContextTokensSource =
+  | typeof CONTEXT_TOKENS_SOURCE_OVERRIDE
+  | typeof CONTEXT_TOKENS_SOURCE_MODEL
+  | typeof CONTEXT_TOKENS_SOURCE_DEFAULT
+  | typeof CONTEXT_TOKENS_SOURCE_UNKNOWN
+
+type SessionBudgetEntry = { tokens: number; source: ContextTokensSource }
+
+type SessionBudget = { tokens: number | null; source: ContextTokensSource }
+
+type ChatParamsModel = { providerID?: string; modelID?: string; limit?: { context?: number } }
+
+type SessionMetrics = {
+  evictions: number
+  bytesReclaimed: number
+  stashHits: number
+  stashMisses: number
+  stashDropped: number
+  deduped: number
+  reasoningExpired: number
+  reasoningBytesExpired: number
+  postEvictionTouches: number
+  evictedSubjects: Subject[]
+  touchScanThrough: number
+  stashReadsLoggedThrough: number
+  lastRun?: LastRunMetrics
+  logWriteError?: string
+}
+
+type MetricsStore = Map<string, SessionMetrics>
+
+type StatsSource = {
+  options: ResolvedOptions
+  limits: Map<string, SessionBudgetEntry>
+  stashes: StashStore
+  metrics: MetricsStore
+}
+
+type RetainedDuplicate = { msgIndex: number; tool: string; supersedes: boolean }
+
+type DedupTarget = { stateRef: { output: string; attachments?: unknown }; tool: string; input: Record<string, unknown> }
+
+type MessageBundle = {
+  info: { sessionID?: string }
+  parts: Array<Record<string, unknown>>
+}
+
+type StashEntry = {
+  output: string
+  tool: string
+  subject: string
+  msgIndex: number
+  partIndex: number
+  attachments?: unknown[]
+}
+
+type SessionStash = Map<string, StashEntry>
+
+type StashStore = Map<string, SessionStash>
+
 const modelContextTokensOf = (raw: Record<string, number> | undefined): Record<string, number> => {
   if (typeof raw !== "object" || raw === null) return {}
   const resolved: Record<string, number> = {}
