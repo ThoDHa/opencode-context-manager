@@ -101,6 +101,7 @@ const STASH_ATTACHMENT_DROPPED_TAIL = "payloads were dropped during eviction; re
 const UNKNOWN_ATTACHMENT_MIME_LABEL = "unknown mime"
 const DEFAULT_FENCE_EVICTABLE_LINES = 40
 const DEFAULT_USER_FENCE_EVICTION_ENABLED = false
+const DEFAULT_MANUAL_MODE = false
 const FENCE_EVICTION_MARKER = "[lru-evicted-fence]"
 const FENCE_BLOCK_NOUN = "code block"
 const FENCE_STASH_TOOL_LABEL = "fence"
@@ -128,6 +129,7 @@ type LruContextOptions = {
   protectedPatterns?: string[]
   metricsLog?: boolean
   metricsPath?: string
+  manualMode?: boolean
   userFenceEviction?: { enabled?: boolean; minBlockLines?: number }
 }
 
@@ -311,6 +313,7 @@ const resolveOptions = (raw: LruContextOptions = {}): ResolvedOptions => {
     }),
     metricsLog: typeof raw.metricsLog === "boolean" ? raw.metricsLog : DEFAULT_METRICS_LOG_ENABLED,
     metricsPath: typeof raw.metricsPath === "string" && raw.metricsPath.length > 0 ? raw.metricsPath : DEFAULT_METRICS_PATH,
+    manualMode: typeof raw.manualMode === "boolean" ? raw.manualMode : DEFAULT_MANUAL_MODE,
     userFenceEviction: userFenceEvictionOf(raw.userFenceEviction),
   }
 }
@@ -1029,6 +1032,7 @@ const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
         enabled: source.options.userFenceEviction.enabled,
         minBlockLines: source.options.userFenceEviction.minBlockLines,
       },
+      manualMode: source.options.manualMode,
     },
     modelContextTokens: budget.tokens,
     modelContextTokensSource: budget.source,
@@ -1256,7 +1260,7 @@ export default (async (_input, rawOptions) => {
       const reasoningExpiredThisRun = expireAgedReasoning(messages, options)
       const fenceEvictedThisRun = evictLargeUserFences(messages, options, sessionStash)
       const eviction =
-        budget.tokens === null
+        options.manualMode || budget.tokens === null
           ? measureWithoutEvicting(messages, options)
           : evictLeastRecentlyUsed(messages, options, budget.tokens * options.watermark, sessionStash)
       const touchesThisRun = countPostEvictionTouches(sessionMetrics, eviction.appearances)
