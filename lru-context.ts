@@ -69,6 +69,10 @@ const RECEIVED_LABEL = "received"
 const FALLBACK_SESSION_KEY = "no-session"
 const DEDUP_MARKER = "[lru-deduped]"
 const DEDUP_SUPERSEDED_LEAD = "identical call superseded by the newer output at message"
+const DEDUP_FILE_SUPERSEDED_LEAD = "identical attachment superseded by the newer attachment at message"
+const FILE_PART_TYPE = "file"
+const FILE_FILENAME_KEY = "filename"
+const TEXT_PART_TYPE = "text"
 const PURGED_INPUT_MARKER = "[lru-purged-input]"
 const REASONING_PART_TYPE = "reasoning"
 const REASONING_TEXT_KEY = "text"
@@ -205,6 +209,10 @@ type StatsSource = {
 }
 
 type RetainedDuplicate = { msgIndex: number; tool: string; supersedes: boolean }
+
+type FilePartFields = { mime: string; url: string; filename: string }
+
+type RetainedFileDuplicate = { msgIndex: number; label: string }
 
 type DedupTarget = { stateRef: { output: string; attachments?: unknown }; tool: string; input: Record<string, unknown> }
 
@@ -438,6 +446,45 @@ const deduplicateToolOutputs = (messages: MessageBundle[], options: ResolvedOpti
         stripStateAttachments(target.stateRef)
         tombstones += 1
       }
+    }
+  }
+  return tombstones
+}
+
+const filePartOf = (part: Record<string, unknown>): FilePartFields | undefined => {
+  if (part["type"] !== FILE_PART_TYPE) return undefined
+  const mime = part[ATTACHMENT_MIME_KEY]
+  const url = part[ATTACHMENT_URL_KEY]
+  if (typeof mime !== "string" || typeof url !== "string") return undefined
+  const filename = part[FILE_FILENAME_KEY]
+  return { mime, url, filename: typeof filename === "string" ? filename : "" }
+}
+
+const fileDedupKeyOf = (file: FilePartFields): string => JSON.stringify([file.mime, file.url])
+
+const fileDedupLabelOf = (file: FilePartFields): string => (file.filename.length > 0 ? file.filename : file.mime)
+
+const buildFileDedupTombstone = (label: string, msgIndex: number): string =>
+  `${DEDUP_MARKER} ${label} ${DEDUP_FILE_SUPERSEDED_LEAD} ${msgIndex}`
+
+const deduplicateFileAttachments = (messages: MessageBundle[], options: ResolvedOptions): number => {
+  const retainedByKey = new Map<string, RetainedFileDuplicate>()
+  const hotFromIndex = hotFromIndexOf(messages, options)
+  let tombstones = 0
+  for (let msgIndex = messages.length - 1; msgIndex >= 0; msgIndex -= 1) {
+    const messageParts = messages[msgIndex].parts
+    for (let partIndex = messageParts.length - 1; partIndex >= 0; partIndex -= 1) {
+      const file = filePartOf(messageParts[partIndex])
+      if (file === undefined) continue
+      const key = fileDedupKeyOf(file)
+      const retained = retainedByKey.get(key)
+      if (retained === undefined) {
+        retainedByKey.set(key, { msgIndex, label: fileDedupLabelOf(file) })
+        continue
+      }
+      if (msgIndex >= hotFromIndex) continue
+      messageParts[partIndex] = { type: TEXT_PART_TYPE, text: buildFileDedupTombstone(retained.label, retained.msgIndex) }
+      tombstones += 1
     }
   }
   return tombstones
@@ -1011,7 +1058,7 @@ export default (async (_input, rawOptions) => {
       const sessionStash = stashForSession(stashBySession, sessionKey)
       const sessionMetrics = metricsForSession(metricsBySession, sessionKey)
       stripLegacyHintParts(messages)
-      const dedupedThisRun = deduplicateToolOutputs(messages, options)
+      const dedupedThisRun = deduplicateToolOutputs(messages, options) + deduplicateFileAttachments(messages, options)
       purgeErroredToolInputs(messages, options)
       const reasoningExpiredThisRun = expireAgedReasoning(messages, options)
       const eviction =
