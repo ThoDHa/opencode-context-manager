@@ -69,6 +69,13 @@ const JSON_INDENT_SPACES = 2
 const CONTEXT_TOKENS_SOURCE_MODEL = "model"
 const CONTEXT_TOKENS_SOURCE_DEFAULT = "default"
 const CONTEXT_TOKENS_SOURCE_UNKNOWN = "unknown"
+const ATTACHMENTS_STATE_KEY = "attachments"
+const ATTACHMENT_URL_KEY = "url"
+const ATTACHMENT_MIME_KEY = "mime"
+const TOMBSTONE_ATTACHMENTS_NOTICE = "attachments dropped"
+const STASH_ATTACHMENTS_LEAD = "attachments evicted with this output"
+const STASH_ATTACHMENT_DROPPED_TAIL = "payloads were dropped during eviction; re-run the tool to regenerate them"
+const UNKNOWN_ATTACHMENT_MIME_LABEL = "unknown mime"
 
 type LruContextOptions = {
   watermark?: number
@@ -97,12 +104,13 @@ type ToolAppearance = {
 }
 
 type EvictableEntry = {
-  stateRef: { output: string }
+  stateRef: { output: string; attachments?: unknown }
   tool: string
   msgIndex: number
   partIndex: number
   lastTouch: number
   bytes: number
+  attachmentBytes: number
   subjects: Subject[]
 }
 
@@ -123,6 +131,7 @@ type EvictedEntryInfo = {
   subject: string
   subjects: Subject[]
   bytes: number
+  attachmentBytes: number
   messagesAgo: number
 }
 
@@ -165,7 +174,7 @@ type StatsSource = {
 
 type RetainedDuplicate = { msgIndex: number; tool: string; supersedes: boolean }
 
-type DedupTarget = { stateRef: { output: string }; tool: string; input: Record<string, unknown> }
+type DedupTarget = { stateRef: { output: string; attachments?: unknown }; tool: string; input: Record<string, unknown> }
 
 type MessageBundle = {
   info: { sessionID?: string }
@@ -178,6 +187,7 @@ type StashEntry = {
   subject: string
   msgIndex: number
   partIndex: number
+  attachments?: unknown[]
 }
 
 type SessionStash = Map<string, StashEntry>
@@ -255,13 +265,35 @@ const appearanceTouches = (entrySubjects: Subject[], appearance: ToolAppearance)
     ),
   )
 
-const completedOutputOf = (part: Record<string, unknown>): { output: string } | undefined => {
+const completedOutputOf = (part: Record<string, unknown>): { output: string; attachments?: unknown } | undefined => {
   if (part["type"] !== "tool") return undefined
   const state = part["state"]
   if (typeof state !== "object" || state === null) return undefined
   const typedState = state as Record<string, unknown>
   if (typedState["status"] !== "completed" || typeof typedState["output"] !== "string") return undefined
-  return typedState as { output: string }
+  return typedState as { output: string; attachments?: unknown }
+}
+
+const attachmentPayloadCharsOf = (state: Record<string, unknown>): number => {
+  const attachments = state[ATTACHMENTS_STATE_KEY]
+  if (!Array.isArray(attachments)) return 0
+  let chars = 0
+  for (const attachment of attachments) {
+    const url =
+      typeof attachment === "object" && attachment !== null ? (attachment as Record<string, unknown>)[ATTACHMENT_URL_KEY] : undefined
+    if (typeof url === "string") chars += url.length
+  }
+  return chars
+}
+
+const nonEmptyAttachmentsOf = (state: { attachments?: unknown }): unknown[] | undefined => {
+  const attachments = state[ATTACHMENTS_STATE_KEY]
+  return Array.isArray(attachments) && attachments.length > 0 ? attachments : undefined
+}
+
+const stripStateAttachments = (state: { attachments?: unknown }): void => {
+  if (!Array.isArray(state[ATTACHMENTS_STATE_KEY])) return
+  delete state[ATTACHMENTS_STATE_KEY]
 }
 
 const stableStringify = (value: unknown): string => {
@@ -306,6 +338,7 @@ const deduplicateToolOutputs = (messages: MessageBundle[], options: ResolvedOpti
       }
       if (retained.supersedes) {
         target.stateRef.output = buildDedupTombstone(retained.tool, retained.msgIndex)
+        stripStateAttachments(target.stateRef)
         tombstones += 1
       }
     }
@@ -373,8 +406,8 @@ const stripLegacyHintParts = (messages: MessageBundle[]): void => {
   }
 }
 
-const buildTombstone = (tool: string, subject: string, bytes: number, messagesAgo: number): string =>
-  `${EVICTION_MARKER} ${tool} ${subject} (${bytes} bytes, ~${messagesAgo} messages ago) was evicted to reclaim context; re-run the tool to reload its output.`
+const buildTombstone = (tool: string, subject: string, bytes: number, messagesAgo: number, attachmentsDropped: boolean): string =>
+  `${EVICTION_MARKER} ${tool} ${subject} (${bytes} bytes${attachmentsDropped ? `, ${TOMBSTONE_ATTACHMENTS_NOTICE}` : ""}, ~${messagesAgo} messages ago) was evicted to reclaim context; re-run the tool to reload its output.`
 
 const buildReloadPointer = (subject: string): string =>
   `${RELOAD_POINTER_LEAD} ${RELOAD_TOOL_NAME} (subject "${subject}").`
@@ -448,6 +481,18 @@ const stashedMatchesFor = (stash: SessionStash, subject: string): StashEntry[] =
   return matches
 }
 
+const attachmentSummaryOf = (attachment: unknown): string => {
+  const fields = typeof attachment === "object" && attachment !== null ? (attachment as Record<string, unknown>) : {}
+  const mime = fields[ATTACHMENT_MIME_KEY]
+  const url = fields[ATTACHMENT_URL_KEY]
+  const mimeLabel = typeof mime === "string" && mime.length > 0 ? mime : UNKNOWN_ATTACHMENT_MIME_LABEL
+  const uriChars = typeof url === "string" ? url.length : 0
+  return `${mimeLabel} data URI ${uriChars} chars`
+}
+
+const stashedAttachmentsLineFor = (attachments: unknown[]): string =>
+  `${STASH_MARKER} ${STASH_ATTACHMENTS_LEAD}: ${attachments.map(attachmentSummaryOf).join(SUBJECT_SEPARATOR)}; ${STASH_ATTACHMENT_DROPPED_TAIL}.`
+
 const sessionIDFromContext = (source: unknown): string | undefined => {
   const sessionID =
     typeof source === "object" && source !== null ? (source as { sessionID?: unknown }).sessionID : undefined
@@ -472,7 +517,8 @@ const executeReadEvicted = (stashes: StashStore, metrics: MetricsStore, args: un
   touchMapEntry(stashes, sessionKey)
   const newest = matches[matches.length - 1]
   const older = matches.slice(0, -1)
-  return older.length === 0 ? newest.output : `${newest.output}\n${olderMatchesLineFor(subject, older)}`
+  const output = older.length === 0 ? newest.output : `${newest.output}\n${olderMatchesLineFor(subject, older)}`
+  return newest.attachments === undefined ? output : `${output}\n${stashedAttachmentsLineFor(newest.attachments)}`
 }
 
 const createSessionMetrics = (): SessionMetrics => ({
@@ -520,7 +566,7 @@ const recordRunOutcome = (metrics: SessionMetrics, eviction: EvictionResult, ded
   metrics.evictions += eviction.evicted.length
   metrics.stashDropped += eviction.stashDropped
   for (const entry of eviction.evicted) {
-    metrics.bytesReclaimed += entry.bytes
+    metrics.bytesReclaimed += entry.bytes + entry.attachmentBytes
     metrics.evictedSubjects.push(...entry.subjects)
   }
   while (metrics.evictedSubjects.length > MAX_REMEMBERED_EVICTED_SUBJECTS) metrics.evictedSubjects.shift()
@@ -556,6 +602,7 @@ const recordMetricsLine = async (
       tool: entry.tool,
       subject: entry.subject,
       bytes: entry.bytes,
+      attachmentBytes: entry.attachmentBytes,
       messagesAgo: entry.messagesAgo,
     })),
     dedupedThisRun,
@@ -658,12 +705,13 @@ const scanToolOutputs = (
       const output = typedState["output"]
       if (output.startsWith(EVICTION_MARKER) || output.startsWith(DEDUP_MARKER) || output.length < options.minEvictableBytes) continue
       entries.push({
-        stateRef: typedState as { output: string },
+        stateRef: typedState as { output: string; attachments?: unknown },
         tool,
         msgIndex,
         partIndex,
         lastTouch: msgIndex,
         bytes: output.length,
+        attachmentBytes: attachmentPayloadCharsOf(typedState),
         subjects,
       })
     }
@@ -717,7 +765,8 @@ const evictLeastRecentlyUsed = (
       if (reclaimedTokens >= deficitTokens) break
       const subject = entry.subjects.length > 0 ? renderSubject(entry.subjects[0]) : UNKNOWN_TARGET_LABEL
       const messagesAgo = messages.length - entry.lastTouch
-      const tombstone = buildTombstone(entry.tool, subject, entry.bytes, messagesAgo)
+      const droppedAttachments = nonEmptyAttachmentsOf(entry.stateRef)
+      const tombstone = buildTombstone(entry.tool, subject, entry.bytes, messagesAgo, droppedAttachments !== undefined)
       const stashed: StashEntry = {
         output: entry.stateRef.output,
         tool: entry.tool,
@@ -725,10 +774,19 @@ const evictLeastRecentlyUsed = (
         msgIndex: entry.msgIndex,
         partIndex: entry.partIndex,
       }
+      if (droppedAttachments !== undefined) stashed.attachments = droppedAttachments
       stashDropped += stashEvictedOutput(stash, stashed)
+      stripStateAttachments(entry.stateRef)
       entry.stateRef.output = `${tombstone}${buildReloadPointer(subject)}`
       reclaimedTokens += entry.bytes / CHARS_PER_TOKEN
-      evicted.push({ tool: entry.tool, subject, subjects: entry.subjects, bytes: entry.bytes, messagesAgo })
+      evicted.push({
+        tool: entry.tool,
+        subject,
+        subjects: entry.subjects,
+        bytes: entry.bytes,
+        attachmentBytes: entry.attachmentBytes,
+        messagesAgo,
+      })
     }
   }
   return {
