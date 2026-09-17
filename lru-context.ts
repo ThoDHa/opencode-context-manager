@@ -48,7 +48,7 @@ const MAX_HINT_SESSIONS = 8
 const RELOAD_TOOL_NAME = "read_evicted"
 const RELOAD_ARG_NAME = "subject"
 const RELOAD_TOOL_DESCRIPTION =
-  "Return the full original output of a tool call that was evicted by the LRU context manager. Pass the subject exactly as it appears in the eviction notice."
+  "Return the full original content of anything the LRU context manager evicted and stashed: a tool call output or a fenced code block from an old user message. Pass the subject exactly as it appears in the eviction notice."
 const RELOAD_ARG_DESCRIPTION = "The subject exactly as named in the eviction notice"
 const RELOAD_ARG_SCHEMA_TYPE = "string"
 const RELOAD_ARG_SCHEMA: Record<string, string> = {
@@ -99,6 +99,23 @@ const TOMBSTONE_ATTACHMENTS_NOTICE = "attachments dropped"
 const STASH_ATTACHMENTS_LEAD = "attachments evicted with this output"
 const STASH_ATTACHMENT_DROPPED_TAIL = "payloads were dropped during eviction; re-run the tool to regenerate them"
 const UNKNOWN_ATTACHMENT_MIME_LABEL = "unknown mime"
+const DEFAULT_FENCE_EVICTABLE_LINES = 40
+const DEFAULT_USER_FENCE_EVICTION_ENABLED = false
+const FENCE_EVICTION_MARKER = "[lru-evicted-fence]"
+const FENCE_BLOCK_NOUN = "code block"
+const FENCE_STASH_TOOL_LABEL = "fence"
+const FENCE_BACKTICK = "`"
+const MIN_FENCE_MARKER_TICKS = 3
+// CommonMark: a line indented four or more spaces is indented code, never a fence.
+const MAX_FENCE_INDENT_SPACES = 3
+const FENCE_INDENT_SPACE = " "
+const FENCE_INFO_SEPARATOR = /\s+/
+const FENCE_LINE_COUNT_LABEL = "lines"
+const FENCE_FIRST_LINE_LABEL = "first line"
+const FENCE_EVICTED_NOTICE = "was evicted to reclaim context."
+const USER_MESSAGE_ROLE = "user"
+
+type UserFenceEvictionOptions = { enabled: boolean; minBlockLines: number }
 
 type LruContextOptions = {
   watermark?: number
@@ -111,14 +128,16 @@ type LruContextOptions = {
   protectedPatterns?: string[]
   metricsLog?: boolean
   metricsPath?: string
+  userFenceEviction?: { enabled?: boolean; minBlockLines?: number }
 }
 
 type CompiledGlob = { regexp: RegExp; matchesSegments: boolean }
 
-type ResolvedOptions = Omit<Required<LruContextOptions>, "defaultContextTokens" | "modelContextTokens" | "protectedPatterns"> & {
+type ResolvedOptions = Omit<Required<LruContextOptions>, "defaultContextTokens" | "modelContextTokens" | "protectedPatterns" | "userFenceEviction"> & {
   defaultContextTokens?: number
   modelContextTokens: Record<string, number>
   protectedPatterns: CompiledGlob[]
+  userFenceEviction: UserFenceEvictionOptions
 }
 
 type SubjectRange = { start: number; end: number }
@@ -192,6 +211,7 @@ type SessionMetrics = {
   reasoningExpired: number
   reasoningBytesExpired: number
   postEvictionTouches: number
+  fenceEvicted: number
   evictedSubjects: Subject[]
   touchScanThrough: number
   stashReadsLoggedThrough: number
@@ -217,7 +237,7 @@ type RetainedFileDuplicate = { msgIndex: number; label: string }
 type DedupTarget = { stateRef: { output: string; attachments?: unknown }; tool: string; input: Record<string, unknown> }
 
 type MessageBundle = {
-  info: { sessionID?: string }
+  info: { sessionID?: string; role?: unknown }
   parts: Array<Record<string, unknown>>
 }
 
@@ -228,6 +248,7 @@ type StashEntry = {
   msgIndex: number
   partIndex: number
   attachments?: unknown[]
+  stashSlot?: number
 }
 
 type SessionStash = Map<string, StashEntry>
@@ -241,6 +262,17 @@ const modelContextTokensOf = (raw: Record<string, number> | undefined): Record<s
     if (typeof tokens === "number" && Number.isFinite(tokens) && tokens > 0) resolved[key] = tokens
   }
   return resolved
+}
+
+const userFenceEvictionOf = (raw: LruContextOptions["userFenceEviction"]): UserFenceEvictionOptions => {
+  const source = typeof raw === "object" && raw !== null ? raw : {}
+  return {
+    enabled: typeof source.enabled === "boolean" ? source.enabled : DEFAULT_USER_FENCE_EVICTION_ENABLED,
+    minBlockLines:
+      typeof source.minBlockLines === "number" && Number.isInteger(source.minBlockLines) && source.minBlockLines >= 0
+        ? source.minBlockLines
+        : DEFAULT_FENCE_EVICTABLE_LINES,
+  }
 }
 
 const resolveOptions = (raw: LruContextOptions = {}): ResolvedOptions => {
@@ -271,6 +303,7 @@ const resolveOptions = (raw: LruContextOptions = {}): ResolvedOptions => {
     }),
     metricsLog: typeof raw.metricsLog === "boolean" ? raw.metricsLog : DEFAULT_METRICS_LOG_ENABLED,
     metricsPath: typeof raw.metricsPath === "string" && raw.metricsPath.length > 0 ? raw.metricsPath : DEFAULT_METRICS_PATH,
+    userFenceEviction: userFenceEvictionOf(raw.userFenceEviction),
   }
 }
 
@@ -349,14 +382,18 @@ const subjectsOf = (tool: string, input: Record<string, unknown>): Subject[] => 
   return subjects
 }
 
+const boundedSingleLineOf = (text: string): string => {
+  const singleLine = text.replaceAll("\n", " ")
+  return singleLine.length > MAX_RENDERED_SUBJECT_CHARS
+    ? `${singleLine.slice(0, MAX_RENDERED_SUBJECT_CHARS - ELLIPSIS_MARKER.length)}${ELLIPSIS_MARKER}`
+    : singleLine
+}
+
 const renderSubject = (subject: Subject): string => {
   const rendered = subject.range
     ? `${subject.path}${PATH_RANGE_SEPARATOR}${subject.range.start}${RANGE_SEPARATOR}${subject.range.end}`
     : subject.path
-  const singleLine = rendered.replaceAll("\n", " ")
-  return singleLine.length > MAX_RENDERED_SUBJECT_CHARS
-    ? `${singleLine.slice(0, MAX_RENDERED_SUBJECT_CHARS - ELLIPSIS_MARKER.length)}${ELLIPSIS_MARKER}`
-    : singleLine
+  return boundedSingleLineOf(rendered)
 }
 
 const appearanceTouches = (entrySubjects: Subject[], appearance: ToolAppearance): boolean =>
@@ -550,6 +587,140 @@ const stripLegacyHintParts = (messages: MessageBundle[]): void => {
   }
 }
 
+type FenceSpan = { startLine: number; endLine: number; language: string | undefined }
+
+type FenceReplacement = { startOffset: number; endOffset: number; replacement: string; bytes: number }
+
+type FenceEviction = { blocks: number; bytes: number; stashDropped: number }
+
+const leadingBackticksOf = (line: string): number => {
+  let ticks = 0
+  while (line.charAt(ticks) === FENCE_BACKTICK) ticks += 1
+  return ticks
+}
+
+const fenceLineWithinIndentOf = (rawLine: string): string | undefined => {
+  let spaces = 0
+  while (rawLine.charAt(spaces) === FENCE_INDENT_SPACE) spaces += 1
+  if (spaces > MAX_FENCE_INDENT_SPACES) return undefined
+  return rawLine.slice(spaces)
+}
+
+const fenceLanguageOf = (info: string): string => info.split(FENCE_INFO_SEPARATOR)[0]
+
+const fenceOpenerOf = (rawLine: string): { ticks: number; language: string | undefined } | undefined => {
+  const line = fenceLineWithinIndentOf(rawLine)
+  if (line === undefined) return undefined
+  const ticks = leadingBackticksOf(line)
+  if (ticks < MIN_FENCE_MARKER_TICKS) return undefined
+  const info = line.slice(ticks).trim()
+  return { ticks, language: info.length > 0 ? fenceLanguageOf(info) : undefined }
+}
+
+const isFenceCloser = (rawLine: string, openerTicks: number): boolean => {
+  const line = fenceLineWithinIndentOf(rawLine)
+  if (line === undefined) return false
+  const ticks = leadingBackticksOf(line)
+  return ticks >= openerTicks && line.slice(ticks).trim().length === 0
+}
+
+const fenceSpansIn = (lines: string[]): FenceSpan[] => {
+  const spans: FenceSpan[] = []
+  let openLine = -1
+  let openTicks = 0
+  let language: string | undefined
+  for (let index = 0; index < lines.length; index += 1) {
+    if (openLine === -1) {
+      const opener = fenceOpenerOf(lines[index])
+      if (opener === undefined) continue
+      openLine = index
+      openTicks = opener.ticks
+      language = opener.language
+      continue
+    }
+    if (isFenceCloser(lines[index], openTicks)) {
+      spans.push({ startLine: openLine, endLine: index, language })
+      openLine = -1
+    }
+  }
+  return spans
+}
+
+const lineStartsOf = (text: string): number[] => {
+  const starts = [0]
+  let index = text.indexOf("\n")
+  while (index !== -1) {
+    starts.push(index + 1)
+    index = text.indexOf("\n", index + 1)
+  }
+  return starts
+}
+
+const fenceFirstNonEmptyLineOf = (lines: string[], startLine: number, endLine: number): string | undefined => {
+  for (let index = startLine + 1; index < endLine; index += 1) {
+    const trimmed = lines[index].trim()
+    if (trimmed.length > 0) return trimmed
+  }
+  return undefined
+}
+
+const evictLargeUserFences = (messages: MessageBundle[], options: ResolvedOptions, stash: SessionStash): FenceEviction => {
+  if (options.userFenceEviction.enabled === false) return { blocks: 0, bytes: 0, stashDropped: 0 }
+  const hotFromIndex = hotFromIndexOf(messages, options)
+  const { minBlockLines } = options.userFenceEviction
+  let blocks = 0
+  let bytes = 0
+  let stashDropped = 0
+  for (let msgIndex = 0; msgIndex < hotFromIndex; msgIndex += 1) {
+    const message = messages[msgIndex]
+    if (message.info.role !== USER_MESSAGE_ROLE) continue
+    for (let partIndex = 0; partIndex < message.parts.length; partIndex += 1) {
+      const part = message.parts[partIndex]
+      if (part["type"] !== TEXT_PART_TYPE) continue
+      const text = part["text"]
+      if (typeof text !== "string") continue
+      const lines = text.split("\n")
+      const lineStarts = lineStartsOf(text)
+      const plans: FenceReplacement[] = []
+      for (const span of fenceSpansIn(lines)) {
+        const contentLines = span.endLine - span.startLine - 1
+        if (contentLines <= minBlockLines) continue
+        const firstLine = fenceFirstNonEmptyLineOf(lines, span.startLine, span.endLine)
+        if (firstLine === undefined) continue
+        const startOffset = lineStarts[span.startLine]
+        const endOffset = span.endLine + 1 < lineStarts.length ? lineStarts[span.endLine + 1] : text.length
+        const blockText = text.slice(startOffset, endOffset)
+        const subject = boundedSingleLineOf(firstLine)
+        const tombstone = buildFenceTombstone(span.language, contentLines, subject)
+        stashDropped += stashEvictedOutput(stash, {
+          output: blockText,
+          tool: FENCE_STASH_TOOL_LABEL,
+          subject,
+          msgIndex,
+          partIndex,
+          stashSlot: span.startLine,
+        })
+        plans.push({
+          startOffset,
+          endOffset,
+          replacement: blockText.endsWith("\n") ? `${tombstone}\n` : tombstone,
+          bytes: blockText.length,
+        })
+        blocks += 1
+      }
+      if (plans.length === 0) continue
+      let updated = text
+      for (let index = plans.length - 1; index >= 0; index -= 1) {
+        const plan = plans[index]
+        updated = `${updated.slice(0, plan.startOffset)}${plan.replacement}${updated.slice(plan.endOffset)}`
+        bytes += plan.bytes
+      }
+      part["text"] = updated
+    }
+  }
+  return { blocks, bytes, stashDropped }
+}
+
 const boundedDigestOf = (text: string): string =>
   text.length > MAX_DIGEST_CHARS ? `${text.slice(0, MAX_DIGEST_CHARS - ELLIPSIS_MARKER.length)}${ELLIPSIS_MARKER}` : text
 
@@ -578,8 +749,11 @@ const buildTombstone = (tool: string, subject: string, bytes: number, messagesAg
 const buildReloadPointer = (subject: string): string =>
   `${RELOAD_POINTER_LEAD} ${RELOAD_TOOL_NAME} (subject "${subject}").`
 
-const stashKeyOf = (tool: string, subject: string, msgIndex: number, partIndex: number): string =>
-  `${tool}:${subject}:${msgIndex}:${partIndex}`
+const buildFenceTombstone = (language: string | undefined, contentLines: number, subject: string): string =>
+  `${FENCE_EVICTION_MARKER} ${language === undefined ? FENCE_BLOCK_NOUN : `${language} ${FENCE_BLOCK_NOUN}`} (${contentLines} ${FENCE_LINE_COUNT_LABEL}, ${FENCE_FIRST_LINE_LABEL} "${subject}") ${FENCE_EVICTED_NOTICE}${buildReloadPointer(subject)}`
+
+const stashKeyOf = (tool: string, subject: string, msgIndex: number, partIndex: number, stashSlot?: number): string =>
+  `${tool}:${subject}:${msgIndex}:${partIndex}${stashSlot === undefined ? "" : `:${stashSlot}`}`
 
 const touchMapEntry = <T>(map: Map<string, T>, key: string): T | undefined => {
   const existing = map.get(key)
@@ -624,7 +798,7 @@ const trimStash = (stash: SessionStash): number => {
 }
 
 const stashEvictedOutput = (stash: SessionStash, entry: StashEntry): number => {
-  stash.set(stashKeyOf(entry.tool, entry.subject, entry.msgIndex, entry.partIndex), entry)
+  stash.set(stashKeyOf(entry.tool, entry.subject, entry.msgIndex, entry.partIndex, entry.stashSlot), entry)
   return trimStash(stash)
 }
 
@@ -697,6 +871,7 @@ const createSessionMetrics = (): SessionMetrics => ({
   reasoningExpired: 0,
   reasoningBytesExpired: 0,
   postEvictionTouches: 0,
+  fenceEvicted: 0,
   evictedSubjects: [],
   touchScanThrough: TOUCH_SCAN_INITIAL_WATERMARK,
   stashReadsLoggedThrough: 0,
@@ -723,7 +898,7 @@ const countPostEvictionTouches = (metrics: SessionMetrics, appearances: ToolAppe
   return touches
 }
 
-const recordRunOutcome = (metrics: SessionMetrics, eviction: EvictionResult, dedupedThisRun: number, touchesThisRun: number, reasoningExpiredThisRun: ReasoningExpiry): void => {
+const recordRunOutcome = (metrics: SessionMetrics, eviction: EvictionResult, dedupedThisRun: number, touchesThisRun: number, reasoningExpiredThisRun: ReasoningExpiry, fenceEvictedThisRun: FenceEviction): void => {
   metrics.lastRun = {
     estimatedTokens: eviction.estimatedTokens,
     watermarkTokens: eviction.watermarkTokens,
@@ -740,6 +915,9 @@ const recordRunOutcome = (metrics: SessionMetrics, eviction: EvictionResult, ded
   metrics.reasoningExpired += reasoningExpiredThisRun.parts
   metrics.reasoningBytesExpired += reasoningExpiredThisRun.bytes
   metrics.postEvictionTouches += touchesThisRun
+  metrics.fenceEvicted += fenceEvictedThisRun.blocks
+  metrics.bytesReclaimed += fenceEvictedThisRun.bytes
+  metrics.stashDropped += fenceEvictedThisRun.stashDropped
 }
 
 const recordMetricsLine = async (
@@ -751,10 +929,11 @@ const recordMetricsLine = async (
   dedupedThisRun: number,
   touchesThisRun: number,
   reasoningExpiredThisRun: ReasoningExpiry,
+  fenceEvictedThisRun: FenceEviction,
 ): Promise<void> => {
   const stashReadsSinceLastLine = metrics.stashHits + metrics.stashMisses - metrics.stashReadsLoggedThrough
   const isEventful =
-    eviction.evicted.length > 0 || dedupedThisRun > 0 || touchesThisRun > 0 || reasoningExpiredThisRun.parts > 0 || stashReadsSinceLastLine > 0
+    eviction.evicted.length > 0 || dedupedThisRun > 0 || touchesThisRun > 0 || reasoningExpiredThisRun.parts > 0 || fenceEvictedThisRun.blocks > 0 || stashReadsSinceLastLine > 0
   if (options.metricsLog === false || isEventful === false) return
   const line = {
     ts: new Date().toISOString(),
@@ -774,6 +953,7 @@ const recordMetricsLine = async (
     dedupedThisRun,
     reasoningExpiredThisRun: reasoningExpiredThisRun.parts,
     reasoningBytesExpiredThisRun: reasoningExpiredThisRun.bytes,
+    fenceEvictedThisRun: fenceEvictedThisRun.blocks,
     postEvictionTouchesThisRun: touchesThisRun,
     stashReadsSinceLastLine,
     totals: {
@@ -786,6 +966,7 @@ const recordMetricsLine = async (
       reasoningExpired: metrics.reasoningExpired,
       reasoningBytesExpired: metrics.reasoningBytesExpired,
       postEvictionTouches: metrics.postEvictionTouches,
+      fenceEvicted: metrics.fenceEvicted,
     },
   }
   try {
@@ -837,6 +1018,10 @@ const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
       modelContextTokens: source.options.modelContextTokens,
       metricsLog: source.options.metricsLog,
       metricsPath: source.options.metricsPath,
+      userFenceEviction: {
+        enabled: source.options.userFenceEviction.enabled,
+        minBlockLines: source.options.userFenceEviction.minBlockLines,
+      },
     },
     modelContextTokens: budget.tokens,
     modelContextTokensSource: budget.source,
@@ -851,6 +1036,7 @@ const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
       reasoningExpired: metrics.reasoningExpired,
       reasoningBytesExpired: metrics.reasoningBytesExpired,
       postEvictionTouches: metrics.postEvictionTouches,
+      fenceEvicted: metrics.fenceEvicted,
     },
     lastRun: metrics.lastRun ?? null,
     ...(metrics.logWriteError === undefined ? {} : { logWriteError: metrics.logWriteError }),
@@ -1061,14 +1247,15 @@ export default (async (_input, rawOptions) => {
       const dedupedThisRun = deduplicateToolOutputs(messages, options) + deduplicateFileAttachments(messages, options)
       purgeErroredToolInputs(messages, options)
       const reasoningExpiredThisRun = expireAgedReasoning(messages, options)
+      const fenceEvictedThisRun = evictLargeUserFences(messages, options, sessionStash)
       const eviction =
         budget.tokens === null
           ? measureWithoutEvicting(messages, options)
           : evictLeastRecentlyUsed(messages, options, budget.tokens * options.watermark, sessionStash)
       const touchesThisRun = countPostEvictionTouches(sessionMetrics, eviction.appearances)
-      recordRunOutcome(sessionMetrics, eviction, dedupedThisRun, touchesThisRun, reasoningExpiredThisRun)
+      recordRunOutcome(sessionMetrics, eviction, dedupedThisRun, touchesThisRun, reasoningExpiredThisRun, fenceEvictedThisRun)
       storeHint(hintBySession, sessionKey, eviction.hotSubjects, options.hintSubjects)
-      await recordMetricsLine(options, sessionMetrics, sessionKey, budget, eviction, dedupedThisRun, touchesThisRun, reasoningExpiredThisRun)
+      await recordMetricsLine(options, sessionMetrics, sessionKey, budget, eviction, dedupedThisRun, touchesThisRun, reasoningExpiredThisRun, fenceEvictedThisRun)
     },
     "experimental.chat.system.transform": async (input: { sessionID?: string }, output: { system: string[] }) => {
       deliverHint(hintBySession, input, output)
