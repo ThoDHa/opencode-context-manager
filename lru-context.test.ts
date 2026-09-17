@@ -21,6 +21,7 @@ const WATERMARK_RATIO = 0.5
 const LEGACY_DEFAULT_CONTEXT_TOKENS = 100000
 const EXPLICIT_DEFAULT_CONTEXT_TOKENS = 600
 const LARGE_DEFAULT_CONTEXT_TOKENS = 1000000
+const INFINITE_DEFAULT_CONTEXT_TOKENS = Infinity
 const MIN_EVICTABLE_BYTES = 2048
 const RECENT_WINDOW_MESSAGES = 4
 const FILLER_TEXT_CHARS = 10
@@ -57,6 +58,12 @@ const OVER_WATERMARK_FILLER_MESSAGES = 4
 const SINGLE_MESSAGE_OUTPUT_BYTES = 4000
 const ISOLATION_CONTEXT_LIMIT_A = 200
 const ISOLATION_CONTEXT_LIMIT_B = 20000
+const OVERRIDE_MODEL_PROVIDER = "zai"
+const OVERRIDE_MODEL_ID = "glm-5.3"
+const OVERRIDE_MODEL_KEY = "zai/glm-5.3"
+const OTHER_MODEL_KEY = "anthropic/claude"
+const INVALID_OVERRIDE_ENTRY = "50%"
+const INFINITE_OVERRIDE_ENTRY = Infinity
 const STANDARD_BUNDLE_CHARS = MIN_EVICTABLE_BYTES + RECENT_WINDOW_FILLER_MESSAGES * FILLER_TEXT_CHARS
 const THREE_ENTRY_BUNDLE_CHARS = THREE_ENTRY_COUNT * THREE_ENTRY_OUTPUT_BYTES + RECENT_WINDOW_FILLER_MESSAGES * FILLER_TEXT_CHARS
 const COLD_NEW_BUNDLE_CHARS = COLD_OUTPUT_BYTES + NEW_OUTPUT_BYTES + RECENT_WINDOW_FILLER_MESSAGES * FILLER_TEXT_CHARS
@@ -340,6 +347,18 @@ const setChatParamsWithoutContext = async (hooks: HookMap, sessionID: string): P
 
 const setChatParamsWithZeroContext = async (hooks: HookMap, sessionID: string): Promise<void> => {
   await hooks[CHAT_PARAMS_HOOK]({ sessionID, model: { limit: { context: ZERO_CONTEXT_LIMIT } } }, {})
+}
+
+const setChatParamsForModel = async (
+  hooks: HookMap,
+  sessionID: string,
+  providerID: string,
+  modelID: string,
+  contextTokens: number | undefined,
+): Promise<void> => {
+  const model: Record<string, unknown> = { providerID, modelID }
+  if (contextTokens !== undefined) model.limit = { context: contextTokens }
+  await hooks[CHAT_PARAMS_HOOK]({ sessionID, model }, {})
 }
 
 const runTransform = async (hooks: HookMap, bundle: StrictBundle): Promise<void> => {
@@ -763,6 +782,95 @@ test("transform keeps the captured limit in charge when an explicit defaultConte
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
   assert.equal(stats.modelContextTokens, SMALL_CONTEXT_LIMIT)
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+})
+
+test("transform lets the per model override beat the model reported limit and labels the budget source override", async () => {
+  const hooks = await loadPluginHooksWith({ modelContextTokens: { [OVERRIDE_MODEL_KEY]: SMALL_CONTEXT_LIMIT } })
+  await setChatParamsForModel(hooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID, LARGE_DEFAULT_CONTEXT_TOKENS)
+
+  const bundle = buildStandardBundle(SESSION_ID, "/data/override-beats-reported.txt")
+  await runTransform(hooks, bundle)
+
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  assert.equal(stats.modelContextTokens, SMALL_CONTEXT_LIMIT)
+  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_OVERRIDE)
+})
+
+test("transform lets the per model override beat the explicit defaultContextTokens option when no limit was reported", async () => {
+  const hooks = await loadPluginHooksWith({
+    modelContextTokens: { [OVERRIDE_MODEL_KEY]: SMALL_CONTEXT_LIMIT },
+    defaultContextTokens: LARGE_DEFAULT_CONTEXT_TOKENS,
+  })
+  await setChatParamsForModel(hooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID, undefined)
+
+  const bundle = buildStandardBundle(SESSION_ID, "/data/override-beats-default.txt")
+  await runTransform(hooks, bundle)
+
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  assert.equal(stats.modelContextTokens, SMALL_CONTEXT_LIMIT)
+  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_OVERRIDE)
+})
+
+test("transform applies the per model override when chat params carry no reported context limit", async () => {
+  const hooks = await loadPluginHooksWith({ modelContextTokens: { [OVERRIDE_MODEL_KEY]: SMALL_CONTEXT_LIMIT } })
+  await setChatParamsForModel(hooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID, undefined)
+
+  const bundle = buildStandardBundle(SESSION_ID, "/data/override-without-reported.txt")
+  await runTransform(hooks, bundle)
+
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  assert.equal(stats.modelContextTokens, SMALL_CONTEXT_LIMIT)
+  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_OVERRIDE)
+})
+
+test("transform ignores per model map entries for unknown model ids and keeps the reported limit in charge", async () => {
+  const hooks = await loadPluginHooksWith({ modelContextTokens: { [OTHER_MODEL_KEY]: SMALL_CONTEXT_LIMIT } })
+  await setChatParamsForModel(hooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const bundle = buildStandardBundle(SESSION_ID, "/data/override-unknown-model.txt")
+  await runTransform(hooks, bundle)
+
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  assert.equal(stats.modelContextTokens, WATERMARK_PROBE_CONTEXT_LIMIT)
+  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+})
+
+test("transform ignores non numeric override entries and falls through to the explicit default", async () => {
+  const hooks = await loadPluginHooksWith({
+    modelContextTokens: { [OVERRIDE_MODEL_KEY]: INVALID_OVERRIDE_ENTRY },
+    defaultContextTokens: EXPLICIT_DEFAULT_CONTEXT_TOKENS,
+  })
+  await setChatParamsForModel(hooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID, undefined)
+
+  const bundle = buildStandardBundle(SESSION_ID, "/data/override-invalid-entry.txt")
+  await runTransform(hooks, bundle)
+
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  assert.equal(stats.modelContextTokens, EXPLICIT_DEFAULT_CONTEXT_TOKENS)
+  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_DEFAULT)
+})
+
+test("transform ignores infinite override entries and an infinite defaultContextTokens option and falls through to the unknown budget", async () => {
+  const hooks = await loadPluginHooksWith({
+    modelContextTokens: { [OVERRIDE_MODEL_KEY]: INFINITE_OVERRIDE_ENTRY },
+    defaultContextTokens: INFINITE_DEFAULT_CONTEXT_TOKENS,
+  })
+  await setChatParamsForModel(hooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID, undefined)
+
+  const bundle = buildStandardBundle(SESSION_ID, "/data/infinite-values.txt")
+  await runTransform(hooks, bundle)
+
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.deepEqual(stats.options.modelContextTokens, {})
+  assert.equal(stats.options.defaultContextTokens, null)
+  assert.equal(stats.modelContextTokens, null)
+  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
 })
 
 test("transform keeps a stored real context limit when a later chat params event carries none", async () => {
@@ -2198,6 +2306,7 @@ const METRICS_TEMP_DIR_PREFIX = "lru-metrics-test-"
 const METRICS_LOG_FILE_NAME = "metrics.jsonl"
 const METRICS_BLOCKED_DIR_NAME = "missing-subdir"
 const METRICS_LINE_SEPARATOR = "\n"
+const CONTEXT_TOKENS_SOURCE_OVERRIDE = "override"
 const CONTEXT_TOKENS_SOURCE_MODEL = "model"
 const CONTEXT_TOKENS_SOURCE_DEFAULT = "default"
 const CONTEXT_TOKENS_SOURCE_UNKNOWN = "unknown"
@@ -2283,6 +2392,7 @@ test("lru_stats reports zeroed counters unknown budget and empty stash for a ses
     recentWindow: RECENT_WINDOW_MESSAGES,
     minEvictableBytes: MIN_EVICTABLE_BYTES,
     defaultContextTokens: null,
+    modelContextTokens: {},
     metricsLog: false,
     metricsPath: DEFAULT_METRICS_PATH,
   })
@@ -2531,6 +2641,28 @@ test("metrics log records the default source label fields for an eventful explic
     assert.equal(lines.length, STATS_LOG_FILE_LINES)
     assert.equal(lines[0].modelContextTokens, EXPLICIT_DEFAULT_CONTEXT_TOKENS)
     assert.equal(lines[0].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_DEFAULT)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("metrics log records the override source label fields for a per model map driven run", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const hooks = await loadPluginHooksWith({
+      metricsLog: true,
+      metricsPath: metricsLogPathIn(metricsDir),
+      modelContextTokens: { [OVERRIDE_MODEL_KEY]: SMALL_CONTEXT_LIMIT },
+    })
+    await setChatParamsForModel(hooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID, undefined)
+
+    const bundle = buildStandardBundle(SESSION_ID, "/data/metrics-override.txt")
+    await runTransform(hooks, bundle)
+
+    const lines = metricsLinesIn(metricsLogPathIn(metricsDir))
+    assert.equal(lines.length, STATS_LOG_FILE_LINES)
+    assert.equal(lines[0].modelContextTokens, SMALL_CONTEXT_LIMIT)
+    assert.equal(lines[0].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_OVERRIDE)
   } finally {
     cleanupMetricsDir(metricsDir)
   }
