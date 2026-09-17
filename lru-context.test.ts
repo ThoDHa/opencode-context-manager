@@ -146,7 +146,25 @@ const EMPTY_PROTECTED_TOOLS_ENTRY = ""
 const STASH_PROTECTED_PATTERN = "protectedStashQuery"
 const STASH_PROTECTED_VICTIM_PATH = "/data/stash-protected-victim.txt"
 const PROTECTED_TASK_PROMPT = "summarize subagent findings"
-const HINT_PROTECTED_COMMAND = "deploy --target staging"
+const PROTECTED_COMMAND = "deploy --target staging"
+const PROTECTED_PATTERN_EXACT = "/data/exact-protected.txt"
+const PROTECTED_GLOB_PATTERN = "**/AGENTS.md"
+const PROTECTED_GLOB_PATH = "/data/project/AGENTS.md"
+const PROTECTED_SEGMENT_PATTERN = ".env*"
+const PROTECTED_SEGMENT_PATH = "/data/project/.env.local"
+const UNMATCHED_PROTECTED_PATTERN = "**/unrelated.md"
+const UNPROTECTED_PLAIN_PATH = "/data/plain.txt"
+const PROTECTED_COMMAND_PATTERN = "*deploy*"
+const MATCH_ALL_PATTERN = "*"
+const PROTECTED_PATTERNS_NON_ARRAY = "**/never.txt"
+const PROTECTED_PATTERNS_NON_STRING_ENTRY = 42
+const SUBJECTLESS_TOOL = "webfetch"
+const SUBJECTLESS_TOOL_URL = "https://example.com/page"
+const PROTECTED_DEDUP_PATH = "/data/pattern-dedup.txt"
+const PROTECTED_DEDUP_GLOB = "**/pattern-dedup.txt"
+const RANGED_PROTECTED_PATH = "/data/ranged-protected.txt"
+const RANGED_PROTECTED_GLOB = "**/ranged-protected.txt"
+const GREP_PROTECTED_SUBJECT_PATTERN = "*parseConfig*"
 const PROTECTED_PRESSURE_BUNDLE_CHARS =
   PROTECTED_OUTPUT_BYTES * 2 + RECENT_WINDOW_FILLER_MESSAGES * FILLER_TEXT_CHARS
 const PROTECTED_PRESSURE_DEFICIT_TOKENS = PROTECTED_OUTPUT_BYTES / CHARS_PER_TOKEN
@@ -2050,13 +2068,155 @@ test("transform purges the input of an errored protected tool part outside the r
 test("transform lists a protected live subject in the hint line like any live subject", async () => {
   const hooks = await loadPluginHooksWith({ protectedTools: [BASH_TOOL] })
 
-  const bundle = buildBundle([[bashToolPart(HINT_PROTECTED_COMMAND, MIN_EVICTABLE_BYTES)], ...fillerMessages(2)])
+  const bundle = buildBundle([[bashToolPart(PROTECTED_COMMAND, MIN_EVICTABLE_BYTES)], ...fillerMessages(2)])
   await runTransform(hooks, bundle)
 
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
   const hintBlocks = hintBlocksIn(await runSystemTransform(hooks, SESSION_ID))
   assert.equal(hintBlocks.length, 1)
-  assert.equal(hintBlocks[0], hintLineFor([HINT_PROTECTED_COMMAND]))
+  assert.equal(hintBlocks[0], hintLineFor([PROTECTED_COMMAND]))
+})
+
+test("transform protects a read output whose path exactly matches a protectedPatterns entry under one token of pressure", async () => {
+  const hooks = await loadPluginHooksWith({ protectedPatterns: [PROTECTED_PATTERN_EXACT] })
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+  const bundle = buildStandardBundle(SESSION_ID, PROTECTED_PATTERN_EXACT)
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+})
+
+test("transform protects a read output when a doublestar glob pattern matches the tail of its path", async () => {
+  const hooks = await loadPluginHooksWith({ protectedPatterns: [PROTECTED_GLOB_PATTERN] })
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+  const bundle = buildStandardBundle(SESSION_ID, PROTECTED_GLOB_PATH)
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+})
+
+test("transform protects a read output when a slashless glob pattern matches a path segment", async () => {
+  const hooks = await loadPluginHooksWith({ protectedPatterns: [PROTECTED_SEGMENT_PATTERN] })
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+  const bundle = buildStandardBundle(SESSION_ID, PROTECTED_SEGMENT_PATH)
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+})
+
+test("transform evicts a read output when no protectedPatterns entry matches its path", async () => {
+  const hooks = await loadPluginHooksWith({ protectedPatterns: [UNMATCHED_PROTECTED_PATTERN] })
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+  const bundle = buildStandardBundle(SESSION_ID, UNPROTECTED_PLAIN_PATH)
+  await runTransform(hooks, bundle)
+
+  assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+})
+
+test("transform protects a bash output when a glob pattern matches its command string", async () => {
+  const hooks = await loadPluginHooksWith({ protectedPatterns: [PROTECTED_COMMAND_PATTERN] })
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+  const bundle = buildBundle([[bashToolPart(PROTECTED_COMMAND, MIN_EVICTABLE_BYTES)], ...fillerMessages()])
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+})
+
+test("transform protects a ranged read output when a glob pattern matches its file path", async () => {
+  const hooks = await loadPluginHooksWith({ protectedPatterns: [RANGED_PROTECTED_GLOB] })
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+  const bundle = buildBundle([
+    [
+      completedToolPart(
+        READ_TOOL,
+        {
+          [PATH_INPUT_KEY]: RANGED_PROTECTED_PATH,
+          [OFFSET_INPUT_KEY]: RANGED_ENTRY_OFFSET,
+          [LIMIT_INPUT_KEY]: RANGED_ENTRY_LIMIT,
+        },
+        outputOfBytes(MIN_EVICTABLE_BYTES),
+      ),
+    ],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+})
+
+test("transform protects a grep output when a glob pattern matches its extracted pattern subject", async () => {
+  const hooks = await loadPluginHooksWith({ protectedPatterns: [GREP_PROTECTED_SUBJECT_PATTERN] })
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+  const bundle = buildBundle([
+    [
+      completedToolPart(
+        GREP_TOOL,
+        { [PATTERN_INPUT_KEY]: PATTERN_QUERY, [INCLUDE_INPUT_KEY]: INCLUDE_GLOB },
+        outputOfBytes(MIN_EVICTABLE_BYTES),
+      ),
+    ],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+})
+
+test("transform still evicts a subjectless entry even when a match-all pattern is configured", async () => {
+  const hooks = await loadPluginHooksWith({ protectedPatterns: [MATCH_ALL_PATTERN] })
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+  const bundle = buildBundle([
+    [completedToolPart(SUBJECTLESS_TOOL, { url: SUBJECTLESS_TOOL_URL }, outputOfBytes(MIN_EVICTABLE_BYTES))],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+})
+
+test("transform leaves eviction unchanged when protectedPatterns is empty or invalid", async () => {
+  const emptyListHooks = await loadPluginHooksWith({ protectedPatterns: [] })
+  const nonArrayHooks = await loadPluginHooksWith({ protectedPatterns: PROTECTED_PATTERNS_NON_ARRAY })
+  const nonStringEntryHooks = await loadPluginHooksWith({
+    protectedPatterns: [MATCH_ALL_PATTERN, PROTECTED_PATTERNS_NON_STRING_ENTRY],
+  })
+  await setContextLimit(emptyListHooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+  await setContextLimit(nonArrayHooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+  await setContextLimit(nonStringEntryHooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+  const emptyListBundle = buildStandardBundle(SESSION_ID, UNPROTECTED_PLAIN_PATH)
+  const nonArrayBundle = buildStandardBundle(SESSION_ID, UNPROTECTED_PLAIN_PATH)
+  const nonStringEntryBundle = buildStandardBundle(SESSION_ID, UNPROTECTED_PLAIN_PATH)
+  await runTransform(emptyListHooks, emptyListBundle)
+  await runTransform(nonArrayHooks, nonArrayBundle)
+  await runTransform(nonStringEntryHooks, nonStringEntryBundle)
+
+  assert.ok(toolPartAt(emptyListBundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  assert.ok(toolPartAt(nonArrayBundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  assert.ok(toolPartAt(nonStringEntryBundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+})
+
+test("transform still dedups a pattern protected older duplicate with the newest substantial output retained", async () => {
+  const hooks = await loadPluginHooksWith({ protectedPatterns: [PROTECTED_DEDUP_GLOB] })
+
+  const bundle = buildBundle([
+    [pathToolPart(PROTECTED_DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
+    ...fillerMessages(2),
+    [pathToolPart(PROTECTED_DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
+    ...fillerMessages(2),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, dedupTombstoneFor(READ_TOOL, 3))
+  assert.equal(toolPartAt(bundle.messages[3], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
 })
 
 const stashSessionId = (index: number): string => `lru-stash-session-${index}`
