@@ -130,6 +130,13 @@ const DEDUP_LEAF_KEY_EARLY = "b"
 const DEDUP_NESTED_TOP_VALUE = 1
 const DEDUP_LEAF_VALUE_LATE = 2
 const DEDUP_LEAF_VALUE_EARLY = 3
+const DEDUP_FILE_SUPERSEDED_LEAD = "identical attachment superseded by the newer attachment at message"
+const FILE_MIME_TEXT = "text/plain"
+const FILE_MIME_PDF = "application/pdf"
+const FILE_URL = "file:///data/notes.txt"
+const FILE_URL_OTHER = "file:///data/other.txt"
+const FILE_FILENAME = "notes.txt"
+const FILE_PART_ID = "prt_lru_file_fixture"
 const PURGE_MARKER = "[lru-purged-input]"
 const PURGE_ERROR_PATH = "/data/errored-purge.txt"
 const PURGE_BOUNDARY_PATH = "/data/boundary-purge.txt"
@@ -238,7 +245,22 @@ type AttachedToolPart = {
   state: { status: "completed"; input: Record<string, unknown>; output: string; attachments: AttachmentItem[] }
 }
 
-type MessagePart = TextPart | CompletedToolPart | PendingToolPart | ErrorToolPart | ReasoningPart | AttachedToolPart
+type FileAttachmentPart = {
+  type: "file"
+  mime: string
+  url: string
+  filename?: string
+  id?: string
+}
+
+type MessagePart =
+  | TextPart
+  | CompletedToolPart
+  | PendingToolPart
+  | ErrorToolPart
+  | ReasoningPart
+  | AttachedToolPart
+  | FileAttachmentPart
 
 type StatefulToolPart = { state: { input: unknown } }
 
@@ -336,6 +358,9 @@ const pathToolPart = (path: string, outputBytes: number): CompletedToolPart =>
 
 const bashToolPart = (command: string, outputBytes: number): CompletedToolPart =>
   completedToolPart(BASH_TOOL, { command }, outputOfBytes(outputBytes))
+
+const fileAttachmentPart = (mime: string, url: string, filename?: string): FileAttachmentPart =>
+  filename === undefined ? { type: "file", mime, url } : { type: "file", mime, url, filename }
 
 const textMessages = (count: number, chars: number): MessagePart[][] =>
   Array.from({ length: count }, () => [textPart(textOfChars(chars))])
@@ -454,6 +479,9 @@ const pointerFor = (tool: string, msgIndex: number): string => `${tool} ${STASH_
 
 const dedupTombstoneFor = (tool: string, msgIndex: number): string =>
   `${DEDUP_MARKER} ${tool} ${DEDUP_SUPERSEDED_LEAD} ${msgIndex}`
+
+const fileDedupTombstoneFor = (label: string, msgIndex: number): string =>
+  `${DEDUP_MARKER} ${label} ${DEDUP_FILE_SUPERSEDED_LEAD} ${msgIndex}`
 
 const readEvicted = async (hooks: HookMap, subject: unknown, sessionID: string): Promise<unknown> =>
   (hooks as Record<string, Record<string, ReloadToolDefinition>>)[RELOAD_TOOL_MAP_KEY][RELOAD_TOOL_NAME].execute(
@@ -1946,6 +1974,145 @@ test("transform dedups an older duplicate when the newest identical output sits 
 
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, dedupTombstoneFor(READ_TOOL, 3))
   assert.equal(toolPartAt(bundle.messages[3], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+})
+
+test("transform tombstones an older identical file attachment with the dedup marker and keeps the newest occurrence verbatim", async () => {
+  const hooks = await loadPluginHooks()
+
+  const bundle = buildBundle([
+    [fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME)],
+    ...fillerMessages(2),
+    [fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME)],
+    ...fillerMessages(2),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.deepEqual(bundle.messages[0].parts[0], { type: "text", text: fileDedupTombstoneFor(FILE_FILENAME, 3) })
+  assert.deepEqual(bundle.messages[3].parts[0], fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME))
+})
+
+test("transform resolves three duplicate file attachments across messages to the single newest occurrence", async () => {
+  const hooks = await loadPluginHooks()
+
+  const bundle = buildBundle([
+    [fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME)],
+    [fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME)],
+    [fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME)],
+    ...fillerMessages(2),
+    [fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.deepEqual(bundle.messages[0].parts[0], { type: "text", text: fileDedupTombstoneFor(FILE_FILENAME, 5) })
+  assert.deepEqual(bundle.messages[1].parts[0], { type: "text", text: fileDedupTombstoneFor(FILE_FILENAME, 5) })
+  assert.deepEqual(bundle.messages[2].parts[0], { type: "text", text: fileDedupTombstoneFor(FILE_FILENAME, 5) })
+  assert.deepEqual(bundle.messages[5].parts[0], fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME))
+})
+
+test("transform retains the last of two identical file parts within one message", async () => {
+  const hooks = await loadPluginHooks()
+
+  const bundle = buildBundle([
+    [fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME), fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.deepEqual(bundle.messages[0].parts[0], { type: "text", text: fileDedupTombstoneFor(FILE_FILENAME, 0) })
+  assert.deepEqual(bundle.messages[0].parts[1], fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME))
+})
+
+test("transform tombstones an older duplicate file attachment whose newest copy sits inside the recent window", async () => {
+  const hooks = await loadPluginHooks()
+
+  const bundle = buildBundle([
+    [{ ...fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME), id: FILE_PART_ID }],
+    ...fillerMessages(RECENT_WINDOW_MESSAGES + 1),
+    [fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME)],
+    ...fillerMessages(RECENT_WINDOW_MESSAGES - 1),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.deepEqual(bundle.messages[0].parts[0], { type: "text", text: fileDedupTombstoneFor(FILE_FILENAME, 6) })
+  assert.deepEqual(bundle.messages[6].parts[0], fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME))
+})
+
+test("transform leaves a duplicate file attachment inside the recent window untouched", async () => {
+  const hooks = await loadPluginHooks()
+
+  const bundle = buildBundle([
+    ...fillerMessages(RECENT_WINDOW_MESSAGES - 2),
+    [fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME)],
+    [fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME)],
+    ...fillerMessages(2),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.deepEqual(bundle.messages[2].parts[0], fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME))
+  assert.deepEqual(bundle.messages[3].parts[0], fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME))
+})
+
+test("transform never collapses file attachments that differ in url or mime", async () => {
+  const hooks = await loadPluginHooks()
+
+  const bundle = buildBundle([
+    [fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME)],
+    [fileAttachmentPart(FILE_MIME_TEXT, FILE_URL_OTHER, FILE_FILENAME)],
+    [fileAttachmentPart(FILE_MIME_PDF, FILE_URL, FILE_FILENAME)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.deepEqual(bundle.messages[0].parts[0], fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME))
+  assert.deepEqual(bundle.messages[1].parts[0], fileAttachmentPart(FILE_MIME_TEXT, FILE_URL_OTHER, FILE_FILENAME))
+  assert.deepEqual(bundle.messages[2].parts[0], fileAttachmentPart(FILE_MIME_PDF, FILE_URL, FILE_FILENAME))
+})
+
+test("transform dedups filename-less file attachments by mime and url and labels the tombstone with the mime", async () => {
+  const hooks = await loadPluginHooks()
+
+  const bundle = buildBundle([
+    [fileAttachmentPart(FILE_MIME_TEXT, FILE_URL)],
+    ...fillerMessages(2),
+    [fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, "")],
+    ...fillerMessages(2),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.deepEqual(bundle.messages[0].parts[0], { type: "text", text: fileDedupTombstoneFor(FILE_MIME_TEXT, 3) })
+  assert.deepEqual(bundle.messages[3].parts[0], fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, ""))
+})
+
+test("transform leaves file dedup results unchanged on a second transform pass", async () => {
+  const hooks = await loadPluginHooks()
+
+  const bundle = buildBundle([
+    [fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME)],
+    ...fillerMessages(2),
+    [fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME)],
+    ...fillerMessages(2),
+  ])
+  await runTransform(hooks, bundle)
+  const afterFirstPass = structuredClone(bundle)
+  await runTransform(hooks, bundle)
+
+  assert.deepEqual(bundle, afterFirstPass)
+  assert.deepEqual(bundle.messages[0].parts[0], { type: "text", text: fileDedupTombstoneFor(FILE_FILENAME, 3) })
+})
+
+test("lru_stats counts file attachment dedup tombstones in the deduped counter", async () => {
+  const hooks = await loadPluginHooks()
+
+  const bundle = buildBundle([
+    [fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME)],
+    ...fillerMessages(2),
+    [fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME)],
+    ...fillerMessages(2),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).deduped, 1)
 })
 
 test("transform purges the input of an errored tool part one message outside the recent window while keeping its error output", async () => {
