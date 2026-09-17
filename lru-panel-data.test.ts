@@ -36,6 +36,9 @@ const TOTALS_STASH_HITS = 4
 const TOTALS_STASH_MISSES = 6
 const TOTALS_STASH_DROPPED = 1
 const TOTALS_DEDUPED = 9
+const TOTALS_REASONING_EXPIRED = 7
+const TOTALS_REASONING_BYTES = 2560
+const TOTALS_FENCE_EVICTED = 2
 const TOTALS_TOUCHES = 3
 const RECENT_LIMIT = 2
 const EVICTION_COUNT_PER_LINE = 3
@@ -53,6 +56,7 @@ const KILOBYTE_FRACTIONAL_BYTES = 1536
 const SUBJECT_TAIL = "-tail"
 const SECOND_LINE_ESTIMATED = 200000
 const UNKNOWN_BUDGET_SOURCE = "unknown"
+const OVERRIDE_BUDGET_SOURCE = "override"
 const MODEL_BUDGET_SOURCE = "model"
 const DEFAULT_BUDGET_SOURCE = "default"
 
@@ -63,6 +67,9 @@ const makeTotals = (): PanelMetricsLine["totals"] => ({
   stashMisses: TOTALS_STASH_MISSES,
   stashDropped: TOTALS_STASH_DROPPED,
   deduped: TOTALS_DEDUPED,
+  reasoningExpired: TOTALS_REASONING_EXPIRED,
+  reasoningBytesExpired: TOTALS_REASONING_BYTES,
+  fenceEvicted: TOTALS_FENCE_EVICTED,
   postEvictionTouches: TOTALS_TOUCHES,
 })
 
@@ -126,9 +133,8 @@ test("parseMetricsLine rejects a line missing a required field", () => {
 })
 
 test("parseMetricsLine rejects a line whose totals carry a non-numeric counter", () => {
-  const raw = JSON.stringify(makeLine({ totals: { ...makeTotals(), evictions: "many" } }))
-
-  assert.equal(parseMetricsLine(raw), undefined)
+  assert.equal(parseMetricsLine(JSON.stringify(makeLine({ totals: { ...makeTotals(), evictions: "many" } }))), undefined)
+  assert.equal(parseMetricsLine(JSON.stringify(makeLine({ totals: { ...makeTotals(), fenceEvicted: "some" } }))), undefined)
 })
 
 test("parseMetricsLine rejects a line whose evicted entries are malformed", () => {
@@ -137,13 +143,17 @@ test("parseMetricsLine rejects a line whose evicted entries are malformed", () =
   assert.equal(parseMetricsLine(raw), undefined)
 })
 
-test("parseMetricsLine accepts the plugin's lines that carry run-scoped fields the panel does not consume", () => {
+test("parseMetricsLine accepts the plugin's lines that carry run-scoped fields the panel does not consume and the full totals schema", () => {
   const raw = JSON.stringify({
     ...makeLine(),
     ts: "2026-09-16T12:00:00.000Z",
     dedupedThisRun: 2,
+    reasoningExpiredThisRun: 1,
+    reasoningBytesExpiredThisRun: 512,
+    fenceEvictedThisRun: 1,
     postEvictionTouchesThisRun: 1,
     stashReadsSinceLastLine: 3,
+    totals: makeTotals(),
   })
 
   const line = parseMetricsLine(raw)
@@ -151,6 +161,9 @@ test("parseMetricsLine accepts the plugin's lines that carry run-scoped fields t
   assert.ok(line !== undefined)
   assert.equal(line.session, SESSION_A)
   assert.equal(line.estimatedTokens, ESTIMATED_TOKENS)
+  assert.equal(line.totals.reasoningExpired, TOTALS_REASONING_EXPIRED)
+  assert.equal(line.totals.reasoningBytesExpired, TOTALS_REASONING_BYTES)
+  assert.equal(line.totals.fenceEvicted, TOTALS_FENCE_EVICTED)
 })
 
 test("parseMetricsLog keeps every well-formed line and skips blanks and malformed lines", () => {
@@ -340,6 +353,7 @@ test("formatBytes renders bytes under one kilobyte as-is and larger sizes in kil
 })
 
 test("budgetSourceLabel maps the plugin's source ids to panel labels", () => {
+  assert.equal(budgetSourceLabel(OVERRIDE_BUDGET_SOURCE), "per-model override")
   assert.equal(budgetSourceLabel(MODEL_BUDGET_SOURCE), "per-model limit")
   assert.equal(budgetSourceLabel(DEFAULT_BUDGET_SOURCE), "plugin default")
   assert.equal(budgetSourceLabel(UNKNOWN_BUDGET_SOURCE), "inactive (no budget)")
@@ -384,7 +398,7 @@ test("panelRows renders the current session's budget, last run, counters, and re
   assert.ok(rows.some((row) => row.text === `session: ${SESSION_A}`))
   assert.ok(rows.some((row) => row.text === `budget: ~200k tokens (per-model limit)`))
   assert.ok(rows.some((row) => row.text === "last run: ~123.5k estimated vs ~100k watermark (over by ~23.5k)"))
-  assert.ok(rows.some((row) => row.text === `evictions: ${TOTALS_EVICTIONS} (12 kB reclaimed), dedup: ${TOTALS_DEDUPED}, touches: ${TOTALS_TOUCHES}`))
+  assert.ok(rows.some((row) => row.text === `evictions: ${TOTALS_EVICTIONS} (12 kB reclaimed), fences: ${TOTALS_FENCE_EVICTED}, dedup: ${TOTALS_DEDUPED}, reasoning: ${TOTALS_REASONING_EXPIRED} (2.5 kB), touches: ${TOTALS_TOUCHES}`))
   assert.ok(rows.some((row) => row.text === `stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} (${TOTALS_STASH_HITS} hits / ${TOTALS_STASH_MISSES} misses), dropped: ${TOTALS_STASH_DROPPED}`))
   assert.ok(rows.some((row) => row.text === "recently evicted:"))
   assert.ok(rows.some((row) => row.text === `read /data/a.txt (3 kB, ${EVICTED_MESSAGES_AGO} msgs ago)`))
@@ -407,7 +421,21 @@ test("panelRows marks an unknown budget inactive and omits watermark fields when
   const rows = panelRows(data)
 
   assert.ok(rows.some((row) => row.text === "budget: inactive (no budget)"))
-  assert.ok(rows.some((row) => row.text === "last run: ~123.5k estimated, no watermark (unknown budget)"))
+  assert.ok(rows.some((row) => row.text === "last run: ~123.5k estimated, no watermark"))
+})
+
+test("panelRows labels an override-sourced budget as a per-model override", () => {
+  const data = {
+    source: "/tmp/metrics.jsonl",
+    activeSession: SESSION_A,
+    current: sessionPanelData([makeLine({ modelContextTokensSource: OVERRIDE_BUDGET_SOURCE })], SESSION_A),
+    global: globalTotals([]),
+    error: undefined,
+  }
+
+  const rows = panelRows(data)
+
+  assert.ok(rows.some((row) => row.text === "budget: ~200k tokens (per-model override)"))
 })
 
 test("panelRows reports a session without recorded runs distinctly from a panel opened outside any session", () => {

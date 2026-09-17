@@ -3849,6 +3849,8 @@ const FENCE_LINE_TAG_A = "alpha"
 const FENCE_LINE_TAG_B = "beta"
 const FENCE_BLANK_LEAD_LINES = 2
 const FENCE_TRAILING_NEWLINE_CHARS = 1
+const FENCE_COMPOSED_PAD_CHARS = 4000
+const COMPOSED_COLD_PATH = "/data/fence-composed-cold.txt"
 const USER_ROLE = "user"
 const ASSISTANT_ROLE = "assistant"
 
@@ -4006,6 +4008,36 @@ test("read_evicted evicts the oldest stashed entry when fence evictions push a s
   assert.deepEqual(stats.stash, { entries: STASH_LIMIT, capacity: STASH_LIMIT })
   assert.equal(await readEvicted(hooks, fenceFirstLineOf("block0"), SESSION_ID), stashMissFor(fenceFirstLineOf("block0")))
   assert.equal(await readEvicted(hooks, fenceFirstLineOf("block1"), SESSION_ID), `${blocks[1]}\n`)
+})
+
+test("transform lowers the estimate with fence bytes before the budget decision and lands the block in the shared bounded stash", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
+  const padLine = "p".repeat(FENCE_COMPOSED_PAD_CHARS)
+  const contentLines = [fenceFirstLineOf(FENCE_LINE_TAG), ...Array.from({ length: FENCE_OVER_LINES - 1 }, () => padLine)]
+  const block = fenceBlockText(FENCE_LANGUAGE_TS, contentLines)
+  const text = `${FENCE_PROSE_BEFORE}\n${block}\n${FENCE_PROSE_AFTER}`
+  const tombstone = fenceTombstoneFor(FENCE_LANGUAGE_TS, FENCE_OVER_LINES, fenceFirstLineOf(FENCE_LINE_TAG))
+  const postFenceChars =
+    text.replace(block, tombstone).length + MIN_EVICTABLE_BYTES + RECENT_WINDOW_FILLER_MESSAGES * FILLER_TEXT_CHARS
+  await setContextLimit(hooks, SESSION_ID, contextForWatermarkTokens(tokensForChars(postFenceChars) + HEADROOM_TOKENS))
+
+  const bundle: StrictBundle = {
+    messages: [
+      userTextMessageFor(SESSION_ID, USER_ROLE, text),
+      syntheticMessageFor(SESSION_ID, [pathToolPart(COMPOSED_COLD_PATH, MIN_EVICTABLE_BYTES)]),
+      ...fillerMessages().map((parts) => syntheticMessageFor(SESSION_ID, parts)),
+    ],
+  }
+  await runTransform(hooks, bundle)
+
+  assert.equal(textAt(bundle, 0), `${FENCE_PROSE_BEFORE}\n${tombstone}\n${FENCE_PROSE_AFTER}`)
+  assert.equal(toolPartAt(bundle.messages[1], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), `${block}\n`)
+
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.equal(countersOf(stats).fenceEvicted, 1)
+  assert.equal(countersOf(stats).evictions, 0)
+  assert.deepEqual(stats.stash, { entries: 1, capacity: STASH_LIMIT })
 })
 
 test("transform replaces a fence block whose closer ends the part text without dropping the prose before it", async () => {
