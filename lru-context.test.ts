@@ -22,6 +22,7 @@ const LEGACY_DEFAULT_CONTEXT_TOKENS = 100000
 const EXPLICIT_DEFAULT_CONTEXT_TOKENS = 600
 const LARGE_DEFAULT_CONTEXT_TOKENS = 1000000
 const INFINITE_DEFAULT_CONTEXT_TOKENS = Infinity
+const INFINITE_REPORTED_CONTEXT = Infinity
 const MIN_EVICTABLE_BYTES = 2048
 const RECENT_WINDOW_MESSAGES = 4
 const FILLER_TEXT_CHARS = 10
@@ -178,6 +179,9 @@ const PROTECTED_PRESSURE_DEFICIT_TOKENS = PROTECTED_OUTPUT_BYTES / CHARS_PER_TOK
 const STASH_SESSION_BOUND = 8
 const STASH_SESSION_OVERFLOW_COUNT = 9
 const STASH_MISS_PROBE_SUBJECT = "/data/stash-probe-miss.txt"
+const STASH_CROSS_RUN_FIRST_COUNT = 30
+const STASH_CROSS_RUN_SECOND_COUNT = 25
+const STASH_CROSS_RUN_DROP_COUNT = 5
 const LIMIT_SESSION_BOUND = 8
 const LIMIT_SESSION_OVERFLOW_COUNT = 9
 const RENDERED_SUBJECT_CAP = 160
@@ -1112,6 +1116,19 @@ test("transform ignores infinite override entries and an infinite defaultContext
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
 })
 
+test("transform ignores an infinite model reported limit and falls through to the explicit defaultContextTokens option", async () => {
+  const hooks = await loadPluginHooksWith({ defaultContextTokens: EXPLICIT_DEFAULT_CONTEXT_TOKENS })
+  await setChatParamsForModel(hooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID, INFINITE_REPORTED_CONTEXT)
+
+  const bundle = buildStandardBundle(SESSION_ID, "/data/infinite-reported.txt")
+  await runTransform(hooks, bundle)
+
+  assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.equal(stats.modelContextTokens, EXPLICIT_DEFAULT_CONTEXT_TOKENS)
+  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_DEFAULT)
+})
+
 test("transform keeps a stored real context limit when a later chat params event carries none", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
@@ -1703,6 +1720,25 @@ test("read_evicted returns the newest match in full and one-line pointers to old
   assert.equal(
     await readEvicted(hooks, "/data/dup.txt", SESSION_ID),
     `${outputOfBytes(COLD_OUTPUT_BYTES)}\n${olderMatchesLineFor("/data/dup.txt", [pointerFor(READ_TOOL, 0)])}`,
+  )
+})
+
+test("read_evicted lists every older match oldest first when three evictions share one subject", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const bundle = buildBundle([[pathToolPart("/data/order.txt", THREE_ENTRY_OUTPUT_BYTES)], ...fillerMessages()])
+  await runTransform(hooks, bundle)
+  bundle.messages.push(syntheticMessageFor(SESSION_ID, [pathToolPart("/data/order.txt", COLD_OUTPUT_BYTES)]))
+  fillerMessages().forEach((parts) => bundle.messages.push(syntheticMessageFor(SESSION_ID, parts)))
+  await runTransform(hooks, bundle)
+  bundle.messages.push(syntheticMessageFor(SESSION_ID, [pathToolPart("/data/order.txt", COLD_OUTPUT_BYTES)]))
+  fillerMessages().forEach((parts) => bundle.messages.push(syntheticMessageFor(SESSION_ID, parts)))
+  await runTransform(hooks, bundle)
+
+  assert.equal(
+    await readEvicted(hooks, "/data/order.txt", SESSION_ID),
+    `${outputOfBytes(COLD_OUTPUT_BYTES)}\n${olderMatchesLineFor("/data/order.txt", [pointerFor(READ_TOOL, 0), pointerFor(READ_TOOL, 5)])}`,
   )
 })
 
@@ -2837,6 +2873,7 @@ const STATS_SKIP_RUN_SUBJECT = "/data/stats-skip-run.txt"
 const STATS_HIT_SUBJECT = "/data/stats-hit.txt"
 const STATS_STASH_SUBJECT_PREFIX = "/data/stats-stash"
 const STATS_STASH_SUBJECT_SUFFIX = ".txt"
+const REMEMBERED_SUBJECT_OVERFLOW_COUNT = 101
 const STATS_LOGGED_SUBJECT = "/data/logged.txt"
 const STATS_RELOADED_SUBJECT = "/data/reload-logged.txt"
 const STATS_UNLOGGED_SUBJECT = "/data/unlogged.txt"
@@ -3042,6 +3079,31 @@ test("lru_stats leaves post eviction touches at zero when a later call matches n
   assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).postEvictionTouches, 0)
 })
 
+test("lru_stats forgets the oldest evicted subject past the hundred subject cap and stops counting its post eviction touches", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const subjects = Array.from(
+    { length: REMEMBERED_SUBJECT_OVERFLOW_COUNT },
+    (_, index) => `/data/cap${index}.txt`,
+  )
+  const bundle = buildBundle([
+    ...subjects.map((subject) => [pathToolPart(subject, MIN_EVICTABLE_BYTES)]),
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  bundle.messages.push(
+    syntheticMessageFor(SESSION_ID, [
+      pathToolPart(subjects[0], APPEARANCE_ONLY_OUTPUT_BYTES),
+      pathToolPart(subjects[REMEMBERED_SUBJECT_OVERFLOW_COUNT - 1], APPEARANCE_ONLY_OUTPUT_BYTES),
+    ]),
+  )
+  await runTransform(hooks, bundle)
+
+  assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).postEvictionTouches, 1)
+})
+
 test("lru_stats counts dedup tombstones without counting evictions and stays incremental across repeated transforms", async () => {
   const hooks = await loadPluginHooks()
 
@@ -3079,6 +3141,59 @@ test("lru_stats counts stash drops when a single run evicts fifty one entries pa
   assert.equal(countersOf(stats).stashDropped, 1)
   assert.equal(countersOf(stats).bytesReclaimed, STASH_OVERFLOW_COUNT * MIN_EVICTABLE_BYTES)
   assert.deepEqual(stats.stash, { entries: STASH_LIMIT, capacity: STASH_LIMIT })
+})
+
+test("transform drops nothing from a session stash holding exactly the fifty entry bound", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const subjects = Array.from({ length: STASH_LIMIT }, (_, index) => `/data/bound${index}.txt`)
+  const bundle = buildBundle([
+    ...subjects.map((subject) => [pathToolPart(subject, MIN_EVICTABLE_BYTES)]),
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.equal(countersOf(stats).stashDropped, 0)
+  assert.deepEqual(stats.stash, { entries: STASH_LIMIT, capacity: STASH_LIMIT })
+  assert.equal(await readEvicted(hooks, subjects[0], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+})
+
+test("read_evicted drops the earliest runs' entries first when later runs push a session stash past the fifty entry bound", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const firstRunSubjects = Array.from(
+    { length: STASH_CROSS_RUN_FIRST_COUNT },
+    (_, index) => `/data/cross-run-a${index}.txt`,
+  )
+  const bundle = buildBundle([
+    ...firstRunSubjects.map((subject) => [pathToolPart(subject, MIN_EVICTABLE_BYTES)]),
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  const secondRunSubjects = Array.from(
+    { length: STASH_CROSS_RUN_SECOND_COUNT },
+    (_, index) => `/data/cross-run-b${index}.txt`,
+  )
+  bundle.messages.push(
+    syntheticMessageFor(SESSION_ID, secondRunSubjects.map((subject) => pathToolPart(subject, MIN_EVICTABLE_BYTES))),
+  )
+  fillerMessages().forEach((parts) => bundle.messages.push(syntheticMessageFor(SESSION_ID, parts)))
+  await runTransform(hooks, bundle)
+
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.equal(countersOf(stats).evictions, STASH_CROSS_RUN_FIRST_COUNT + STASH_CROSS_RUN_SECOND_COUNT)
+  assert.equal(countersOf(stats).stashDropped, STASH_CROSS_RUN_DROP_COUNT)
+  assert.deepEqual(stats.stash, { entries: STASH_LIMIT, capacity: STASH_LIMIT })
+  assert.equal(await readEvicted(hooks, firstRunSubjects[0], SESSION_ID), stashMissFor(firstRunSubjects[0]))
+  assert.equal(
+    await readEvicted(hooks, firstRunSubjects[STASH_CROSS_RUN_DROP_COUNT], SESSION_ID),
+    outputOfBytes(MIN_EVICTABLE_BYTES),
+  )
+  assert.equal(await readEvicted(hooks, secondRunSubjects[0], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
 })
 
 test("metrics log appends one eventful jsonl line with expected fields and nothing for a quiet repeated run", async () => {
@@ -3307,6 +3422,48 @@ test("read_evicted leaves live session metrics untouched when a never-transforme
   assert.deepEqual(countersOf(await lruStats(hooks, METRICS_PROBE_SESSION_ID)), STATS_ZEROED_COUNTERS)
 })
 
+test("lru_stats refreshes a probing session's metrics so it survives when a ninth session transforms", async () => {
+  const hooks = await loadPluginHooks()
+  for (let index = 0; index < METRICS_SESSION_BOUND; index += 1) await storeMetricsSession(hooks, index)
+
+  await lruStats(hooks, metricsSessionId(0))
+  await storeMetricsSession(hooks, METRICS_SESSION_OVERFLOW_COUNT - 1)
+
+  assert.equal(countersOf(await lruStats(hooks, metricsSessionId(0))).evictions, 1)
+  assert.deepEqual(countersOf(await lruStats(hooks, metricsSessionId(1))), STATS_ZEROED_COUNTERS)
+  assert.equal(countersOf(await lruStats(hooks, metricsSessionId(METRICS_SESSION_OVERFLOW_COUNT - 1))).evictions, 1)
+})
+
+test("lru_stats leaves live session metrics untouched when a never-transformed session opens the stats tool at the session bound", async () => {
+  const hooks = await loadPluginHooks()
+  for (let index = 0; index < METRICS_SESSION_BOUND; index += 1) await storeMetricsSession(hooks, index)
+
+  assert.deepEqual(countersOf(await lruStats(hooks, METRICS_PROBE_SESSION_ID)), STATS_ZEROED_COUNTERS)
+  assert.equal(countersOf(await lruStats(hooks, metricsSessionId(0))).evictions, 1)
+  assert.equal(countersOf(await lruStats(hooks, metricsSessionId(METRICS_SESSION_BOUND - 1))).evictions, 1)
+})
+
+test("lru_stats does not refresh a session stash so a stats-only probe leaves it exposed when a ninth session stashes an eviction", async () => {
+  const hooks = await loadPluginHooks()
+  for (let index = 0; index < STASH_SESSION_BOUND; index += 1) await evictStashSession(hooks, index)
+
+  await lruStats(hooks, stashSessionId(0))
+  await evictStashSession(hooks, STASH_SESSION_OVERFLOW_COUNT - 1)
+
+  assert.equal(
+    await readEvicted(hooks, stashSessionSubject(0), stashSessionId(0)),
+    stashMissFor(stashSessionSubject(0)),
+  )
+  assert.equal(
+    await readEvicted(hooks, stashSessionSubject(1), stashSessionId(1)),
+    outputOfBytes(MIN_EVICTABLE_BYTES),
+  )
+  assert.equal(
+    await readEvicted(hooks, stashSessionSubject(STASH_SESSION_OVERFLOW_COUNT - 1), stashSessionId(STASH_SESSION_OVERFLOW_COUNT - 1)),
+    outputOfBytes(MIN_EVICTABLE_BYTES),
+  )
+})
+
 test("metrics log clears a recorded write failure once a later write succeeds", async () => {
   const metricsDir = makeMetricsDir()
   try {
@@ -3424,6 +3581,9 @@ const ATTACHED_MIXED_BUNDLE_CHARS =
   ATTACHED_MIXED_TOOL_PART_COUNT * MIN_EVICTABLE_BYTES + RECENT_WINDOW_FILLER_MESSAGES * FILLER_TEXT_CHARS
 const ATTACHED_TOMBSTONE_MESSAGES_AGO = 5
 const SIBLING_PLAIN_PATH = "/data/plain-sibling.txt"
+const NON_ARRAY_ATTACHMENTS_PATH = "/data/non-array-attachments.txt"
+const NON_ARRAY_ATTACHMENTS_KEY = "attachments"
+const NON_ARRAY_ATTACHMENTS_VALUE = "not an attachment array"
 
 const attachmentUrlOf = (mime: string, payloadChars: number): string =>
   `${ATTACHMENT_URL_PREFIX}:${mime};${ATTACHMENT_URL_ENCODING},${ATTACHMENT_URL_PAYLOAD_CHAR.repeat(payloadChars)}`
@@ -3516,6 +3676,30 @@ test("transform keeps the no attachment sibling tombstone in the plain format wh
   assert.equal(Object.hasOwn(toolPartAt(bundle.messages[0], 1).state, ATTACHMENTS_STATE_KEY), false)
 })
 
+test("transform ignores a non array attachments field when evicting and leaves the field in place", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+  const bundle = buildBundle([
+    [completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: NON_ARRAY_ATTACHMENTS_PATH }, outputOfBytes(MIN_EVICTABLE_BYTES))],
+    ...fillerMessages(),
+  ])
+  const state = (bundle.messages[0].parts[0] as { state: Record<string, unknown> }).state
+  state[NON_ARRAY_ATTACHMENTS_KEY] = NON_ARRAY_ATTACHMENTS_VALUE
+  await runTransform(hooks, bundle)
+
+  const output = toolPartAt(bundle.messages[0], 0).state.output
+  assert.ok(output.startsWith(`${TOMBSTONE_MARKER} read ${NON_ARRAY_ATTACHMENTS_PATH} (${MIN_EVICTABLE_BYTES} bytes, ~5 messages ago)`))
+  assert.equal(output.includes(TOMBSTONE_ATTACHMENTS_NOTICE), false)
+  assert.equal(state[NON_ARRAY_ATTACHMENTS_KEY], NON_ARRAY_ATTACHMENTS_VALUE)
+  assert.deepEqual(countersOf(await lruStats(hooks, SESSION_ID)), {
+    ...STATS_ZEROED_COUNTERS,
+    evictions: 1,
+    bytesReclaimed: MIN_EVICTABLE_BYTES,
+  })
+  assert.equal(await readEvicted(hooks, NON_ARRAY_ATTACHMENTS_PATH, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+})
+
 test("read_evicted returns the original output plus a manifest naming the dropped attachment payload after an attachment bearing eviction", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
@@ -3577,6 +3761,24 @@ test("transform strips attachments from a dedup tombstoned older call while the 
   assert.deepEqual(attachmentsOf(bundle.messages[3], 0), [
     attachmentItemOf(ATTACHMENT_MIME_JPEG, ATTACHMENT_PAYLOAD_CHARS_SECONDARY, ATTACHMENT_CALL_ID_NEWER),
   ])
+})
+
+test("transform ignores a non array attachments field when deduplicating and leaves the field in place", async () => {
+  const hooks = await loadPluginHooks()
+
+  const bundle = buildBundle([
+    [completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: NON_ARRAY_ATTACHMENTS_PATH }, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))],
+    ...fillerMessages(2),
+    [completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: NON_ARRAY_ATTACHMENTS_PATH }, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))],
+    ...fillerMessages(2),
+  ])
+  const olderState = (bundle.messages[0].parts[0] as { state: Record<string, unknown> }).state
+  olderState[NON_ARRAY_ATTACHMENTS_KEY] = NON_ARRAY_ATTACHMENTS_VALUE
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, dedupTombstoneFor(READ_TOOL, 3))
+  assert.equal(olderState[NON_ARRAY_ATTACHMENTS_KEY], NON_ARRAY_ATTACHMENTS_VALUE)
+  assert.equal(toolPartAt(bundle.messages[3], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
 })
 
 test("lru_stats counts attachment payload characters in bytesReclaimed for an attachment bearing eviction", async () => {
