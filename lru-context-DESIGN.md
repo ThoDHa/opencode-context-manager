@@ -6,14 +6,16 @@ The LRU context manager is the opencode plugin at
 It hooks the transform opencode runs on the message list before every
 model call and trims what the provider is about to receive. This note
 documents what the plugin does, how each mechanism works, why the design
-pays for itself in tokens, and where it does not. `DESIGN.md` beside
-this file records the mechanisms as built and carries the deployment
-notes; this note is the end-to-end walkthrough with the economics and
-the limits in front. The plugin mechanism claims here are pinned by
-`make test-plugin`, which runs 249 tests (218 over the plugin core in
+pays for itself in tokens, what the alternatives leave uncovered, and
+where it does not. `DESIGN.md` beside this file records the mechanisms
+as built and carries the deployment notes; this note is the end-to-end
+walkthrough with the economics, the alternatives, and the limits in
+front. The plugin mechanism claims here are pinned by `make test-plugin`,
+which runs 249 tests (218 over the plugin core in
 `tests/opencode/lru-context.test.ts`, 31 over the panel data layer in
-`tests/opencode/lru-panel-data.test.ts`); the economics and the
-observed session below are argument and measurement, not test outputs.
+`tests/opencode/lru-panel-data.test.ts`); the economics, the comparison
+with the native alternatives, and the observed session below are
+argument and measurement, not test outputs.
 Keeping the two documents in sync is a maintenance rule: a plugin
 change updates both this note and DESIGN.md's LRU regions.
 
@@ -320,6 +322,82 @@ trims just far enough to fall back under) instead of letting it grow
 with history, and the session's cumulative input falls from quadratic in
 N toward linear in N. That conversion, on top of the zero-loss tiers, is
 the entire economic argument.
+
+## Why it is needed, what exists, and where this design fits
+
+### Why it is needed
+
+The economics above sharpen into one need. The stateless API re-sends
+the whole history on every request, per-request input grows
+monotonically, and cumulative consumption grows near-quadratically while
+the underlying content grows linearly. In the normal path nothing trims
+per turn, so growth continues until something reacts. The question a
+long session faces is not whether to pay for history, since that bill
+is unavoidable, but whether anything intervenes between steady
+accumulation and the context ceiling, and at what information cost.
+
+### What exists today
+
+The entries below are the per-turn history mechanisms in the field,
+grounded in opencode's config schema (https://opencode.ai/config.json);
+the schema also holds a same-family mechanism that acts earlier, at
+ingestion: `tool_output.max_lines` (default 2000) and
+`tool_output.max_bytes` (default 51200) truncate oversized tool output
+with the full text saved to disk and a preview returned, bounding what
+enters rather than acting on accumulated history. Doing nothing: the
+baseline the others are measured against, and the quadratic curve
+above. Native compaction: the `compaction.auto` option defaults to
+true and fires, in the schema's words, "when context is full"; its
+retention knobs (`tail_turns`, `preserve_recent_tokens`, `reserved`)
+control how much recent conversation survives verbatim and how much
+window headroom the collapse reserves, and manual compaction is the
+on-demand form of the same mechanism (the one product-behavior clause
+here, grounded in the product's compaction command surface rather than
+the schema). A native prune: the `compaction.prune` option enables
+pruning of old tool outputs and defaults to false. Provider prompt
+caching: the schema's per-model cost model carries separate
+`cache_read` and `cache_write` prices, the industry's mechanism for
+making re-sent history cheaper rather than smaller.
+
+### Why the alternatives are not good enough
+
+Each leaves the gap this plugin targets. Auto compaction is reactive at
+the ceiling: it fires only when context is full, so every token of the
+quadratic re-send has already been spent on the way up, and the
+intervention arrives as one large lossy event rather than continuous
+maintenance. Its retention knobs keep a recent slice verbatim;
+everything older is summarized, and summarization is lossy and
+irreversible, with no recovery path for dropped tool output. The prune
+toggle addresses old tool outputs directly but defaults to false, and
+its schema description mentions none of what this plugin builds around
+the same idea: no tiering by information value, no stash, no way back.
+Prompt caching is pricing relief, not trimming: the model still attends
+over the full context, and what a cache discount does to a plan-level
+usage quota is unknown; the honest-limits section returns to this as
+the design's largest unquantified risk. Doing nothing is the quadratic
+curve itself.
+
+### Where this design is better, and where it is not
+
+The claims are proportional to the gap. This plugin maintains per turn,
+under a chosen watermark, instead of reacting once at full. It tiers by
+information value: zero-loss expiry and dedup run first on every turn,
+and the lossy step, eviction, runs last, only above the watermark,
+against candidates ordered by recency. What eviction removes is
+reversible through the stash and `read_evicted`, which neither
+compaction's summaries nor a flat prune offers. It is observable: the
+metrics log, the `/lru` panel, and `lru_stats` record what left and
+when; the schema's compaction options define no comparable surface. It is
+also complementary by construction: native auto compaction remains the
+overflow backstop this doc already names, so the plugin shrinks the
+sessions that would otherwise need frequent collapses rather than
+replacing the mechanism. Two admissions bound all of it. For sessions
+that never grow, the plugin is inert: the passes find nothing, and
+doing nothing is then the correct behavior. Against a provider that
+discounts cached prefixes heavily, trimming's benefit shrinks and can
+forfeit more in lost cache hits than it recovers in bytes, as the
+honest-limits section argues; the plugin does not model cache state and
+does not claim to.
 
 ## When it fires and when it never does
 
