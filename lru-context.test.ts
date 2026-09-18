@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
@@ -304,10 +304,11 @@ const buildSmallBundle = (): MessageBundle => ({
   ],
 })
 
-const loadPluginHooks = async (): Promise<HookMap> => (await lruContextFactory({}, { metricsLog: false })) as HookMap
+const loadPluginHooks = async (): Promise<HookMap> =>
+  (await lruContextFactory({}, { metricsLog: false, liveStateLog: false })) as HookMap
 
 const loadPluginHooksWith = async (options: Record<string, unknown>): Promise<HookMap> =>
-  (await lruContextFactory({}, { metricsLog: false, ...options })) as HookMap
+  (await lruContextFactory({}, { metricsLog: false, liveStateLog: false, ...options })) as HookMap
 
 type HintPartRef = { messageIndex: number; partIndex: number; text: string }
 
@@ -3004,6 +3005,9 @@ test("lru_stats reports zeroed counters unknown budget and empty stash for a ses
     metricsLog: false,
     metricsPath: DEFAULT_METRICS_PATH,
     metricsRotationMaxBytes: DEFAULT_METRICS_ROTATION_MAX_BYTES,
+    liveStateLog: false,
+    liveStatePath: DEFAULT_LIVE_STATE_DIR,
+    liveStatePruneMaxAgeMs: DEFAULT_LIVE_STATE_PRUNE_MAX_AGE_MS,
     userFenceEviction: { enabled: false, minBlockLines: FENCE_DEFAULT_MIN_BLOCK_LINES },
     manualMode: false,
   })
@@ -3689,6 +3693,301 @@ test("panel data parses the post rotation state with the pre rotation line gone 
   } finally {
     cleanupMetricsDir(metricsDir)
   }
+})
+
+const LIVE_STATE_DIR_NAME = "lru-state"
+const DEFAULT_LIVE_STATE_DIR = join(homedir(), ...METRICS_DIR_SEGMENTS, LIVE_STATE_DIR_NAME)
+const LIVE_STATE_TEMP_DIR_PREFIX = "lru-live-state-test-"
+const LIVE_STATE_FILE_SUFFIX = ".json"
+const LIVE_STATE_BLOCKER_FILE = "blocker.txt"
+const DEFAULT_LIVE_STATE_PRUNE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
+const LIVE_STATE_PRUNE_TEST_MAX_AGE_MS = 1000
+const LIVE_STATE_PRUNE_BACKDATED_MS = 10000
+const LIVE_STATE_STALE_SESSION = "lru-state-stale-session"
+const LIVE_STATE_STUCK_SESSION = "lru-state-stuck-entry"
+const LIVE_STATE_FRESH_SESSION = "lru-state-fresh-session"
+const LIVE_STATE_STALE_CONTENT = '{"stale": true}\n'
+const LIVE_STATE_FRESH_CONTENT = '{"fresh": true}\n'
+const LIVE_STATE_QUIET_SUBJECT = "/data/state-quiet.txt"
+const LIVE_STATE_MANUAL_SUBJECT = "/data/state-manual.txt"
+const LIVE_STATE_CUSTOM_STATE_DIR = "/tmp/custom-lru-state"
+const LIVE_STATE_CUSTOM_PRUNE_MAX_AGE_MS = 1000
+const LIVE_STATE_ZERO_HINT_SUBJECTS = 0
+const LIVE_STATE_ESCAPE_SEGMENT = "escape-dir"
+
+const liveStatePathIn = (dir: string, sessionID: string): string => join(dir, `${sessionID}${LIVE_STATE_FILE_SUFFIX}`)
+
+const blockedLiveStateDirIn = (dir: string): string => join(dir, LIVE_STATE_BLOCKER_FILE, LIVE_STATE_DIR_NAME)
+
+const makeLiveStateDir = (): string => mkdtempSync(join(tmpdir(), LIVE_STATE_TEMP_DIR_PREFIX))
+
+const loadPluginHooksWithLiveState = async (stateDir: string, extra: Record<string, unknown> = {}): Promise<HookMap> =>
+  loadPluginHooksWith({ liveStateLog: true, liveStatePath: stateDir, ...extra })
+
+const snapshotIn = (dir: string, sessionID: string): Record<string, unknown> =>
+  JSON.parse(readFileSync(liveStatePathIn(dir, sessionID), "utf8")) as Record<string, unknown>
+
+const snapshotBodyOf = (dir: string, sessionID: string): { ts: unknown; snapshot: Record<string, unknown> } => {
+  const { ts, ...snapshot } = snapshotIn(dir, sessionID)
+  return { ts, snapshot }
+}
+
+const assertValidTimestamp = (ts: unknown): void => {
+  assert.equal(typeof ts, "string")
+  assert.ok(Number.isNaN(new Date(ts as string).getTime()) === false)
+}
+
+test("live state snapshot is written on a quiet run with the exact schema budget counters stash occupancy and hot subjects", async () => {
+  const stateDir = makeLiveStateDir()
+  try {
+    const hooks = await loadPluginHooksWithLiveState(stateDir)
+
+    const bundle = buildStandardBundle(SESSION_ID, LIVE_STATE_QUIET_SUBJECT)
+    await runTransform(hooks, bundle)
+
+    const { ts, snapshot } = snapshotBodyOf(stateDir, SESSION_ID)
+    assertValidTimestamp(ts)
+    assert.deepEqual(snapshot, {
+      session: SESSION_ID,
+      manualMode: false,
+      modelContextTokens: null,
+      modelContextTokensSource: CONTEXT_TOKENS_SOURCE_UNKNOWN,
+      lastRun: { estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS), watermarkTokens: null, deficitTokens: null },
+      totals: { ...STATS_ZEROED_COUNTERS },
+      stash: { entries: 0, capacity: STASH_LIMIT },
+      hotSubjects: [LIVE_STATE_QUIET_SUBJECT],
+    })
+
+    await runTransform(hooks, bundle)
+    assert.deepEqual(snapshotBodyOf(stateDir, SESSION_ID).snapshot, {
+      session: SESSION_ID,
+      manualMode: false,
+      modelContextTokens: null,
+      modelContextTokensSource: CONTEXT_TOKENS_SOURCE_UNKNOWN,
+      lastRun: { estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS), watermarkTokens: null, deficitTokens: null },
+      totals: { ...STATS_ZEROED_COUNTERS },
+      stash: { entries: 0, capacity: STASH_LIMIT },
+      hotSubjects: [LIVE_STATE_QUIET_SUBJECT],
+    })
+  } finally {
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("live state snapshots keep one file per session in the state directory", async () => {
+  const stateDir = makeLiveStateDir()
+  try {
+    const hooks = await loadPluginHooksWithLiveState(stateDir)
+    await runTransform(hooks, buildStandardBundle(SESSION_ID, LIVE_STATE_QUIET_SUBJECT))
+    await runTransform(hooks, buildStandardBundle(SESSION_ID_B, LIVE_STATE_QUIET_SUBJECT))
+    await runTransform(hooks, buildStandardBundle(SESSION_ID, LIVE_STATE_QUIET_SUBJECT))
+
+    assert.deepEqual(readdirSync(stateDir).sort(), [`${SESSION_ID}.json`, `${SESSION_ID_B}.json`].sort())
+  } finally {
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("live state snapshot carries the captured budget source and manual mode with a null watermark on a manual run", async () => {
+  const stateDir = makeLiveStateDir()
+  try {
+    const hooks = await loadPluginHooksWithLiveState(stateDir, { manualMode: true })
+    await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+    const bundle = buildStandardBundle(SESSION_ID, LIVE_STATE_MANUAL_SUBJECT)
+    await runTransform(hooks, bundle)
+
+    const { ts, snapshot } = snapshotBodyOf(stateDir, SESSION_ID)
+    assertValidTimestamp(ts)
+    assert.equal(snapshot.session, SESSION_ID)
+    assert.equal(snapshot.manualMode, true)
+    assert.equal(snapshot.modelContextTokens, WATERMARK_PROBE_CONTEXT_LIMIT)
+    assert.equal(snapshot.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+    assert.deepEqual(snapshot.lastRun, {
+      estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS),
+      watermarkTokens: null,
+      deficitTokens: null,
+    })
+    assert.deepEqual(snapshot.totals, { ...STATS_ZEROED_COUNTERS })
+    assert.deepEqual(snapshot.stash, { entries: 0, capacity: STASH_LIMIT })
+    assert.deepEqual(snapshot.hotSubjects, [LIVE_STATE_MANUAL_SUBJECT])
+  } finally {
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("live state snapshot records eviction totals stash occupancy and an empty hot list after a pressured run", async () => {
+  const stateDir = makeLiveStateDir()
+  try {
+    const hooks = await loadPluginHooksWithLiveState(stateDir)
+    await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+    const bundle = buildStandardBundle(SESSION_ID, LIVE_STATE_QUIET_SUBJECT)
+    await runTransform(hooks, bundle)
+
+    const { snapshot } = snapshotBodyOf(stateDir, SESSION_ID)
+    assert.equal(snapshot.manualMode, false)
+    assert.equal(snapshot.modelContextTokens, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+    assert.equal(snapshot.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+    assert.deepEqual(snapshot.lastRun, {
+      estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS),
+      watermarkTokens: tokensForChars(STANDARD_BUNDLE_CHARS) - OVER_BY_ONE_TOKENS,
+      deficitTokens: OVER_BY_ONE_TOKENS,
+    })
+    assert.deepEqual(snapshot.totals, {
+      ...STATS_ZEROED_COUNTERS,
+      evictions: 1,
+      bytesReclaimed: MIN_EVICTABLE_BYTES,
+    })
+    assert.deepEqual(snapshot.stash, { entries: 1, capacity: STASH_LIMIT })
+    assert.deepEqual(snapshot.hotSubjects, [])
+  } finally {
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("live state write skips an unsafe session key instead of writing outside the state directory", async () => {
+  const stateDir = makeLiveStateDir()
+  try {
+    const hooks = await loadPluginHooksWithLiveState(stateDir)
+
+    const escapeBundle = buildBundle(
+      [[pathToolPart(LIVE_STATE_QUIET_SUBJECT, MIN_EVICTABLE_BYTES)], ...fillerMessages()],
+      `${LIVE_STATE_ESCAPE_SEGMENT}/${SESSION_ID}`,
+    )
+    await runTransform(hooks, escapeBundle)
+
+    assert.equal(readdirSync(stateDir).length, 0)
+    const stats = await lruStats(hooks, `${LIVE_STATE_ESCAPE_SEGMENT}/${SESSION_ID}`)
+    assert.deepEqual(stats.lastRun, {
+      estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS),
+      watermarkTokens: null,
+      deficitTokens: null,
+    })
+  } finally {
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("live state pruning on write removes files untouched past the age bound and keeps fresh ones", async () => {
+  const stateDir = makeLiveStateDir()
+  try {
+    mkdirSync(stateDir, { recursive: true })
+    const stalePath = liveStatePathIn(stateDir, LIVE_STATE_STALE_SESSION)
+    writeFileSync(stalePath, LIVE_STATE_STALE_CONTENT)
+    const staleMoment = new Date(Date.now() - LIVE_STATE_PRUNE_BACKDATED_MS)
+    utimesSync(stalePath, staleMoment, staleMoment)
+    const freshPath = liveStatePathIn(stateDir, LIVE_STATE_FRESH_SESSION)
+    writeFileSync(freshPath, LIVE_STATE_FRESH_CONTENT)
+
+    const hooks = await loadPluginHooksWithLiveState(stateDir, {
+      liveStatePruneMaxAgeMs: LIVE_STATE_PRUNE_TEST_MAX_AGE_MS,
+    })
+    await runTransform(hooks, buildStandardBundle(SESSION_ID, LIVE_STATE_QUIET_SUBJECT))
+
+    assert.equal(existsSync(stalePath), false)
+    assert.equal(readFileSync(freshPath, "utf8"), LIVE_STATE_FRESH_CONTENT)
+    assert.equal(existsSync(liveStatePathIn(stateDir, SESSION_ID)), true)
+  } finally {
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("live state pruning skips an undeletable stale entry and still writes the fresh snapshot", async () => {
+  const stateDir = makeLiveStateDir()
+  try {
+    mkdirSync(stateDir, { recursive: true })
+    const stuckPath = liveStatePathIn(stateDir, LIVE_STATE_STUCK_SESSION)
+    mkdirSync(stuckPath)
+    const staleMoment = new Date(Date.now() - LIVE_STATE_PRUNE_BACKDATED_MS)
+    utimesSync(stuckPath, staleMoment, staleMoment)
+
+    const hooks = await loadPluginHooksWithLiveState(stateDir, {
+      liveStatePruneMaxAgeMs: LIVE_STATE_PRUNE_TEST_MAX_AGE_MS,
+    })
+    await runTransform(hooks, buildStandardBundle(SESSION_ID, LIVE_STATE_QUIET_SUBJECT))
+
+    assert.equal(existsSync(stuckPath), true)
+    assert.equal(existsSync(liveStatePathIn(stateDir, SESSION_ID)), true)
+    const stats = await lruStats(hooks, SESSION_ID)
+    assert.equal(Object.hasOwn(stats, "stateWriteError"), false)
+  } finally {
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("live state write failure records stateWriteError through lru_stats without interrupting the session", async () => {
+  const stateDir = makeLiveStateDir()
+  try {
+    writeFileSync(join(stateDir, LIVE_STATE_BLOCKER_FILE), "not a directory")
+    const hooks = await loadPluginHooksWithLiveState(blockedLiveStateDirIn(stateDir))
+    await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+    const bundle = buildStandardBundle(SESSION_ID, STATS_BLOCKED_SUBJECT)
+    await runTransform(hooks, bundle)
+
+    const stats = await lruStats(hooks, SESSION_ID)
+    assert.equal(typeof stats.stateWriteError, "string")
+    assert.ok((stats.stateWriteError as string).length > 0)
+    assert.equal(countersOf(stats).evictions, 1)
+  } finally {
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("live state clears a recorded write failure once a later write succeeds", async () => {
+  const stateDir = makeLiveStateDir()
+  try {
+    const blockedDir = blockedLiveStateDirIn(stateDir)
+    writeFileSync(join(stateDir, LIVE_STATE_BLOCKER_FILE), "not a directory")
+    const hooks = await loadPluginHooksWithLiveState(blockedDir)
+    await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+    const bundle = buildStandardBundle(SESSION_ID, STATS_BLOCKED_SUBJECT)
+    await runTransform(hooks, bundle)
+    assert.equal(typeof (await lruStats(hooks, SESSION_ID)).stateWriteError, "string")
+
+    rmSync(join(stateDir, LIVE_STATE_BLOCKER_FILE))
+    await runTransform(hooks, bundle)
+
+    const stats = await lruStats(hooks, SESSION_ID)
+    assert.equal(Object.hasOwn(stats, "stateWriteError"), false)
+    assert.equal(countersOf(stats).evictions, 1)
+    assert.equal(existsSync(liveStatePathIn(blockedDir, SESSION_ID)), true)
+  } finally {
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("live state snapshot carries an empty hot subject list when hintSubjects is zero", async () => {
+  const stateDir = makeLiveStateDir()
+  try {
+    const hooks = await loadPluginHooksWithLiveState(stateDir, { hintSubjects: LIVE_STATE_ZERO_HINT_SUBJECTS })
+
+    await runTransform(hooks, buildStandardBundle(SESSION_ID, LIVE_STATE_QUIET_SUBJECT))
+
+    assert.deepEqual(snapshotBodyOf(stateDir, SESSION_ID).snapshot.hotSubjects, [])
+  } finally {
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("lru_stats reports the live state options defaulting beside the metrics log and round tripping custom values", async () => {
+  const defaultOptions = ((await lruStats(await loadPluginHooks(), SESSION_ID)).options as Record<string, unknown>)
+  assert.equal(defaultOptions.liveStateLog, false)
+  assert.equal(defaultOptions.liveStatePath, DEFAULT_LIVE_STATE_DIR)
+  assert.equal(defaultOptions.liveStatePruneMaxAgeMs, DEFAULT_LIVE_STATE_PRUNE_MAX_AGE_MS)
+  assert.equal(DEFAULT_LIVE_STATE_DIR, join(homedir(), ".local", "share", "opencode", "lru-state"))
+
+  const customHooks = await loadPluginHooksWith({
+    liveStateLog: true,
+    liveStatePath: LIVE_STATE_CUSTOM_STATE_DIR,
+    liveStatePruneMaxAgeMs: LIVE_STATE_CUSTOM_PRUNE_MAX_AGE_MS,
+  })
+  const customOptions = (await lruStats(customHooks, SESSION_ID)).options as Record<string, unknown>
+  assert.equal(customOptions.liveStateLog, true)
+  assert.equal(customOptions.liveStatePath, LIVE_STATE_CUSTOM_STATE_DIR)
+  assert.equal(customOptions.liveStatePruneMaxAgeMs, LIVE_STATE_CUSTOM_PRUNE_MAX_AGE_MS)
 })
 
 test("lru_stats counts expired reasoning parts and bytes without counting them as evictions", async () => {
