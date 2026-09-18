@@ -1,4 +1,4 @@
-import { appendFile } from "node:fs/promises"
+import { appendFile, rename, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import type { Plugin } from "@opencode-ai/plugin"
@@ -83,6 +83,9 @@ const DEFAULT_METRICS_LOG_ENABLED = true
 const METRICS_DIR_SEGMENTS = [".local", "share", "opencode"]
 const METRICS_FILE_BASENAME = "lru-metrics.jsonl"
 const DEFAULT_METRICS_PATH = join(homedir(), ...METRICS_DIR_SEGMENTS, METRICS_FILE_BASENAME)
+const DEFAULT_METRICS_ROTATION_MAX_BYTES = 5 * 1024 * 1024
+const METRICS_ROTATION_DISABLED_MAX_BYTES = 0
+const METRICS_ROTATION_SUFFIX = ".1"
 const STATS_TOOL_NAME = "lru_stats"
 const STATS_TOOL_DESCRIPTION =
   "Return live metrics for the LRU context manager in this session: eviction counters, expired reasoning counts, post-eviction touches, stash occupancy, the effective context budget, and the most recent transform run's token estimate."
@@ -129,6 +132,7 @@ type LruContextOptions = {
   protectedPatterns?: string[]
   metricsLog?: boolean
   metricsPath?: string
+  metricsRotationMaxBytes?: number
   manualMode?: boolean
   userFenceEviction?: { enabled?: boolean; minBlockLines?: number }
 }
@@ -313,6 +317,10 @@ const resolveOptions = (raw: LruContextOptions = {}): ResolvedOptions => {
     }),
     metricsLog: typeof raw.metricsLog === "boolean" ? raw.metricsLog : DEFAULT_METRICS_LOG_ENABLED,
     metricsPath: typeof raw.metricsPath === "string" && raw.metricsPath.length > 0 ? raw.metricsPath : DEFAULT_METRICS_PATH,
+    metricsRotationMaxBytes:
+      typeof raw.metricsRotationMaxBytes === "number" && Number.isFinite(raw.metricsRotationMaxBytes) && raw.metricsRotationMaxBytes >= 0
+        ? raw.metricsRotationMaxBytes
+        : DEFAULT_METRICS_ROTATION_MAX_BYTES,
     manualMode: typeof raw.manualMode === "boolean" ? raw.manualMode : DEFAULT_MANUAL_MODE,
     userFenceEviction: userFenceEvictionOf(raw.userFenceEviction),
   }
@@ -933,6 +941,19 @@ const recordRunOutcome = (metrics: SessionMetrics, run: RunOutcome): void => {
   metrics.stashDropped += fenceEvictedThisRun.stashDropped
 }
 
+const rotateMetricsLogPastCap = async (path: string, incomingBytes: number, capBytes: number): Promise<void> => {
+  if (capBytes === METRICS_ROTATION_DISABLED_MAX_BYTES) return
+  let currentBytes: number
+  try {
+    currentBytes = (await stat(path)).size
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") return
+    throw error
+  }
+  if (currentBytes + incomingBytes <= capBytes) return
+  await rename(path, `${path}${METRICS_ROTATION_SUFFIX}`)
+}
+
 const recordMetricsLine = async (
   options: ResolvedOptions,
   metrics: SessionMetrics,
@@ -980,7 +1001,9 @@ const recordMetricsLine = async (
     },
   }
   try {
-    await appendFile(options.metricsPath, `${JSON.stringify(line)}\n`)
+    const metricsJsonLine = `${JSON.stringify(line)}\n`
+    await rotateMetricsLogPastCap(options.metricsPath, Buffer.byteLength(metricsJsonLine), options.metricsRotationMaxBytes)
+    await appendFile(options.metricsPath, metricsJsonLine)
     metrics.stashReadsLoggedThrough = metrics.stashHits + metrics.stashMisses
     delete metrics.logWriteError
   } catch (error) {
@@ -1028,6 +1051,7 @@ const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
       modelContextTokens: source.options.modelContextTokens,
       metricsLog: source.options.metricsLog,
       metricsPath: source.options.metricsPath,
+      metricsRotationMaxBytes: source.options.metricsRotationMaxBytes,
       userFenceEviction: {
         enabled: source.options.userFenceEviction.enabled,
         minBlockLines: source.options.userFenceEviction.minBlockLines,
