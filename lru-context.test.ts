@@ -1,10 +1,11 @@
 import assert from "node:assert/strict"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
 
 import lruContextFactory from "../../opencode/.config/opencode/plugin/lru-context.ts"
+import { loadPanelData } from "../../opencode/.config/opencode/plugin/lru-panel-data.ts"
 
 const TRANSFORM_HOOK = "experimental.chat.messages.transform"
 const CHAT_PARAMS_HOOK = "chat.params"
@@ -2887,6 +2888,24 @@ const METRICS_PROBE_SESSION_ID = "lru-metrics-probe-session"
 const METRICS_PROBE_MISS_SUBJECT = "/data/metrics-probe-miss.txt"
 const METRICS_LINES_AFTER_RELOAD = 2
 const METRICS_LINES_AFTER_RECOVERY = 1
+const METRICS_ROTATION_SUFFIX = ".1"
+const DEFAULT_METRICS_ROTATION_MAX_BYTES = 5 * 1024 * 1024
+const METRICS_ROTATION_DISABLED_MAX_BYTES = 0
+const METRICS_ROTATION_CUSTOM_CAP = 4096
+const METRICS_ROTATION_TINY_CAP = 1
+const METRICS_ROTATION_INVALID_CAPS = [-1, Infinity, Number.NaN]
+const METRICS_ROTATION_SEED_CONTENT = "seed\n"
+const METRICS_STALE_ROTATED_CONTENT = "stale rotated content\n"
+const METRICS_ROTATION_DISABLED_TOTAL_LINES = 3
+const METRICS_ROTATION_SUBJECT = "/data/rotation-boundary.txt"
+const METRICS_ROTATION_DISABLED_SUBJECT = "/data/rotation-disabled.txt"
+const METRICS_ROTATION_REPLACEMENT_SUBJECT = "/data/rotation-replacement.txt"
+const METRICS_ROTATION_PANEL_SUBJECT = "/data/rotation-panel.txt"
+const METRICS_ROTATION_PANEL_SEED_SUBJECT = "/data/rotation-panel-seed.txt"
+const METRICS_ROTATION_PANEL_SEED_EVICTIONS = 5
+const METRICS_ROTATION_PANEL_SEED_MESSAGES_AGO = 3
+const METRICS_ROTATION_PANEL_SEED_ESTIMATED_TOKENS = 900
+const METRICS_ROTATION_PANEL_SEED_BYTES = METRICS_ROTATION_PANEL_SEED_EVICTIONS * MIN_EVICTABLE_BYTES
 const STATS_ZEROED_COUNTERS = {
   evictions: 0,
   bytesReclaimed: 0,
@@ -2917,6 +2936,8 @@ const makeMetricsDir = (): string => mkdtempSync(join(tmpdir(), METRICS_TEMP_DIR
 
 const metricsLogPathIn = (dir: string): string => join(dir, METRICS_LOG_FILE_NAME)
 
+const rotatedMetricsPathIn = (dir: string): string => join(dir, `${METRICS_LOG_FILE_NAME}${METRICS_ROTATION_SUFFIX}`)
+
 const blockedMetricsPathIn = (dir: string): string => join(dir, METRICS_BLOCKED_DIR_NAME, METRICS_LOG_FILE_NAME)
 
 const cleanupMetricsDir = (dir: string): void => rmSync(dir, { recursive: true, force: true })
@@ -2939,6 +2960,35 @@ const storeMetricsSession = async (hooks: HookMap, index: number): Promise<void>
   await runTransform(hooks, buildStandardBundle(metricsSessionId(index), metricsSessionSubject(index)))
 }
 
+const metricsRotationPanelSeedLine = (): Record<string, unknown> => ({
+  ts: "2026-09-17T00:00:00.000Z",
+  session: SESSION_ID,
+  modelContextTokens: null,
+  modelContextTokensSource: CONTEXT_TOKENS_SOURCE_UNKNOWN,
+  estimatedTokens: METRICS_ROTATION_PANEL_SEED_ESTIMATED_TOKENS,
+  watermarkTokens: null,
+  deficitTokens: null,
+  evictedThisRun: [
+    {
+      tool: READ_TOOL,
+      subject: METRICS_ROTATION_PANEL_SEED_SUBJECT,
+      bytes: MIN_EVICTABLE_BYTES,
+      messagesAgo: METRICS_ROTATION_PANEL_SEED_MESSAGES_AGO,
+    },
+  ],
+  dedupedThisRun: 0,
+  reasoningExpiredThisRun: 0,
+  reasoningBytesExpiredThisRun: 0,
+  fenceEvictedThisRun: 0,
+  postEvictionTouchesThisRun: 0,
+  stashReadsSinceLastLine: 0,
+  totals: {
+    ...STATS_ZEROED_COUNTERS,
+    evictions: METRICS_ROTATION_PANEL_SEED_EVICTIONS,
+    bytesReclaimed: METRICS_ROTATION_PANEL_SEED_BYTES,
+  },
+})
+
 test("lru_stats reports zeroed counters unknown budget and empty stash for a session without activity", async () => {
   const hooks = await loadPluginHooks()
 
@@ -2953,6 +3003,7 @@ test("lru_stats reports zeroed counters unknown budget and empty stash for a ses
     modelContextTokens: {},
     metricsLog: false,
     metricsPath: DEFAULT_METRICS_PATH,
+    metricsRotationMaxBytes: DEFAULT_METRICS_ROTATION_MAX_BYTES,
     userFenceEviction: { enabled: false, minBlockLines: FENCE_DEFAULT_MIN_BLOCK_LINES },
     manualMode: false,
   })
@@ -3487,6 +3538,154 @@ test("metrics log clears a recorded write failure once a later write succeeds", 
     assert.equal(countersOf(stats).evictions, 1)
     assert.equal(countersOf(stats).postEvictionTouches, 1)
     assert.equal(metricsLinesIn(blockedPath).length, METRICS_LINES_AFTER_RECOVERY)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("lru_stats reports the metrics rotation cap in options defaulting to five MiB and falling back on invalid caps", async () => {
+  assert.equal(
+    ((await lruStats(await loadPluginHooks(), SESSION_ID)).options as Record<string, unknown>).metricsRotationMaxBytes,
+    DEFAULT_METRICS_ROTATION_MAX_BYTES,
+  )
+
+  const customHooks = await loadPluginHooksWith({ metricsRotationMaxBytes: METRICS_ROTATION_CUSTOM_CAP })
+  assert.equal(
+    ((await lruStats(customHooks, SESSION_ID)).options as Record<string, unknown>).metricsRotationMaxBytes,
+    METRICS_ROTATION_CUSTOM_CAP,
+  )
+
+  for (const invalidCap of METRICS_ROTATION_INVALID_CAPS) {
+    const hooks = await loadPluginHooksWith({ metricsRotationMaxBytes: invalidCap })
+    assert.equal(
+      ((await lruStats(hooks, SESSION_ID)).options as Record<string, unknown>).metricsRotationMaxBytes,
+      DEFAULT_METRICS_ROTATION_MAX_BYTES,
+    )
+  }
+})
+
+test("metrics log stays byte identical at exactly the rotation cap and rotates when an append would cross it", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const probeHooks = await loadPluginHooksWithMetricsLog(metricsPath)
+    await setContextLimit(probeHooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+    await runTransform(probeHooks, buildStandardBundle(SESSION_ID, METRICS_ROTATION_SUBJECT))
+    const capBytes = statSync(metricsPath).size
+    rmSync(metricsPath)
+
+    const hooks = await loadPluginHooksWith({ metricsLog: true, metricsPath, metricsRotationMaxBytes: capBytes })
+    await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+    const bundle = buildStandardBundle(SESSION_ID, METRICS_ROTATION_SUBJECT)
+    await runTransform(hooks, bundle)
+    assert.equal(existsSync(rotatedMetricsPathIn(metricsDir)), false)
+    assert.equal(statSync(metricsPath).size, capBytes)
+    assert.equal(metricsLinesIn(metricsPath).length, STATS_LOG_FILE_LINES)
+
+    assert.equal(await readEvicted(hooks, METRICS_ROTATION_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+    await runTransform(hooks, bundle)
+
+    const rotatedLines = metricsLinesIn(rotatedMetricsPathIn(metricsDir))
+    assert.equal(rotatedLines.length, STATS_LOG_FILE_LINES)
+    assert.equal(rotatedLines[0].session, SESSION_ID)
+    assert.deepEqual(rotatedLines[0].evictedThisRun, [
+      { tool: READ_TOOL, subject: METRICS_ROTATION_SUBJECT, bytes: MIN_EVICTABLE_BYTES, attachmentBytes: 0, messagesAgo: 5 },
+    ])
+    const freshLines = metricsLinesIn(metricsPath)
+    assert.equal(freshLines.length, STATS_LOG_FILE_LINES)
+    assert.equal(freshLines[0].stashReadsSinceLastLine, 1)
+    assert.deepEqual(freshLines[0].evictedThisRun, [])
+    assert.deepEqual(countersOf(await lruStats(hooks, SESSION_ID)), {
+      ...STATS_ZEROED_COUNTERS,
+      evictions: 1,
+      bytesReclaimed: MIN_EVICTABLE_BYTES,
+      stashHits: 1,
+    })
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("metrics log never rotates when metricsRotationMaxBytes is zero", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const seedLine = metricsRotationPanelSeedLine()
+    writeFileSync(metricsPath, `${JSON.stringify(seedLine)}\n`)
+    const hooks = await loadPluginHooksWith({
+      metricsLog: true,
+      metricsPath,
+      metricsRotationMaxBytes: METRICS_ROTATION_DISABLED_MAX_BYTES,
+    })
+    await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+    const bundle = buildStandardBundle(SESSION_ID, METRICS_ROTATION_DISABLED_SUBJECT)
+    await runTransform(hooks, bundle)
+    assert.equal(await readEvicted(hooks, METRICS_ROTATION_DISABLED_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+    await runTransform(hooks, bundle)
+
+    assert.equal(existsSync(rotatedMetricsPathIn(metricsDir)), false)
+    const lines = metricsLinesIn(metricsPath)
+    assert.equal(lines.length, METRICS_ROTATION_DISABLED_TOTAL_LINES)
+    assert.deepEqual(lines[0], seedLine)
+    assert.equal(lines[1].session, SESSION_ID)
+    assert.equal(lines[2].session, SESSION_ID)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("metrics log rotation replaces a prior .1 sibling with the rotated file", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    writeFileSync(rotatedMetricsPathIn(metricsDir), METRICS_STALE_ROTATED_CONTENT)
+    writeFileSync(metricsPath, METRICS_ROTATION_SEED_CONTENT)
+    const hooks = await loadPluginHooksWith({
+      metricsLog: true,
+      metricsPath,
+      metricsRotationMaxBytes: METRICS_ROTATION_TINY_CAP,
+    })
+    await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+    await runTransform(hooks, buildStandardBundle(SESSION_ID, METRICS_ROTATION_REPLACEMENT_SUBJECT))
+
+    assert.equal(readFileSync(rotatedMetricsPathIn(metricsDir), "utf8"), METRICS_ROTATION_SEED_CONTENT)
+    const freshLines = metricsLinesIn(metricsPath)
+    assert.equal(freshLines.length, STATS_LOG_FILE_LINES)
+    assert.equal(freshLines[0].session, SESSION_ID)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("panel data parses the post rotation state with the pre rotation line gone from history", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    writeFileSync(metricsPath, `${JSON.stringify(metricsRotationPanelSeedLine())}\n`)
+    const hooks = await loadPluginHooksWith({
+      metricsLog: true,
+      metricsPath,
+      metricsRotationMaxBytes: METRICS_ROTATION_TINY_CAP,
+    })
+    await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+    await runTransform(hooks, buildStandardBundle(SESSION_ID, METRICS_ROTATION_PANEL_SUBJECT))
+
+    const rotatedLines = metricsLinesIn(rotatedMetricsPathIn(metricsDir))
+    assert.equal(rotatedLines.length, STATS_LOG_FILE_LINES)
+    assert.equal(rotatedLines[0].session, SESSION_ID)
+
+    const panel = await loadPanelData({ path: metricsPath, sessionID: SESSION_ID })
+    assert.equal(panel.error, undefined)
+    assert.equal(panel.current?.session, SESSION_ID)
+    assert.equal(panel.current?.runs, STATS_LOG_FILE_LINES)
+    assert.equal(panel.current?.totals.evictions, 1)
+    assert.equal(panel.global.sessions, STATS_LOG_FILE_LINES)
+    assert.equal(panel.global.runs, STATS_LOG_FILE_LINES)
+    assert.equal(panel.global.evictions, 1)
   } finally {
     cleanupMetricsDir(metricsDir)
   }
