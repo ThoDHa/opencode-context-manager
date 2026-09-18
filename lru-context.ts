@@ -94,6 +94,10 @@ const HOURS_PER_DAY = 24
 const DAYS_PER_PRUNE_INTERVAL = 7
 const DEFAULT_LIVE_STATE_PRUNE_MAX_AGE_MS =
   DAYS_PER_PRUNE_INTERVAL * HOURS_PER_DAY * MINUTES_PER_HOUR * SECONDS_PER_MINUTE * MS_PER_SECOND
+const LIVE_STATE_TEMP_FILE_SUFFIX = ".tmp"
+const MIN_MS_BETWEEN_PRUNE_SCANS = 60 * MS_PER_SECOND
+const PRUNE_SCAN_NEVER = -1
+const PRUNE_SCAN_THROTTLE_DISABLED = 0
 const DEFAULT_METRICS_ROTATION_MAX_BYTES = 5 * 1024 * 1024
 const METRICS_ROTATION_DISABLED_MAX_BYTES = 0
 const METRICS_ROTATION_SUFFIX = ".1"
@@ -147,6 +151,7 @@ type LruContextOptions = {
   liveStateLog?: boolean
   liveStatePath?: string
   liveStatePruneMaxAgeMs?: number
+  liveStatePruneMinIntervalMs?: number
   manualMode?: boolean
   userFenceEviction?: { enabled?: boolean; minBlockLines?: number }
 }
@@ -223,9 +228,11 @@ type ContextTokensSource =
   | typeof CONTEXT_TOKENS_SOURCE_DEFAULT
   | typeof CONTEXT_TOKENS_SOURCE_UNKNOWN
 
-type SessionBudgetEntry = { tokens: number; source: ContextTokensSource }
+type SessionBudgetEntry = { tokens: number; source: ContextTokensSource; modelKey: string | undefined }
 
 type SessionBudget = { tokens: number | null; source: ContextTokensSource }
+
+type PruneThrottle = { lastScanMs: number }
 
 type ChatParamsModel = { providerID?: string; modelID?: string; limit?: { context?: number } }
 
@@ -367,6 +374,12 @@ const resolveOptions = (raw: LruContextOptions = {}): ResolvedOptions => {
       typeof raw.liveStatePruneMaxAgeMs === "number" && Number.isFinite(raw.liveStatePruneMaxAgeMs) && raw.liveStatePruneMaxAgeMs >= 0
         ? raw.liveStatePruneMaxAgeMs
         : DEFAULT_LIVE_STATE_PRUNE_MAX_AGE_MS,
+    liveStatePruneMinIntervalMs:
+      typeof raw.liveStatePruneMinIntervalMs === "number" &&
+      Number.isFinite(raw.liveStatePruneMinIntervalMs) &&
+      raw.liveStatePruneMinIntervalMs >= 0
+        ? raw.liveStatePruneMinIntervalMs
+        : MIN_MS_BETWEEN_PRUNE_SCANS,
     manualMode: typeof raw.manualMode === "boolean" ? raw.manualMode : DEFAULT_MANUAL_MODE,
     userFenceEviction: userFenceEvictionOf(raw.userFenceEviction),
   }
@@ -679,6 +692,9 @@ const fenceOpenerOf = (rawLine: string): { ticks: number; language: string | und
   const ticks = leadingBackticksOf(line)
   if (ticks < MIN_FENCE_MARKER_TICKS) return undefined
   const info = line.slice(ticks).trim()
+  // CommonMark: an info string holding a backtick never opens a fence, so
+  // the line is content and can neither start a block nor be evicted as one.
+  if (info.includes(FENCE_BACKTICK)) return undefined
   return { ticks, language: info.length > 0 ? fenceLanguageOf(info) : undefined }
 }
 
@@ -1082,18 +1098,43 @@ const liveStateSnapshotOf = (
 })
 
 // Prune runs after the snapshot write has landed, so every failure here
-// is a skipped file, never a surfaced error.
-const pruneLiveStateFiles = async (dir: string, maxAgeMs: number): Promise<void> => {
+// is a skipped file, never a surfaced error. The directory scan itself is
+// throttled to at most one per plugin instance per
+// liveStatePruneMinIntervalMs (default MIN_MS_BETWEEN_PRUNE_SCANS, 0
+// disables the throttle): opencode instantiates the plugin once per
+// process, so an instance-level budget is a per-process budget in
+// production. Per-session snapshots fire far more often than state files
+// expire, so the scan that usually finds nothing is the expensive part. A
+// scan landing inside the window is skipped entirely, which only
+// postpones pruning; once the window elapses the next snapshot write
+// scans again. Tests inject a 0 interval to assert scan effects
+// time-independently; the throttled path is pinned time-independently by
+// asserting that a stale file planted right after a completed scan
+// survives the next snapshot write, and the window expiry is pinned
+// with a small injected interval plus a real wait.
+const isPrunableStateFileName = (name: string): boolean =>
+  name.endsWith(LIVE_STATE_FILE_SUFFIX) || name.endsWith(`${LIVE_STATE_FILE_SUFFIX}${LIVE_STATE_TEMP_FILE_SUFFIX}`)
+
+const pruneLiveStateFiles = async (
+  dir: string,
+  maxAgeMs: number,
+  throttle: PruneThrottle,
+  minIntervalMs: number,
+  nowMs: number,
+): Promise<void> => {
   if (maxAgeMs <= 0) return
+  if (minIntervalMs > PRUNE_SCAN_THROTTLE_DISABLED) {
+    if (throttle.lastScanMs !== PRUNE_SCAN_NEVER && nowMs - throttle.lastScanMs < minIntervalMs) return
+    throttle.lastScanMs = nowMs
+  }
   let names: string[]
   try {
     names = await readdir(dir)
   } catch {
     return
   }
-  const nowMs = Date.now()
   for (const name of names) {
-    if (!name.endsWith(LIVE_STATE_FILE_SUFFIX)) continue
+    if (!isPrunableStateFileName(name)) continue
     const path = join(dir, name)
     try {
       const info = await stat(path)
@@ -1114,21 +1155,28 @@ const recordLiveStateSnapshot = async (
   metrics: SessionMetrics,
   stash: SessionStash,
   hotSubjects: HotSubject[],
+  pruneThrottle: PruneThrottle,
 ): Promise<void> => {
   if (options.liveStateLog === false) return
   const lastRun = metrics.lastRun
   if (lastRun === undefined) return
   if (!isSafeSessionFileStem(sessionKey)) return
   const snapshot = liveStateSnapshotOf(sessionKey, budget, options, metrics, lastRun, stash, hotSubjects)
+  const stateFile = join(options.liveStatePath, `${sessionKey}${LIVE_STATE_FILE_SUFFIX}`)
+  const tempFile = `${stateFile}${LIVE_STATE_TEMP_FILE_SUFFIX}`
   try {
     await mkdir(options.liveStatePath, { recursive: true })
-    await writeFile(join(options.liveStatePath, `${sessionKey}${LIVE_STATE_FILE_SUFFIX}`), `${JSON.stringify(snapshot, null, JSON_INDENT_SPACES)}\n`)
+    // Write to a sibling temp file and rename so a concurrent reader sees
+    // either the previous snapshot or the new one, never a torn write.
+    await writeFile(tempFile, `${JSON.stringify(snapshot, null, JSON_INDENT_SPACES)}\n`)
+    await rename(tempFile, stateFile)
     delete metrics.stateWriteError
   } catch (error) {
     metrics.stateWriteError = error instanceof Error ? error.message : String(error)
+    await unlink(tempFile).catch(() => {})
     return
   }
-  await pruneLiveStateFiles(options.liveStatePath, options.liveStatePruneMaxAgeMs)
+  await pruneLiveStateFiles(options.liveStatePath, options.liveStatePruneMaxAgeMs, pruneThrottle, options.liveStatePruneMinIntervalMs, Date.now())
 }
 
 const modelKeyOf = (model: ChatParamsModel | undefined): string | undefined => {
@@ -1139,12 +1187,18 @@ const modelKeyOf = (model: ChatParamsModel | undefined): string | undefined => {
   return `${providerID}${MODEL_KEY_SEPARATOR}${modelID}`
 }
 
+// An entry without an identity (a limit-only chat params event) is never
+// reset: nothing ties it to a model, so any later event retains it.
+const storedBudgetBelongsToAnotherModel = (stored: SessionBudgetEntry | undefined, modelKey: string | undefined): boolean =>
+  modelKey !== undefined && stored !== undefined && stored.modelKey !== undefined && stored.modelKey !== modelKey
+
 const captureBudgetOf = (model: ChatParamsModel | undefined, overrides: Record<string, number>): SessionBudgetEntry | undefined => {
   const modelKey = modelKeyOf(model)
   const override = modelKey === undefined ? undefined : overrides[modelKey]
-  if (override !== undefined) return { tokens: override, source: CONTEXT_TOKENS_SOURCE_OVERRIDE }
+  if (override !== undefined) return { tokens: override, source: CONTEXT_TOKENS_SOURCE_OVERRIDE, modelKey }
   const reported = model?.limit?.context
-  if (typeof reported === "number" && Number.isFinite(reported) && reported > 0) return { tokens: reported, source: CONTEXT_TOKENS_SOURCE_MODEL }
+  if (typeof reported === "number" && Number.isFinite(reported) && reported > 0)
+    return { tokens: reported, source: CONTEXT_TOKENS_SOURCE_MODEL, modelKey }
   return undefined
 }
 
@@ -1175,6 +1229,7 @@ const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
       liveStateLog: source.options.liveStateLog,
       liveStatePath: source.options.liveStatePath,
       liveStatePruneMaxAgeMs: source.options.liveStatePruneMaxAgeMs,
+      liveStatePruneMinIntervalMs: source.options.liveStatePruneMinIntervalMs,
       userFenceEviction: {
         enabled: source.options.userFenceEviction.enabled,
         minBlockLines: source.options.userFenceEviction.minBlockLines,
@@ -1374,6 +1429,7 @@ export default (async (_input, rawOptions) => {
   const stashBySession = new Map<string, SessionStash>()
   const hintBySession = new Map<string, string>()
   const metricsBySession: MetricsStore = new Map()
+  const pruneThrottle: PruneThrottle = { lastScanMs: PRUNE_SCAN_NEVER }
 
   // Workaround: read_evicted and lru_stats are registered as plain
   // { description, args, execute } definitions instead of calling tool() from
@@ -1395,8 +1451,14 @@ export default (async (_input, rawOptions) => {
   return {
     "chat.params": async (input: { sessionID: string; model?: ChatParamsModel }) => {
       const captured = captureBudgetOf(input.model, options.modelContextTokens)
-      if (captured !== undefined)
+      if (captured !== undefined) {
         rememberSessionValue(contextTokensBySession, input.sessionID, captured, MAX_LIMIT_SESSIONS)
+        return
+      }
+      const modelKey = modelKeyOf(input.model)
+      const stored = contextTokensBySession.get(input.sessionID)
+      if (!storedBudgetBelongsToAnotherModel(stored, modelKey)) return
+      contextTokensBySession.delete(input.sessionID)
     },
     "experimental.chat.messages.transform": async (_input: unknown, output: { messages: MessageBundle[] }) => {
       const messages = output.messages
@@ -1428,7 +1490,7 @@ export default (async (_input, rawOptions) => {
       recordRunOutcome(sessionMetrics, runOutcome)
       storeHint(hintBySession, sessionKey, eviction.hotSubjects, options.hintSubjects)
       await recordMetricsLine(options, sessionMetrics, sessionKey, budget, runOutcome)
-      await recordLiveStateSnapshot(options, sessionKey, budget, sessionMetrics, sessionStash, eviction.hotSubjects)
+      await recordLiveStateSnapshot(options, sessionKey, budget, sessionMetrics, sessionStash, eviction.hotSubjects, pruneThrottle)
     },
     "experimental.chat.system.transform": async (input: { sessionID?: string }, output: { system: string[] }) => {
       deliverHint(hintBySession, input, output)
