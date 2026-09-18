@@ -63,6 +63,8 @@ const ISOLATION_CONTEXT_LIMIT_B = 20000
 const OVERRIDE_MODEL_PROVIDER = "zai"
 const OVERRIDE_MODEL_ID = "glm-5.3"
 const OVERRIDE_MODEL_KEY = "zai/glm-5.3"
+const OTHER_MODEL_PROVIDER = "anthropic"
+const OTHER_MODEL_ID = "claude"
 const OTHER_MODEL_KEY = "anthropic/claude"
 const INVALID_OVERRIDE_ENTRY = "50%"
 const INFINITE_OVERRIDE_ENTRY = Infinity
@@ -439,6 +441,8 @@ const setChatParamsForModel = async (
 const runTransform = async (hooks: HookMap, bundle: StrictBundle): Promise<void> => {
   await hooks[TRANSFORM_HOOK]({}, bundle)
 }
+
+const sleepMs = async (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 const reloadPointerFor = (subject: string): string =>
   `${RELOAD_POINTER_LEAD} ${RELOAD_TOOL_NAME} (subject "${subject}").`
@@ -1166,6 +1170,67 @@ test("transform keeps session budgets isolated across repeated transforms with n
 
   assert.ok(toolPartAt(sessionA.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
   assert.equal(toolPartAt(sessionB.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+})
+
+test("transform resets a stored budget captured for one model when a later chat params event names a different model without a limit", async () => {
+  const hooks = await loadPluginHooks()
+  await setChatParamsForModel(hooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+  await setChatParamsForModel(hooks, SESSION_ID, OTHER_MODEL_PROVIDER, OTHER_MODEL_ID)
+
+  const bundle = buildStandardBundle(SESSION_ID, "/data/model-switch-reset.txt")
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.equal(stats.modelContextTokens, null)
+  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+  assert.deepEqual(stats.lastRun, {
+    estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS),
+    watermarkTokens: null,
+    deficitTokens: null,
+  })
+})
+
+test("transform retains a stored budget when a later chat params event re-fires the same model without a limit", async () => {
+  const hooks = await loadPluginHooks()
+  await setChatParamsForModel(hooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+  await setChatParamsForModel(hooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID)
+
+  const bundle = buildStandardBundle(SESSION_ID, "/data/model-same-retain.txt")
+  await runTransform(hooks, bundle)
+
+  assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.equal(stats.modelContextTokens, WATERMARK_PROBE_CONTEXT_LIMIT)
+  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+})
+
+test("transform retains a stored identity-less budget when a later chat params event names a different model without a limit", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+  await setChatParamsForModel(hooks, SESSION_ID, OTHER_MODEL_PROVIDER, OTHER_MODEL_ID)
+
+  const bundle = buildStandardBundle(SESSION_ID, "/data/model-identity-less-retain.txt")
+  await runTransform(hooks, bundle)
+
+  assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.equal(stats.modelContextTokens, WATERMARK_PROBE_CONTEXT_LIMIT)
+  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+})
+
+test("transform replaces the stored budget when a later chat params event names a different model with its own reported limit", async () => {
+  const hooks = await loadPluginHooks()
+  await setChatParamsForModel(hooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID, ISOLATION_CONTEXT_LIMIT_A)
+  await setChatParamsForModel(hooks, SESSION_ID, OTHER_MODEL_PROVIDER, OTHER_MODEL_ID, ISOLATION_CONTEXT_LIMIT_B)
+
+  const bundle = buildStandardBundle(SESSION_ID, "/data/model-switch-limit.txt")
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.equal(stats.modelContextTokens, ISOLATION_CONTEXT_LIMIT_B)
+  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
 })
 
 test("transform counts text parts toward the token estimate", async () => {
@@ -3008,6 +3073,7 @@ test("lru_stats reports zeroed counters unknown budget and empty stash for a ses
     liveStateLog: false,
     liveStatePath: DEFAULT_LIVE_STATE_DIR,
     liveStatePruneMaxAgeMs: DEFAULT_LIVE_STATE_PRUNE_MAX_AGE_MS,
+    liveStatePruneMinIntervalMs: DEFAULT_LIVE_STATE_PRUNE_MIN_INTERVAL_MS,
     userFenceEviction: { enabled: false, minBlockLines: FENCE_DEFAULT_MIN_BLOCK_LINES },
     manualMode: false,
   })
@@ -3702,8 +3768,18 @@ const LIVE_STATE_FILE_SUFFIX = ".json"
 const LIVE_STATE_BLOCKER_FILE = "blocker.txt"
 const DEFAULT_LIVE_STATE_PRUNE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 const LIVE_STATE_PRUNE_TEST_MAX_AGE_MS = 1000
+const LIVE_STATE_PRUNE_TEST_MIN_INTERVAL_MS = 0
+const LIVE_STATE_PRUNE_THROTTLED_INTERVAL_MS = 60 * 1000
+const LIVE_STATE_PRUNE_EXPIRY_INTERVAL_MS = 250
+const LIVE_STATE_PRUNE_EXPIRY_WAIT_MS = 400
+const DEFAULT_LIVE_STATE_PRUNE_MIN_INTERVAL_MS = 60 * 1000
 const LIVE_STATE_PRUNE_BACKDATED_MS = 10000
 const LIVE_STATE_STALE_SESSION = "lru-state-stale-session"
+const LIVE_STATE_TMP_ORPHAN_SESSION = "lru-state-tmp-orphan"
+const LIVE_STATE_TMP_ORPHAN_CONTENT = '{"orphan": true}\n'
+const LIVE_STATE_TEMP_FILE_SUFFIX = ".tmp"
+const LIVE_STATE_THROTTLE_STALE_SESSION_A = "lru-state-throttle-stale-a"
+const LIVE_STATE_THROTTLE_STALE_SESSION_B = "lru-state-throttle-stale-b"
 const LIVE_STATE_STUCK_SESSION = "lru-state-stuck-entry"
 const LIVE_STATE_FRESH_SESSION = "lru-state-fresh-session"
 const LIVE_STATE_STALE_CONTENT = '{"stale": true}\n'
@@ -3712,6 +3788,7 @@ const LIVE_STATE_QUIET_SUBJECT = "/data/state-quiet.txt"
 const LIVE_STATE_MANUAL_SUBJECT = "/data/state-manual.txt"
 const LIVE_STATE_CUSTOM_STATE_DIR = "/tmp/custom-lru-state"
 const LIVE_STATE_CUSTOM_PRUNE_MAX_AGE_MS = 1000
+const LIVE_STATE_CUSTOM_PRUNE_MIN_INTERVAL_MS = 500
 const LIVE_STATE_ZERO_HINT_SUBJECTS = 0
 const LIVE_STATE_ESCAPE_SEGMENT = "escape-dir"
 
@@ -3882,11 +3959,34 @@ test("live state pruning on write removes files untouched past the age bound and
 
     const hooks = await loadPluginHooksWithLiveState(stateDir, {
       liveStatePruneMaxAgeMs: LIVE_STATE_PRUNE_TEST_MAX_AGE_MS,
+      liveStatePruneMinIntervalMs: LIVE_STATE_PRUNE_TEST_MIN_INTERVAL_MS,
     })
     await runTransform(hooks, buildStandardBundle(SESSION_ID, LIVE_STATE_QUIET_SUBJECT))
 
     assert.equal(existsSync(stalePath), false)
     assert.equal(readFileSync(freshPath, "utf8"), LIVE_STATE_FRESH_CONTENT)
+    assert.equal(existsSync(liveStatePathIn(stateDir, SESSION_ID)), true)
+  } finally {
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("live state pruning removes a stale temp file orphan while keeping fresh snapshots", async () => {
+  const stateDir = makeLiveStateDir()
+  try {
+    const hooks = await loadPluginHooksWithLiveState(stateDir, {
+      liveStatePruneMaxAgeMs: LIVE_STATE_PRUNE_TEST_MAX_AGE_MS,
+      liveStatePruneMinIntervalMs: LIVE_STATE_PRUNE_TEST_MIN_INTERVAL_MS,
+    })
+    await runTransform(hooks, buildStandardBundle(SESSION_ID, LIVE_STATE_QUIET_SUBJECT))
+
+    const orphanPath = join(stateDir, `${LIVE_STATE_TMP_ORPHAN_SESSION}${LIVE_STATE_FILE_SUFFIX}${LIVE_STATE_TEMP_FILE_SUFFIX}`)
+    writeFileSync(orphanPath, LIVE_STATE_TMP_ORPHAN_CONTENT)
+    const staleMoment = new Date(Date.now() - LIVE_STATE_PRUNE_BACKDATED_MS)
+    utimesSync(orphanPath, staleMoment, staleMoment)
+    await runTransform(hooks, buildStandardBundle(SESSION_ID, LIVE_STATE_QUIET_SUBJECT))
+
+    assert.equal(existsSync(orphanPath), false)
     assert.equal(existsSync(liveStatePathIn(stateDir, SESSION_ID)), true)
   } finally {
     cleanupMetricsDir(stateDir)
@@ -3904,6 +4004,7 @@ test("live state pruning skips an undeletable stale entry and still writes the f
 
     const hooks = await loadPluginHooksWithLiveState(stateDir, {
       liveStatePruneMaxAgeMs: LIVE_STATE_PRUNE_TEST_MAX_AGE_MS,
+      liveStatePruneMinIntervalMs: LIVE_STATE_PRUNE_TEST_MIN_INTERVAL_MS,
     })
     await runTransform(hooks, buildStandardBundle(SESSION_ID, LIVE_STATE_QUIET_SUBJECT))
 
@@ -3911,6 +4012,74 @@ test("live state pruning skips an undeletable stale entry and still writes the f
     assert.equal(existsSync(liveStatePathIn(stateDir, SESSION_ID)), true)
     const stats = await lruStats(hooks, SESSION_ID)
     assert.equal(Object.hasOwn(stats, "stateWriteError"), false)
+  } finally {
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("live state prune scan runs at most once per throttle interval per plugin instance while snapshot writes stay unaffected", async () => {
+  const stateDir = makeLiveStateDir()
+  try {
+    const hooks = await loadPluginHooksWithLiveState(stateDir, {
+      liveStatePruneMaxAgeMs: LIVE_STATE_PRUNE_TEST_MAX_AGE_MS,
+      liveStatePruneMinIntervalMs: LIVE_STATE_PRUNE_THROTTLED_INTERVAL_MS,
+    })
+    const staleMoment = new Date(Date.now() - LIVE_STATE_PRUNE_BACKDATED_MS)
+    const firstStalePath = liveStatePathIn(stateDir, LIVE_STATE_THROTTLE_STALE_SESSION_A)
+    writeFileSync(firstStalePath, LIVE_STATE_STALE_CONTENT)
+    utimesSync(firstStalePath, staleMoment, staleMoment)
+    await runTransform(hooks, buildStandardBundle(SESSION_ID, LIVE_STATE_QUIET_SUBJECT))
+    assert.equal(existsSync(firstStalePath), false)
+
+    const secondStalePath = liveStatePathIn(stateDir, LIVE_STATE_THROTTLE_STALE_SESSION_B)
+    writeFileSync(secondStalePath, LIVE_STATE_STALE_CONTENT)
+    utimesSync(secondStalePath, staleMoment, staleMoment)
+    await runTransform(hooks, buildStandardBundle(SESSION_ID, LIVE_STATE_QUIET_SUBJECT))
+
+    assert.equal(existsSync(secondStalePath), true)
+    assert.equal(existsSync(liveStatePathIn(stateDir, SESSION_ID)), true)
+  } finally {
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("live state prune scan runs again once the injected throttle interval has elapsed", async () => {
+  const stateDir = makeLiveStateDir()
+  try {
+    const hooks = await loadPluginHooksWithLiveState(stateDir, {
+      liveStatePruneMaxAgeMs: LIVE_STATE_PRUNE_TEST_MAX_AGE_MS,
+      liveStatePruneMinIntervalMs: LIVE_STATE_PRUNE_EXPIRY_INTERVAL_MS,
+    })
+    const staleMoment = new Date(Date.now() - LIVE_STATE_PRUNE_BACKDATED_MS)
+    await runTransform(hooks, buildStandardBundle(SESSION_ID, LIVE_STATE_QUIET_SUBJECT))
+
+    const lateStalePath = liveStatePathIn(stateDir, LIVE_STATE_THROTTLE_STALE_SESSION_A)
+    writeFileSync(lateStalePath, LIVE_STATE_STALE_CONTENT)
+    utimesSync(lateStalePath, staleMoment, staleMoment)
+    await runTransform(hooks, buildStandardBundle(SESSION_ID, LIVE_STATE_QUIET_SUBJECT))
+    assert.equal(existsSync(lateStalePath), true)
+
+    await sleepMs(LIVE_STATE_PRUNE_EXPIRY_WAIT_MS)
+    await runTransform(hooks, buildStandardBundle(SESSION_ID, LIVE_STATE_QUIET_SUBJECT))
+
+    assert.equal(existsSync(lateStalePath), false)
+    assert.equal(existsSync(liveStatePathIn(stateDir, SESSION_ID)), true)
+  } finally {
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("live state write records stateWriteError and leaves no temp file behind when the rename fails", async () => {
+  const stateDir = makeLiveStateDir()
+  try {
+    mkdirSync(liveStatePathIn(stateDir, SESSION_ID))
+    const hooks = await loadPluginHooksWithLiveState(stateDir)
+    await runTransform(hooks, buildStandardBundle(SESSION_ID, LIVE_STATE_QUIET_SUBJECT))
+
+    const stats = await lruStats(hooks, SESSION_ID)
+    assert.equal(typeof stats.stateWriteError, "string")
+    assert.ok((stats.stateWriteError as string).length > 0)
+    assert.deepEqual(readdirSync(stateDir), [`${SESSION_ID}.json`])
   } finally {
     cleanupMetricsDir(stateDir)
   }
@@ -3977,17 +4146,20 @@ test("lru_stats reports the live state options defaulting beside the metrics log
   assert.equal(defaultOptions.liveStateLog, false)
   assert.equal(defaultOptions.liveStatePath, DEFAULT_LIVE_STATE_DIR)
   assert.equal(defaultOptions.liveStatePruneMaxAgeMs, DEFAULT_LIVE_STATE_PRUNE_MAX_AGE_MS)
+  assert.equal(defaultOptions.liveStatePruneMinIntervalMs, DEFAULT_LIVE_STATE_PRUNE_MIN_INTERVAL_MS)
   assert.equal(DEFAULT_LIVE_STATE_DIR, join(homedir(), ".local", "share", "opencode", "lru-state"))
 
   const customHooks = await loadPluginHooksWith({
     liveStateLog: true,
     liveStatePath: LIVE_STATE_CUSTOM_STATE_DIR,
     liveStatePruneMaxAgeMs: LIVE_STATE_CUSTOM_PRUNE_MAX_AGE_MS,
+    liveStatePruneMinIntervalMs: LIVE_STATE_CUSTOM_PRUNE_MIN_INTERVAL_MS,
   })
   const customOptions = (await lruStats(customHooks, SESSION_ID)).options as Record<string, unknown>
   assert.equal(customOptions.liveStateLog, true)
   assert.equal(customOptions.liveStatePath, LIVE_STATE_CUSTOM_STATE_DIR)
   assert.equal(customOptions.liveStatePruneMaxAgeMs, LIVE_STATE_CUSTOM_PRUNE_MAX_AGE_MS)
+  assert.equal(customOptions.liveStatePruneMinIntervalMs, LIVE_STATE_CUSTOM_PRUNE_MIN_INTERVAL_MS)
 })
 
 test("lru_stats counts expired reasoning parts and bytes without counting them as evictions", async () => {
@@ -4330,6 +4502,7 @@ const FENCE_LANGUAGE_TS = "ts"
 const FENCE_LANGUAGE_JS = "js"
 const FENCE_NO_LANGUAGE = undefined
 const FENCE_INFO_STRING_TS = 'ts title="paste"'
+const FENCE_INFO_STRING_WITH_BACKTICKS = "js `code` sample"
 const FENCE_INDENT_FOUR_SPACES = "    "
 const FENCE_INDENT_THREE_SPACES = "   "
 const FENCE_INDENT_TWO_SPACES = "  "
@@ -4386,6 +4559,21 @@ const textAt = (bundle: StrictBundle, messageIndex: number): string =>
 
 const fenceTombstoneFor = (language: string | undefined, contentLineCount: number, firstLine: string): string =>
   `${FENCE_EVICTED_MARKER} ${language === undefined ? "code block" : `${language} code block`} (${contentLineCount} lines, first line "${firstLine}") was evicted to reclaim context.${reloadPointerFor(firstLine)}`
+
+test("transform never opens a span from a fence opener whose info string contains backticks and treats it as content", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
+  const unclosedBacktickBlock = `${FENCE_TICKS}${FENCE_INFO_STRING_WITH_BACKTICKS}\n${fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG).join("\n")}`
+  const realBlock = fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG_B))
+  const text = `${FENCE_PROSE_BEFORE}\n${unclosedBacktickBlock}\n${FENCE_PROSE_MIDDLE}\n${realBlock}\n${FENCE_PROSE_AFTER}`
+  const bundle = userFenceBundle(text)
+  await runTransform(hooks, bundle)
+
+  assert.equal(
+    textAt(bundle, 0),
+    `${FENCE_PROSE_BEFORE}\n${unclosedBacktickBlock}\n${FENCE_PROSE_MIDDLE}\n${fenceTombstoneFor(FENCE_LANGUAGE_TS, FENCE_OVER_LINES, fenceFirstLineOf(FENCE_LINE_TAG_B))}\n${FENCE_PROSE_AFTER}`,
+  )
+  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG)))
+})
 
 test("transform leaves every user fenced block byte-identical while userFenceEviction stays disabled by default", async () => {
   const hooks = await loadPluginHooks()
