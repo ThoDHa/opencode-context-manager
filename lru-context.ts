@@ -1,4 +1,4 @@
-import { appendFile, rename, stat } from "node:fs/promises"
+import { appendFile, mkdir, readdir, rename, stat, unlink, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import type { Plugin } from "@opencode-ai/plugin"
@@ -83,6 +83,17 @@ const DEFAULT_METRICS_LOG_ENABLED = true
 const METRICS_DIR_SEGMENTS = [".local", "share", "opencode"]
 const METRICS_FILE_BASENAME = "lru-metrics.jsonl"
 const DEFAULT_METRICS_PATH = join(homedir(), ...METRICS_DIR_SEGMENTS, METRICS_FILE_BASENAME)
+const DEFAULT_LIVE_STATE_LOG_ENABLED = true
+const LIVE_STATE_DIR_BASENAME = "lru-state"
+const DEFAULT_LIVE_STATE_DIR = join(homedir(), ...METRICS_DIR_SEGMENTS, LIVE_STATE_DIR_BASENAME)
+const LIVE_STATE_FILE_SUFFIX = ".json"
+const MS_PER_SECOND = 1000
+const SECONDS_PER_MINUTE = 60
+const MINUTES_PER_HOUR = 60
+const HOURS_PER_DAY = 24
+const DAYS_PER_PRUNE_INTERVAL = 7
+const DEFAULT_LIVE_STATE_PRUNE_MAX_AGE_MS =
+  DAYS_PER_PRUNE_INTERVAL * HOURS_PER_DAY * MINUTES_PER_HOUR * SECONDS_PER_MINUTE * MS_PER_SECOND
 const DEFAULT_METRICS_ROTATION_MAX_BYTES = 5 * 1024 * 1024
 const METRICS_ROTATION_DISABLED_MAX_BYTES = 0
 const METRICS_ROTATION_SUFFIX = ".1"
@@ -133,6 +144,9 @@ type LruContextOptions = {
   metricsLog?: boolean
   metricsPath?: string
   metricsRotationMaxBytes?: number
+  liveStateLog?: boolean
+  liveStatePath?: string
+  liveStatePruneMaxAgeMs?: number
   manualMode?: boolean
   userFenceEviction?: { enabled?: boolean; minBlockLines?: number }
 }
@@ -231,9 +245,35 @@ type SessionMetrics = {
   stashReadsLoggedThrough: number
   lastRun?: LastRunMetrics
   logWriteError?: string
+  stateWriteError?: string
 }
 
 type MetricsStore = Map<string, SessionMetrics>
+
+type CumulativeCounters = {
+  evictions: number
+  bytesReclaimed: number
+  stashHits: number
+  stashMisses: number
+  stashDropped: number
+  deduped: number
+  reasoningExpired: number
+  reasoningBytesExpired: number
+  postEvictionTouches: number
+  fenceEvicted: number
+}
+
+type LiveStateSnapshot = {
+  ts: string
+  session: string
+  manualMode: boolean
+  modelContextTokens: number | null
+  modelContextTokensSource: ContextTokensSource
+  lastRun: LastRunMetrics
+  totals: CumulativeCounters
+  stash: { entries: number; capacity: number }
+  hotSubjects: string[]
+}
 
 type StatsSource = {
   options: ResolvedOptions
@@ -321,6 +361,12 @@ const resolveOptions = (raw: LruContextOptions = {}): ResolvedOptions => {
       typeof raw.metricsRotationMaxBytes === "number" && Number.isFinite(raw.metricsRotationMaxBytes) && raw.metricsRotationMaxBytes >= 0
         ? raw.metricsRotationMaxBytes
         : DEFAULT_METRICS_ROTATION_MAX_BYTES,
+    liveStateLog: typeof raw.liveStateLog === "boolean" ? raw.liveStateLog : DEFAULT_LIVE_STATE_LOG_ENABLED,
+    liveStatePath: typeof raw.liveStatePath === "string" && raw.liveStatePath.length > 0 ? raw.liveStatePath : DEFAULT_LIVE_STATE_DIR,
+    liveStatePruneMaxAgeMs:
+      typeof raw.liveStatePruneMaxAgeMs === "number" && Number.isFinite(raw.liveStatePruneMaxAgeMs) && raw.liveStatePruneMaxAgeMs >= 0
+        ? raw.liveStatePruneMaxAgeMs
+        : DEFAULT_LIVE_STATE_PRUNE_MAX_AGE_MS,
     manualMode: typeof raw.manualMode === "boolean" ? raw.manualMode : DEFAULT_MANUAL_MODE,
     userFenceEviction: userFenceEvictionOf(raw.userFenceEviction),
   }
@@ -918,13 +964,15 @@ const countPostEvictionTouches = (metrics: SessionMetrics, appearances: ToolAppe
   return touches
 }
 
+const lastRunMetricsOf = (eviction: EvictionResult): LastRunMetrics => ({
+  estimatedTokens: eviction.estimatedTokens,
+  watermarkTokens: eviction.watermarkTokens,
+  deficitTokens: eviction.deficitTokens,
+})
+
 const recordRunOutcome = (metrics: SessionMetrics, run: RunOutcome): void => {
   const { eviction, deduped: dedupedThisRun, touches: touchesThisRun, reasoningExpired: reasoningExpiredThisRun, fenceEvicted: fenceEvictedThisRun } = run
-  metrics.lastRun = {
-    estimatedTokens: eviction.estimatedTokens,
-    watermarkTokens: eviction.watermarkTokens,
-    deficitTokens: eviction.deficitTokens,
-  }
+  metrics.lastRun = lastRunMetricsOf(eviction)
   metrics.evictions += eviction.evicted.length
   metrics.stashDropped += eviction.stashDropped
   for (const entry of eviction.evicted) {
@@ -987,18 +1035,7 @@ const recordMetricsLine = async (
     fenceEvictedThisRun: fenceEvictedThisRun.blocks,
     postEvictionTouchesThisRun: touchesThisRun,
     stashReadsSinceLastLine,
-    totals: {
-      evictions: metrics.evictions,
-      bytesReclaimed: metrics.bytesReclaimed,
-      stashHits: metrics.stashHits,
-      stashMisses: metrics.stashMisses,
-      stashDropped: metrics.stashDropped,
-      deduped: metrics.deduped,
-      reasoningExpired: metrics.reasoningExpired,
-      reasoningBytesExpired: metrics.reasoningBytesExpired,
-      postEvictionTouches: metrics.postEvictionTouches,
-      fenceEvicted: metrics.fenceEvicted,
-    },
+    totals: totalsOf(metrics),
   }
   try {
     const metricsJsonLine = `${JSON.stringify(line)}\n`
@@ -1009,6 +1046,89 @@ const recordMetricsLine = async (
   } catch (error) {
     metrics.logWriteError = error instanceof Error ? error.message : String(error)
   }
+}
+
+const totalsOf = (metrics: SessionMetrics): CumulativeCounters => ({
+  evictions: metrics.evictions,
+  bytesReclaimed: metrics.bytesReclaimed,
+  stashHits: metrics.stashHits,
+  stashMisses: metrics.stashMisses,
+  stashDropped: metrics.stashDropped,
+  deduped: metrics.deduped,
+  reasoningExpired: metrics.reasoningExpired,
+  reasoningBytesExpired: metrics.reasoningBytesExpired,
+  postEvictionTouches: metrics.postEvictionTouches,
+  fenceEvicted: metrics.fenceEvicted,
+})
+
+const liveStateSnapshotOf = (
+  sessionKey: string,
+  budget: SessionBudget,
+  options: ResolvedOptions,
+  metrics: SessionMetrics,
+  lastRun: LastRunMetrics,
+  stash: SessionStash,
+  hotSubjects: HotSubject[],
+): LiveStateSnapshot => ({
+  ts: new Date().toISOString(),
+  session: sessionKey,
+  manualMode: options.manualMode,
+  modelContextTokens: budget.tokens,
+  modelContextTokensSource: budget.source,
+  lastRun,
+  totals: totalsOf(metrics),
+  stash: { entries: stash.size, capacity: DEFAULT_STASH_LIMIT },
+  hotSubjects: orderedRenderedSubjectsOf(hotSubjects, options.hintSubjects),
+})
+
+// Prune runs after the snapshot write has landed, so every failure here
+// is a skipped file, never a surfaced error.
+const pruneLiveStateFiles = async (dir: string, maxAgeMs: number): Promise<void> => {
+  if (maxAgeMs <= 0) return
+  let names: string[]
+  try {
+    names = await readdir(dir)
+  } catch {
+    return
+  }
+  const nowMs = Date.now()
+  for (const name of names) {
+    if (!name.endsWith(LIVE_STATE_FILE_SUFFIX)) continue
+    const path = join(dir, name)
+    try {
+      const info = await stat(path)
+      if (nowMs - info.mtimeMs > maxAgeMs) await unlink(path)
+    } catch {
+      continue
+    }
+  }
+}
+
+const isSafeSessionFileStem = (sessionKey: string): boolean =>
+  sessionKey.length > 0 && sessionKey !== "." && sessionKey !== ".." && !sessionKey.includes(PATH_SEGMENT_SEPARATOR)
+
+const recordLiveStateSnapshot = async (
+  options: ResolvedOptions,
+  sessionKey: string,
+  budget: SessionBudget,
+  metrics: SessionMetrics,
+  stash: SessionStash,
+  hotSubjects: HotSubject[],
+): Promise<void> => {
+  if (options.liveStateLog === false) return
+  const lastRun = metrics.lastRun
+  if (lastRun === undefined) return
+  if (!isSafeSessionFileStem(sessionKey)) return
+  const snapshot = liveStateSnapshotOf(sessionKey, budget, options, metrics, lastRun, stash, hotSubjects)
+  try {
+    await mkdir(options.liveStatePath, { recursive: true })
+    await writeFile(join(options.liveStatePath, `${sessionKey}${LIVE_STATE_FILE_SUFFIX}`), `${JSON.stringify(snapshot, null, JSON_INDENT_SPACES)}\n`)
+    delete metrics.stateWriteError
+  } catch (error) {
+    metrics.stateWriteError = error instanceof Error ? error.message : String(error)
+    return
+  }
+  await pruneLiveStateFiles(options.liveStatePath, options.liveStatePruneMaxAgeMs)
 }
 
 const modelKeyOf = (model: ChatParamsModel | undefined): string | undefined => {
@@ -1052,6 +1172,9 @@ const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
       metricsLog: source.options.metricsLog,
       metricsPath: source.options.metricsPath,
       metricsRotationMaxBytes: source.options.metricsRotationMaxBytes,
+      liveStateLog: source.options.liveStateLog,
+      liveStatePath: source.options.liveStatePath,
+      liveStatePruneMaxAgeMs: source.options.liveStatePruneMaxAgeMs,
       userFenceEviction: {
         enabled: source.options.userFenceEviction.enabled,
         minBlockLines: source.options.userFenceEviction.minBlockLines,
@@ -1075,6 +1198,7 @@ const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
     },
     lastRun: metrics.lastRun ?? null,
     ...(metrics.logWriteError === undefined ? {} : { logWriteError: metrics.logWriteError }),
+    ...(metrics.stateWriteError === undefined ? {} : { stateWriteError: metrics.stateWriteError }),
   }
   return JSON.stringify(report, null, JSON_INDENT_SPACES)
 }
@@ -1207,7 +1331,8 @@ const evictLeastRecentlyUsed = (
   }
 }
 
-const buildHintLine = (hotSubjects: HotSubject[], limit: number): string | undefined => {
+const orderedRenderedSubjectsOf = (hotSubjects: HotSubject[], limit: number): string[] => {
+  if (limit <= 0) return []
   const seen = new Set<string>()
   const rendered: string[] = []
   const ordered = [...hotSubjects].sort((a, b) => b.lastTouch - a.lastTouch)
@@ -1218,6 +1343,11 @@ const buildHintLine = (hotSubjects: HotSubject[], limit: number): string | undef
     rendered.push(renderedSubject)
     if (rendered.length >= limit) break
   }
+  return rendered
+}
+
+const buildHintLine = (hotSubjects: HotSubject[], limit: number): string | undefined => {
+  const rendered = orderedRenderedSubjectsOf(hotSubjects, limit)
   if (rendered.length === 0) return undefined
   return `${HINT_LINE_PREFIX} ${rendered.join(SUBJECT_SEPARATOR)}`
 }
@@ -1298,6 +1428,7 @@ export default (async (_input, rawOptions) => {
       recordRunOutcome(sessionMetrics, runOutcome)
       storeHint(hintBySession, sessionKey, eviction.hotSubjects, options.hintSubjects)
       await recordMetricsLine(options, sessionMetrics, sessionKey, budget, runOutcome)
+      await recordLiveStateSnapshot(options, sessionKey, budget, sessionMetrics, sessionStash, eviction.hotSubjects)
     },
     "experimental.chat.system.transform": async (input: { sessionID?: string }, output: { system: string[] }) => {
       deliverHint(hintBySession, input, output)
