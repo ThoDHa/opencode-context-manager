@@ -133,8 +133,11 @@ test("parseMetricsLine rejects a line missing a required field", () => {
 })
 
 test("parseMetricsLine rejects a line whose totals carry a non-numeric counter", () => {
-  assert.equal(parseMetricsLine(JSON.stringify(makeLine({ totals: { ...makeTotals(), evictions: "many" } }))), undefined)
-  assert.equal(parseMetricsLine(JSON.stringify(makeLine({ totals: { ...makeTotals(), fenceEvicted: "some" } }))), undefined)
+  const rawNonNumericEvictions = JSON.stringify(makeLine({ totals: { ...makeTotals(), evictions: "many" } }))
+  const rawNonNumericFenceEvictions = JSON.stringify(makeLine({ totals: { ...makeTotals(), fenceEvicted: "some" } }))
+
+  assert.equal(parseMetricsLine(rawNonNumericEvictions), undefined)
+  assert.equal(parseMetricsLine(rawNonNumericFenceEvictions), undefined)
 })
 
 test("parseMetricsLine rejects a line whose evicted entries are malformed", () => {
@@ -153,7 +156,6 @@ test("parseMetricsLine accepts the plugin's lines that carry run-scoped fields t
     fenceEvictedThisRun: 1,
     postEvictionTouchesThisRun: 1,
     stashReadsSinceLastLine: 3,
-    totals: makeTotals(),
   })
 
   const line = parseMetricsLine(raw)

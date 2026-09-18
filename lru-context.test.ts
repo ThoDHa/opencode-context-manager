@@ -4411,6 +4411,8 @@ const MANUAL_MODE_INVALID_VALUE = "yes"
 const MANUAL_FALSE_PIN_SUBJECT = "/data/manual-false-pin.txt"
 const MANUAL_PRESSURE_SUBJECT = "/data/manual-pressure.txt"
 const MANUAL_DEFAULT_BUDGET_SUBJECT = "/data/manual-default-budget.txt"
+const MANUAL_OVERRIDE_BUDGET_SUBJECT = "/data/manual-override-budget.txt"
+const MANUAL_CAPTURED_LIMIT_SUBJECT = "/data/manual-captured-limit.txt"
 const MANUAL_HINT_SUBJECT = "/data/manual-hint.txt"
 const MANUAL_STATS_SUBJECT = "/data/manual-stats.txt"
 const MANUAL_INVALID_SUBJECT = "/data/manual-invalid.txt"
@@ -4435,12 +4437,41 @@ test("transform keeps an explicit defaultContextTokens from driving eviction whi
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
 })
 
+test("transform keeps a per model override budget from driving eviction while manualMode is enabled", async () => {
+  const hooks = await loadPluginHooksWith({
+    manualMode: true,
+    modelContextTokens: { [OVERRIDE_MODEL_KEY]: SMALL_CONTEXT_LIMIT },
+  })
+  await setChatParamsForModel(hooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID, undefined)
+
+  const bundle = buildStandardBundle(SESSION_ID, MANUAL_OVERRIDE_BUDGET_SUBJECT)
+  await runTransform(hooks, bundle)
+
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(stats.modelContextTokens, SMALL_CONTEXT_LIMIT)
+  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_OVERRIDE)
+})
+
 test("transform under manualMode with an unknown budget is byte-identical to the unknown-budget stand-down", async () => {
   const manualHooks = await loadPluginHooksWith({ manualMode: true })
   const standDownHooks = await loadPluginHooks()
 
   const manualBundle = buildFallbackBudgetBundle(LEGACY_FALLBACK_BUNDLE_OVER_WATERMARK_CHARS)
   const standDownBundle = buildFallbackBudgetBundle(LEGACY_FALLBACK_BUNDLE_OVER_WATERMARK_CHARS)
+  await runTransform(manualHooks, manualBundle)
+  await runTransform(standDownHooks, standDownBundle)
+
+  assert.deepEqual(manualBundle, standDownBundle)
+})
+
+test("transform under manualMode with a captured limit is byte-identical to the unknown-budget stand-down", async () => {
+  const manualHooks = await loadPluginHooksWith({ manualMode: true })
+  await setContextLimit(manualHooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+  const standDownHooks = await loadPluginHooks()
+
+  const manualBundle = buildStandardBundle(SESSION_ID, MANUAL_CAPTURED_LIMIT_SUBJECT)
+  const standDownBundle = buildStandardBundle(SESSION_ID, MANUAL_CAPTURED_LIMIT_SUBJECT)
   await runTransform(manualHooks, manualBundle)
   await runTransform(standDownHooks, standDownBundle)
 
