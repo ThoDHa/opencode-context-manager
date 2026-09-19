@@ -4,8 +4,8 @@ import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
 
-import lruContextFactory from "../../opencode/.config/opencode/plugin/lru-context.ts"
-import { loadPanelData } from "../../opencode/.config/opencode/plugin/lru-panel-data.ts"
+import lruContextFactory from "../plugin/lru-context.ts"
+import { loadPanelData } from "../plugin/lru-panel-data.ts"
 
 const TRANSFORM_HOOK = "experimental.chat.messages.transform"
 const CHAT_PARAMS_HOOK = "chat.params"

@@ -1,7 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 
 // Both external specifiers below avoid runtime resolution on purpose. The
-// TuiPluginApi import is type-only, so the transpiler erases it; the stowed
+// TuiPluginApi import is type-only, so the transpiler erases it; the deployed
 // plugin's realpath sits outside any node_modules up-tree (the same
 // constraint that forced lru-context.ts to register tools as plain
 // definitions instead of calling tool() from @opencode-ai/plugin). The

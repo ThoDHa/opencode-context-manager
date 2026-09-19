@@ -3,7 +3,7 @@
 // and `make test` stays zero-skip.
 import { performance } from "node:perf_hooks"
 
-import lruContextFactory from "../../opencode/.config/opencode/plugin/lru-context.ts"
+import lruContextFactory from "../plugin/lru-context.ts"
 
 const TRANSFORM_HOOK = "experimental.chat.messages.transform"
 const SYSTEM_TRANSFORM_HOOK = "experimental.chat.system.transform"

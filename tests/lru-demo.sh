@@ -9,9 +9,9 @@
 
 set -uo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-DEMO_MJS="$REPO_ROOT/tests/opencode/lru-demo.mjs"
-PLUGIN="$REPO_ROOT/opencode/.config/opencode/plugin/lru-context.ts"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.. && pwd)"
+DEMO_MJS="$REPO_ROOT/tests/lru-demo.mjs"
+PLUGIN="$REPO_ROOT/plugin/lru-context.ts"
 DEMO_DIR="${LRU_DEMO_DIR:-/tmp/opencode/lru-demo}"
 OPENCODE_BIN="${OPENCODE_BIN:-$(command -v opencode || true)}"
 PROMPT="Proceed with the task steps; inspect $DEMO_DIR/files as needed."

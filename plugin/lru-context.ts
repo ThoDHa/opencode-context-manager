@@ -1434,9 +1434,10 @@ export default (async (_input, rawOptions) => {
   // Workaround: read_evicted and lru_stats are registered as plain
   // { description, args, execute } definitions instead of calling tool() from
   // @opencode-ai/plugin. The package only resolves inside the opencode runtime
-  // (Bun follows the stow symlink to this repo's real path, where no node_modules
-  // exists up-tree; the runtime's own copy at ~/.config/opencode/node_modules is
-  // off that resolution path), so importing it throws here. The runtime's tool
+   // (Bun follows the deployment symlink to this repository's real path, where
+   // no node_modules exists up-tree; the runtime's own copy at
+   // ~/.config/opencode/node_modules is off that resolution path), so importing
+   // it throws here. The runtime's tool
   // registry (packages/opencode/src/tool/registry.ts, fromPlugin) consumes
   // definition objects directly and derives the JSON schema itself: args values
   // that are not zod schemas take its legacyJsonSchema path, so the plain

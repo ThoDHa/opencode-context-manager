@@ -21,8 +21,8 @@ import {
   readStateSnapshot,
   sessionPanelData,
   type PanelMetricsLine,
-} from "../../opencode/.config/opencode/plugin/lru-panel-data.ts"
-import lruContextFactory from "../../opencode/.config/opencode/plugin/lru-context.ts"
+} from "../plugin/lru-panel-data.ts"
+import lruContextFactory from "../plugin/lru-context.ts"
 
 const SESSION_A = "sess-panel-a"
 const SESSION_B = "sess-panel-b"
