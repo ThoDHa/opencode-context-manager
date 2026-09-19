@@ -690,3 +690,76 @@ test("the default live state dir matches the plugin core's resolved state path",
   assert.equal(DEFAULT_LIVE_STATE_DIR, join(homedir(), ".local", "share", "opencode", "lru-state"))
   assert.equal(stats.options.liveStatePath, DEFAULT_LIVE_STATE_DIR)
 })
+
+const CHILD_C = "sess-child-c"
+
+test("loadPanelData resolves each child's panel with the snapshot-preferred logic over one shared log read", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "metrics.jsonl")
+    const stateDir = join(dir, "lru-state")
+    mkdirSync(stateDir)
+    writeFileSync(path, serialize([logLineStaleAgainstSnapshot(), makeLine({ session: SESSION_B }), makeLine({ session: CHILD_C })]))
+    writeSnapshot(stateDir, SESSION_A, makeSnapshot())
+
+    const data = await loadPanelData({ path, stateDir, sessionID: SESSION_A, childSessionIDs: [SESSION_A, SESSION_B, CHILD_C] })
+
+    assert.equal(data.error, undefined)
+    assert.ok(data.subagentPanels !== undefined)
+    assert.equal(data.subagentPanels.length, LINE_COUNT_THREE)
+    const [snapshotChild, logChild, thirdChild] = data.subagentPanels
+    assert.equal(snapshotChild.id, SESSION_A)
+    assert.ok(snapshotChild.panel !== undefined)
+    assert.equal(snapshotChild.panel.manualMode, true)
+    assert.deepEqual(snapshotChild.panel.totals, makeTotals())
+    assert.equal(logChild.id, SESSION_B)
+    assert.ok(logChild.panel !== undefined)
+    assert.equal(logChild.panel.manualMode, undefined)
+    assert.deepEqual(logChild.panel.totals, makeTotals())
+    assert.equal(thirdChild.id, CHILD_C)
+    assert.ok(thirdChild.panel !== undefined)
+    assert.equal(thirdChild.panel.runs, 1)
+    assert.equal(thirdChild.panel.manualMode, undefined)
+  })
+})
+
+test("loadPanelData leaves a child without any data an undefined panel", async () => {
+  await withTempDir(async (dir) => {
+    const data = await loadPanelData({ path: join(dir, "absent-metrics.jsonl"), sessionID: SESSION_A, childSessionIDs: [SESSION_B] })
+
+    assert.equal(data.error, undefined)
+    assert.ok(data.subagentPanels !== undefined)
+    assert.deepEqual(data.subagentPanels, [{ id: SESSION_B, panel: undefined }])
+  })
+})
+
+test("loadPanelData omits the subagent panels when no child ids were requested", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "metrics.jsonl")
+    writeFileSync(path, serialize([makeLine()]))
+
+    const data = await loadPanelData({ path, sessionID: SESSION_A })
+
+    assert.equal(data.error, undefined)
+    assert.equal(data.subagentPanels, undefined)
+  })
+})
+
+test("loadPanelData serves child snapshots alongside the log warning when the metrics log cannot be read", async () => {
+  await withTempDir(async (dir) => {
+    const directoryPath = join(dir, "metrics-dir")
+    mkdirSync(directoryPath)
+    const stateDir = join(dir, "lru-state")
+    mkdirSync(stateDir)
+    writeSnapshot(stateDir, SESSION_A, makeSnapshot())
+
+    const data = await loadPanelData({ path: directoryPath, stateDir, sessionID: SESSION_A, childSessionIDs: [SESSION_A, SESSION_B] })
+
+    assert.ok(data.error !== undefined)
+    assert.ok(data.subagentPanels !== undefined)
+    const [snapshotChild, missingChild] = data.subagentPanels
+    assert.ok(snapshotChild.panel !== undefined)
+    assert.equal(snapshotChild.panel.manualMode, true)
+    assert.deepEqual(snapshotChild.panel.totals, makeTotals())
+    assert.equal(missingChild.panel, undefined)
+  })
+})

@@ -12,7 +12,20 @@
 // runtime modules for every file outside node_modules.
 import type { TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
 import { createSignal, onCleanup, onMount } from "solid-js"
-import { loadPanelData, panelRows, resolveSidebarEnabled, sidebarRows, type PanelData, type PanelRow, type PanelRowTone } from "./lru-panel-data.ts"
+import {
+  SUBAGENT_FALLBACK_TYPE,
+  filterSubagentChildren,
+  loadPanelData,
+  panelRows,
+  resolveSidebarEnabled,
+  resolveSidebarSubagents,
+  sidebarRows,
+  sidebarSubagentsGroup,
+  type PanelData,
+  type PanelRow,
+  type PanelRowTone,
+  type SubagentChild,
+} from "./lru-panel-data.ts"
 
 const PLUGIN_ID = "lru-context"
 const COMMAND_NAMESPACE = "palette"
@@ -24,6 +37,7 @@ const SLASH_NAME = "lru"
 const DIALOG_SIZE = "large"
 const SIDEBAR_SLOT_ORDER = 600
 const SIDEBAR_REFRESH_MS = 5000
+const SUBAGENT_RUNNING_STATUS_TYPES: ReadonlySet<string> = new Set(["busy", "retry"])
 
 type PanelProps = { api: TuiPluginApi; data: PanelData }
 
@@ -71,7 +85,25 @@ const openPanelSafely = (api: TuiPluginApi): void => {
   })
 }
 
-type SidebarEntryProps = { api: TuiPluginApi; sessionID: string }
+const subagentChildrenOf = async (api: TuiPluginApi, sessionID: string): Promise<SubagentChild[]> => {
+  let result: Awaited<ReturnType<TuiPluginApi["client"]["session"]["children"]>>
+  try {
+    result = await api.client.session.children({ sessionID })
+  } catch {
+    // A failed children fetch degrades to the group-less sidebar for this tick.
+    return []
+  }
+  if (result.error !== undefined) return []
+  return (result.data ?? []).map((session) => ({
+    id: session.id,
+    type: session.agent ?? SUBAGENT_FALLBACK_TYPE,
+    updatedAtMs: session.time.updated,
+    running: SUBAGENT_RUNNING_STATUS_TYPES.has(api.session.status(session.id)?.type ?? ""),
+    archived: session.time.archived !== undefined,
+  }))
+}
+
+type SidebarEntryProps = { api: TuiPluginApi; sessionID: string; subagentsEnabled: boolean }
 
 const SidebarEntry = (props: SidebarEntryProps) => {
   const [rows, setRows] = createSignal<PanelRow[]>([])
@@ -80,8 +112,18 @@ const SidebarEntry = (props: SidebarEntryProps) => {
     const refresh = async (): Promise<void> => {
       let next: PanelRow[] = []
       try {
-        const data = await loadPanelData({ sessionID: props.sessionID })
-        if (data.current !== undefined) next = sidebarRows(data)
+        const children = props.subagentsEnabled ? await subagentChildrenOf(props.api, props.sessionID) : []
+        // Pre-filter before the loader so archived and out-of-window children
+        // cost no snapshot reads; the builder re-filters and stays the sole
+        // determinant of the rendered rows.
+        const inWindow = filterSubagentChildren(children, Date.now())
+        const data = await loadPanelData({
+          sessionID: props.sessionID,
+          childSessionIDs: inWindow.length > 0 ? inWindow.map((child) => child.id) : undefined,
+        })
+        if (data.current !== undefined) {
+          next = sidebarRows(data, inWindow.length > 0 ? sidebarSubagentsGroup(children, data) : undefined)
+        }
       } catch {
         // Startup and log rotation produce transient read failures; hide the
         // entry for that tick and let the next poll repaint it.
@@ -115,10 +157,11 @@ const tui: TuiPluginModule["tui"] = async (api, options) => {
     ],
   })
   if (resolveSidebarEnabled(options?.sidebarEnabled)) {
+    const subagentsEnabled = resolveSidebarSubagents(options?.sidebarSubagents)
     api.slots.register({
       order: SIDEBAR_SLOT_ORDER,
       slots: {
-        sidebar_content: (_ctx, props) => <SidebarEntry api={api} sessionID={props.session_id} />,
+        sidebar_content: (_ctx, props) => <SidebarEntry api={api} sessionID={props.session_id} subagentsEnabled={subagentsEnabled} />,
       },
     })
   }

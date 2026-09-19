@@ -40,7 +40,7 @@ Installing the plugin means placing its three source files (`lru-context.ts`, `l
 - [opencode](https://opencode.ai), the host application: its sessions run the plugin, and its TUI serves the `/lru` panel and the session sidebar. The two TUI views additionally need a current opencode build carrying the slots API, since the TUI module calls `api.slots.register` unconditionally; on builds without it the views are absent while the core transform and both tools work unchanged.
 - git, to clone this repository and to pull later updates into it
 - make, to run the `test`, `install`, and `uninstall` targets the `Makefile` defines
-- node, to run the test suite, since `make test` invokes `node --test` over the core suite (`tests/lru-context.test.ts`) and the three panel suites (`tests/lru-panel-data.test.ts`, `tests/lru-panel-rows.test.ts`, `tests/lru-sidebar-rows.test.ts`)
+- node, to run the test suite, since `make test` invokes `node --test` over the core suite (`tests/lru-context.test.ts`) and the panel suites (`tests/lru-panel-data.test.ts`, `tests/lru-panel-rows.test.ts`, `tests/lru-sidebar-rows.test.ts`, `tests/lru-sidebar-subagents.test.ts`)
 
 ### Install
 
@@ -59,7 +59,7 @@ The install is the whole deployment: the three symlinked files sit in opencode's
 
 ### Staying updated
 
-The installed entries are symlinks into the clone, so an update is `git pull` in the repository: the links resolve into the working tree, and the code the plugin runs is whatever the pull left there. `make test` re-runs the four suites against the pulled tree.
+The installed entries are symlinks into the clone, so an update is `git pull` in the repository: the links resolve into the working tree, and the code the plugin runs is whatever the pull left there. `make test` re-runs the five suites against the pulled tree.
 
 ### Manual install
 
@@ -129,10 +129,11 @@ However they arrive, options follow a drop-on-invalid discipline: a value failin
 | `liveStatePruneMaxAgeMs` | `number` | `604800000` (7 days) | finite, 0 or more (0 disables pruning) | Snapshot max age before prune |
 | `liveStatePruneMinIntervalMs` | `number` | `60000` (60 seconds) | finite, 0 or more (0 disables the throttle) | Minimum interval between prune directory scans |
 | `sidebarEnabled` | `boolean` | `true` | boolean; anything else falls back to true | Registers the session sidebar's `sidebar_content` slot; the `/lru` panel stays registered |
+| `sidebarSubagents` | `boolean` | `false` | boolean; anything else falls back to false | Appends a Subagents group (child sessions within a 30-minute recency window, aggregated by agent type) to the sidebar |
 
 ### Full sample configuration
 
-The two plugin files take separate registrations: the core entry (`lru-context.ts`) takes every option above except `sidebarEnabled`, and the TUI entry (`lru-context.tui.tsx`) reads only `sidebarEnabled` through its own registration. Each first element below is the installed plugin file's path, so point it wherever your copies live.
+The two plugin files take separate registrations: the core entry (`lru-context.ts`) takes every option above except `sidebarEnabled` and `sidebarSubagents`, and the TUI entry (`lru-context.tui.tsx`) reads only `sidebarEnabled` and `sidebarSubagents` through its own registration. Each first element below is the installed plugin file's path, so point it wherever your copies live.
 
 ```json
 {
@@ -169,7 +170,8 @@ The two plugin files take separate registrations: the core entry (`lru-context.t
     [
       "~/.config/opencode/plugin/lru-context.tui.tsx",
       {
-        "sidebarEnabled": true
+        "sidebarEnabled": true,
+        "sidebarSubagents": false
       }
     ]
   ]
@@ -180,7 +182,7 @@ Every value shown is that option's default, so omitting any key yields the same 
 
 ## LRU Context Plugin Design
 
-The LRU context manager is the plugin at `plugin/lru-context.ts`, with the TUI panel and sidebar in `lru-context.tui.tsx` and their shared data layer in `lru-panel-data.ts`. It hooks the transform opencode runs on the message list before every model call and trims what the provider is about to receive. `make test` pins the mechanism claims (core suite `tests/lru-context.test.ts`, panel suites `tests/lru-panel-data.test.ts`, `tests/lru-panel-rows.test.ts`, `tests/lru-sidebar-rows.test.ts`); the comparisons, the economics, and the observed session below are argument and measurement, not test outputs.
+The LRU context manager is the plugin at `plugin/lru-context.ts`, with the TUI panel and sidebar in `lru-context.tui.tsx` and their shared data layer in `lru-panel-data.ts`. It hooks the transform opencode runs on the message list before every model call and trims what the provider is about to receive. `make test` pins the mechanism claims (core suite `tests/lru-context.test.ts`, panel suites `tests/lru-panel-data.test.ts`, `tests/lru-panel-rows.test.ts`, `tests/lru-sidebar-rows.test.ts`, `tests/lru-sidebar-subagents.test.ts`); the comparisons, the economics, and the observed session below are argument and measurement, not test outputs.
 
 ### Why this plugin exists
 
@@ -250,7 +252,9 @@ The live-state snapshot is the second data source for both TUI views, on by defa
 
 `lru_stats` returns an echo of the resolved options (a fixed subset covering the budget, logging, and mode settings, not the full [Configuration](#configuration) surface), the effective budget with its source, stash occupancy and capacity, every counter, and the last run's estimate, watermark, and deficit; it stays the full-detail surface. The rows the two views no longer spend stay reachable elsewhere: session id, stash occupancy, and the stash hit, miss, and drop counters through `lru_stats`, hot subjects through the hint line and the session snapshot, and the unfiltered run history only in the metrics log itself. Each view reads the log anew at open or poll, filters to the session it serves, and prefers the live snapshot for the session block: a session log line newer than the snapshot wins the fields it carries, and a missing or malformed snapshot falls back to the log. What renders differs by view: both read the same two data sources, and each draws from its own row builder in `lru-panel-data.ts`, so the exact text of both is unit-tested without a terminal. The `/lru` dialog renders `panelRows`, the compact form: a header row (`LRU context manager`, suffixed `(manual)` only in manual mode), the budget with its source, the last run against the watermark with the deficit, one compact counters line (evictions with reclaimed bytes and its token-savings estimate, dedup count with its estimate, stash reads with hit count), and, once the metrics log carries an eviction for the session, the newest one as a single muted line naming tool, subject, size, and age. The sidebar renders `sidebarRows`, spaced for its narrow column (about 42 characters) as three blank-line-separated groups: the header, one stat block, and, once the metrics log carries an eviction for the session, the newest one as a muted two-line footer naming tool, subject, size, and age. The stat block lines read `Budget: <compact tokens>`, `Watermark: <compact tokens>`, `Over by: <compact deficit>` (present only when the last run's deficit is non-null and above zero), `Evictions: <count>, ~<savings estimate> tokens`, `Deduped: <count>, ~<savings estimate> tokens`, and `Stash reads: <count>, <hits> hits`; a null budget renders as `Budget: inactive (no budget)` and a missing watermark as `Watermark: none`, and the sidebar carries no budget source label (the panel keeps its label).
 
-The sidebar entry registers through the TUI plugin API's `sidebar_content` slot when `sidebarEnabled` is true (the default; a non-boolean value falls back to true, and `false` skips only that slot registration while the `/lru` command stays registered) and re-renders on a five-second poll of the same two files, visible only while the session has recorded data: a tick whose log read fails with no snapshot to fall back on hides it for that tick (startup and log rotation produce such transient failures), and the next poll repaints. The poll's timer and its post-await writes are dispose-guarded, so a route change or plugin shutdown cannot write through a disposed component.
+With `sidebarSubagents` enabled the sidebar appends one last blank-line-separated group for the session's subagent children (sessions carrying this one as their parent, fetched through the TUI API each tick): the children within scope are the running ones plus the non-running ones updated within the last 30 minutes, archived ones never render. A muted lead row `Subagents: <count>` is followed by one muted row per agent type, `explore: 2 agents, 12 evictions, ~9.2k tokens` for a multi-child type and `explore: 12 evictions, ~9.2k tokens` for a single-child one, the counts and eviction token savings summed over the type's children whose data landed (no dedup or stash figures appear in these rows); a type whose children have no recorded data yet renders `<type>: no data yet`, type rows sort by the type's most recent child update with the most recent first, and every row truncates with an ellipsis against the sidebar's column limit. The group degrades silently: a tick whose children fetch fails or that finds no in-window children renders the sidebar exactly as with the option off.
+
+The sidebar entry registers through the TUI plugin API's `sidebar_content` slot when `sidebarEnabled` is true (the default; a non-boolean value falls back to true, and `false` skips only that slot registration while the `/lru` command stays registered; the same registration reads `sidebarSubagents`, default false, which adds nothing on its own while the slot itself is off) and re-renders on a five-second poll of the same two files, visible only while the session has recorded data: a tick whose log read fails with no snapshot to fall back on hides it for that tick (startup and log rotation produce such transient failures), and the next poll repaints. The poll's timer and its post-await writes are dispose-guarded, so a route change or plugin shutdown cannot write through a disposed component.
 
 Degradation is explicit and identical in both builders: "no active session" outside a session, "no metrics recorded for this session yet" for a session with no runs, malformed lines skipped at parse, and an unreadable log leaving the snapshot-fed session block under a warning row when a snapshot serves the session, header and warning row alone otherwise.
 

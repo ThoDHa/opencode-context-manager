@@ -17,6 +17,29 @@ export const DEFAULT_SIDEBAR_ENABLED = true
 export const resolveSidebarEnabled = (value: unknown): boolean =>
   typeof value === "boolean" ? value : DEFAULT_SIDEBAR_ENABLED
 
+export const DEFAULT_SIDEBAR_SUBAGENTS = false
+
+export const resolveSidebarSubagents = (value: unknown): boolean =>
+  typeof value === "boolean" ? value : DEFAULT_SIDEBAR_SUBAGENTS
+
+export const SUBAGENT_RECENT_WINDOW_MS = 30 * 60 * 1000
+export const SUBAGENT_FALLBACK_TYPE = "subagent"
+
+export type SubagentChild = {
+  id: string
+  type: string
+  updatedAtMs: number
+  running: boolean
+  archived: boolean
+}
+
+export const filterSubagentChildren = (children: readonly SubagentChild[], nowMs: number): SubagentChild[] =>
+  children.filter((child) => {
+    if (child.archived) return false
+    if (child.running) return true
+    return nowMs - child.updatedAtMs <= SUBAGENT_RECENT_WINDOW_MS
+  })
+
 const BYTES_PER_KILOBYTE = 1024
 const BYTES_PER_MEGABYTE = BYTES_PER_KILOBYTE * BYTES_PER_KILOBYTE
 const BYTES_PER_GIGABYTE = BYTES_PER_MEGABYTE * BYTES_PER_KILOBYTE
@@ -116,12 +139,15 @@ export type GlobalTotals = {
   stashReads: number
 }
 
+export type SubagentPanelEntry = { id: string; panel: SessionPanel | undefined }
+
 export type PanelData = {
   source: string
   activeSession: string | undefined
   current: SessionPanel | undefined
   global: GlobalTotals
   error: string | undefined
+  subagentPanels?: SubagentPanelEntry[]
 }
 
 export type LoadPanelDataOptions = {
@@ -129,6 +155,7 @@ export type LoadPanelDataOptions = {
   stateDir?: string
   sessionID?: string
   recentEvictions?: number
+  childSessionIDs?: readonly string[]
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -439,8 +466,21 @@ export const loadPanelData = async (options: LoadPanelDataOptions = {}): Promise
   const path = options.path ?? DEFAULT_METRICS_PATH
   const stateDir = options.stateDir ?? DEFAULT_LIVE_STATE_DIR
   const sessionID = options.sessionID
+  const childSessionIDs = options.childSessionIDs
   const recentEvictionsLimit = options.recentEvictions ?? DEFAULT_RECENT_EVICTIONS
   const snapshot = sessionID === undefined ? undefined : await readSessionSnapshot(stateDir, sessionID)
+  const childSnapshots = childSessionIDs === undefined ? [] : await Promise.all(childSessionIDs.map((childID) => readSessionSnapshot(stateDir, childID)))
+  const childPanels = (lines: PanelMetricsLine[]): SubagentPanelEntry[] | undefined =>
+    childSessionIDs?.map((childID, index) => {
+      const childSnapshot = childSnapshots[index]
+      return {
+        id: childID,
+        panel:
+          childSnapshot === undefined
+            ? sessionPanelData(lines, childID, recentEvictionsLimit)
+            : snapshotSessionPanel(childSnapshot, lines, childID, recentEvictionsLimit),
+      }
+    })
   let lines: PanelMetricsLine[]
   try {
     lines = await readMetricsLog(path)
@@ -448,7 +488,7 @@ export const loadPanelData = async (options: LoadPanelDataOptions = {}): Promise
     const message = error instanceof Error ? error.message : String(error)
     const current =
       snapshot !== undefined && sessionID !== undefined ? snapshotSessionPanel(snapshot, [], sessionID, recentEvictionsLimit) : undefined
-    return { source: path, activeSession: sessionID, current, global: globalTotals([]), error: message }
+    return { source: path, activeSession: sessionID, current, global: globalTotals([]), error: message, subagentPanels: childPanels([]) }
   }
   let current: SessionPanel | undefined
   if (sessionID !== undefined) {
@@ -457,7 +497,7 @@ export const loadPanelData = async (options: LoadPanelDataOptions = {}): Promise
         ? sessionPanelData(lines, sessionID, recentEvictionsLimit)
         : snapshotSessionPanel(snapshot, lines, sessionID, recentEvictionsLimit)
   }
-  return { source: path, activeSession: sessionID, current, global: globalTotals(lines), error: undefined }
+  return { source: path, activeSession: sessionID, current, global: globalTotals(lines), error: undefined, subagentPanels: childPanels(lines) }
 }
 
 export const budgetSourceLabel = (source: string): string => {
@@ -563,6 +603,10 @@ const SIDEBAR_TOKENS_UNIT = "tokens"
 const SIDEBAR_HITS_UNIT = "hits"
 const SIDEBAR_BUDGET_INACTIVE_TEXT = `${SIDEBAR_BUDGET_LABEL}: inactive (no budget)`
 const SIDEBAR_WATERMARK_MISSING_TEXT = `${SIDEBAR_WATERMARK_LABEL}: none`
+const SIDEBAR_SUBAGENTS_LEAD_LABEL = "Subagents"
+const SUBAGENT_AGENTS_UNIT = "agents"
+const SUBAGENT_EVICTIONS_UNIT = "evictions"
+const SUBAGENT_NO_DATA_TEXT = "no data yet"
 
 const sidebarBudgetText = (current: SessionPanel): string =>
   current.budgetTokens === null ? SIDEBAR_BUDGET_INACTIVE_TEXT : `${SIDEBAR_BUDGET_LABEL}: ${formatTokenCount(current.budgetTokens)}`
@@ -591,16 +635,58 @@ const sidebarEvictionGroup = (entry: PanelEvictedEntry): PanelRow[] => [
 const withBlankSeparators = (groups: PanelRow[][]): PanelRow[] =>
   groups.flatMap((group, index) => (index === 0 ? group : [SIDEBAR_BLANK_ROW, ...group]))
 
-export const sidebarRows = (data: PanelData): PanelRow[] => {
+export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: PanelData, nowMs: number = Date.now()): PanelRow[] => {
+  const inWindow = filterSubagentChildren(children, nowMs)
+  if (inWindow.length === 0) return []
+  const panelByID = new Map<string, SessionPanel>()
+  for (const entry of data.subagentPanels ?? []) {
+    if (entry.panel !== undefined) panelByID.set(entry.id, entry.panel)
+  }
+  type SubagentTypeAggregate = { count: number; evictions: number; evictionTokensSaved: number; hasPanel: boolean; newestUpdatedAtMs: number }
+  const aggregates = new Map<string, SubagentTypeAggregate>()
+  for (const child of inWindow) {
+    const aggregate = aggregates.get(child.type) ?? {
+      count: 0,
+      evictions: 0,
+      evictionTokensSaved: 0,
+      hasPanel: false,
+      newestUpdatedAtMs: child.updatedAtMs,
+    }
+    aggregate.count += 1
+    aggregate.newestUpdatedAtMs = Math.max(aggregate.newestUpdatedAtMs, child.updatedAtMs)
+    const panel = panelByID.get(child.id)
+    if (panel !== undefined) {
+      aggregate.hasPanel = true
+      aggregate.evictions += panel.totals.evictions
+      aggregate.evictionTokensSaved += panel.totals.evictionTokensSaved
+    }
+    aggregates.set(child.type, aggregate)
+  }
+  const sortedTypes = [...aggregates.entries()].sort(([, first], [, second]) => second.newestUpdatedAtMs - first.newestUpdatedAtMs)
+  const rows: PanelRow[] = [{ text: truncateToWidth(`${SIDEBAR_SUBAGENTS_LEAD_LABEL}: ${inWindow.length}`, SIDEBAR_COLUMN_LIMIT), tone: "muted" }]
+  for (const [type, aggregate] of sortedTypes) {
+    const agentsClause = aggregate.count > 1 ? `${aggregate.count} ${SUBAGENT_AGENTS_UNIT}, ` : ""
+    const body = aggregate.hasPanel
+      ? `${agentsClause}${aggregate.evictions} ${SUBAGENT_EVICTIONS_UNIT}, ~${formatTokenCount(aggregate.evictionTokensSaved)} ${SIDEBAR_TOKENS_UNIT}`
+      : SUBAGENT_NO_DATA_TEXT
+    rows.push({ text: truncateToWidth(`${type}: ${body}`, SIDEBAR_COLUMN_LIMIT), tone: "muted" })
+  }
+  return rows
+}
+
+const finishSidebarGroups = (groups: PanelRow[][], subagentRows?: PanelRow[]): PanelRow[][] =>
+  subagentRows !== undefined && subagentRows.length > 0 ? [...groups, subagentRows] : groups
+
+export const sidebarRows = (data: PanelData, subagentRows?: PanelRow[]): PanelRow[] => {
   const current = data.current
   const groups: PanelRow[][] = [[{ text: headerText(current), tone: "header" }]]
   if (data.error !== undefined) {
     groups.push([{ text: truncateToWidth(`${METRICS_UNREADABLE_PREFIX}${data.error}`, SIDEBAR_COLUMN_LIMIT), tone: "warning" }])
-    if (current === undefined) return withBlankSeparators(groups)
+    if (current === undefined) return withBlankSeparators(finishSidebarGroups(groups, subagentRows))
   }
   if (current === undefined) {
     groups.push([{ text: emptyStateText(data), tone: "muted" }])
-    return withBlankSeparators(groups)
+    return withBlankSeparators(finishSidebarGroups(groups, subagentRows))
   }
   const statGroup: PanelRow[] = [
     { text: sidebarBudgetText(current), tone: "normal" },
@@ -612,5 +698,5 @@ export const sidebarRows = (data: PanelData): PanelRow[] => {
   groups.push(statGroup)
   const newestEviction = current.recentEvictions[0]
   if (newestEviction !== undefined) groups.push(sidebarEvictionGroup(newestEviction))
-  return withBlankSeparators(groups)
+  return withBlankSeparators(finishSidebarGroups(groups, subagentRows))
 }

@@ -1,7 +1,7 @@
 PLUGIN_FILES := lru-context.ts lru-context.tui.tsx lru-panel-data.ts
 PLUGIN_SRC := $(addprefix plugin/,$(PLUGIN_FILES))
 PLUGIN_TARGET_DIR := $(HOME)/.config/opencode/plugin
-TEST_FILES := tests/lru-context.test.ts tests/lru-panel-data.test.ts tests/lru-panel-rows.test.ts tests/lru-sidebar-rows.test.ts
+TEST_FILES := tests/lru-context.test.ts tests/lru-panel-data.test.ts tests/lru-panel-rows.test.ts tests/lru-sidebar-rows.test.ts tests/lru-sidebar-subagents.test.ts
 
 .PHONY: all test install uninstall help
 
