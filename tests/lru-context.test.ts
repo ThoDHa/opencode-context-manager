@@ -5080,7 +5080,6 @@ const STASH_LIMIT_OVERFLOW_COUNT = 3
 const STASH_LIMIT_INVALID_VALUES = [-1, Infinity, Number.NaN, "2"]
 const SESSION_BOUND_OVERRIDE = 2
 const SESSION_BOUND_INVALID_ZERO = 0
-const SESSION_BOUND_TEST_COUNT = 3
 const BOUND_TEST_SESSION_C = "lru-bound-session-c"
 const REMEMBERED_SUBJECTS_OVERRIDE = 1
 const REMEMBERED_SUBJECTS_INVALID = -1
@@ -5151,14 +5150,18 @@ test("read_evicted drops the least recently active session stash when the stashS
 
 test("read_evicted keeps early session stashes when an invalid stashSessions falls back to the default bound", async () => {
   const hooks = await loadPluginHooksWith({ stashSessions: SESSION_BOUND_INVALID_ZERO })
-  for (let index = 0; index < SESSION_BOUND_TEST_COUNT; index += 1) await evictStashSession(hooks, index)
+  for (let index = 0; index < STASH_SESSION_OVERFLOW_COUNT; index += 1) await evictStashSession(hooks, index)
 
   assert.equal(
     await readEvicted(hooks, stashSessionSubject(0), stashSessionId(0)),
+    stashMissFor(stashSessionSubject(0)),
+  )
+  assert.equal(
+    await readEvicted(hooks, stashSessionSubject(1), stashSessionId(1)),
     outputOfBytes(MIN_EVICTABLE_BYTES),
   )
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(SESSION_BOUND_TEST_COUNT - 1), stashSessionId(SESSION_BOUND_TEST_COUNT - 1)),
+    await readEvicted(hooks, stashSessionSubject(STASH_SESSION_OVERFLOW_COUNT - 1), stashSessionId(STASH_SESSION_OVERFLOW_COUNT - 1)),
     outputOfBytes(MIN_EVICTABLE_BYTES),
   )
 })
@@ -5180,13 +5183,17 @@ test("chat params drops the oldest captured limit when the limitSessions bound i
 
 test("chat params keeps captured limits when an invalid limitSessions falls back to the default bound", async () => {
   const hooks = await loadPluginHooksWith({ limitSessions: SESSION_BOUND_INVALID_ZERO })
-  for (const sessionID of [SESSION_ID, SESSION_ID_B, BOUND_TEST_SESSION_C]) {
-    await setContextLimit(hooks, sessionID, WATERMARK_PROBE_CONTEXT_LIMIT)
+  for (let index = 0; index < LIMIT_SESSION_OVERFLOW_COUNT; index += 1) {
+    await setContextLimit(hooks, limitSessionId(index), WATERMARK_PROBE_CONTEXT_LIMIT)
   }
 
-  const pressured = buildStandardBundle(SESSION_ID, "/data/limit-invalid-retained.txt")
-  await runTransform(hooks, pressured)
-  assert.ok(toolPartAt(pressured.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  const dropped = buildStandardBundle(limitSessionId(0), "/data/limit-invalid-dropped.txt")
+  await runTransform(hooks, dropped)
+  assert.equal(toolPartAt(dropped.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+
+  const retained = buildStandardBundle(limitSessionId(1), "/data/limit-invalid-retained.txt")
+  await runTransform(hooks, retained)
+  assert.ok(toolPartAt(retained.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
 })
 
 test("chat system transform drops the least recently active session hint when the hintSessions bound is exceeded", async () => {
@@ -5202,10 +5209,11 @@ test("chat system transform drops the least recently active session hint when th
 
 test("chat system transform keeps session hints when an invalid hintSessions falls back to the default bound", async () => {
   const hooks = await loadPluginHooksWith({ hintSessions: SESSION_BOUND_INVALID_ZERO })
-  for (let index = 0; index < SESSION_BOUND_TEST_COUNT; index += 1) await storeHintSession(hooks, index)
+  for (let index = 0; index < HINT_SESSION_OVERFLOW_COUNT; index += 1) await storeHintSession(hooks, index)
 
-  assert.equal(hintBlocksIn(await runSystemTransform(hooks, hintSessionId(0))).length, 1)
-  assert.equal(hintBlocksIn(await runSystemTransform(hooks, hintSessionId(SESSION_BOUND_TEST_COUNT - 1))).length, 1)
+  assert.equal(hintBlocksIn(await runSystemTransform(hooks, hintSessionId(0))).length, 0)
+  assert.equal(hintBlocksIn(await runSystemTransform(hooks, hintSessionId(1))).length, 1)
+  assert.equal(hintBlocksIn(await runSystemTransform(hooks, hintSessionId(HINT_SESSION_OVERFLOW_COUNT - 1))).length, 1)
 })
 
 test("lru_stats drops the least recently active session metrics when the metricsSessions bound is exceeded", async () => {
@@ -5223,17 +5231,15 @@ test("lru_stats drops the least recently active session metrics when the metrics
 
 test("lru_stats keeps session metrics when an invalid metricsSessions falls back to the default bound", async () => {
   const hooks = await loadPluginHooksWith({ metricsSessions: SESSION_BOUND_INVALID_ZERO })
-  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+  for (let index = 0; index < METRICS_SESSION_OVERFLOW_COUNT; index += 1) await storeMetricsSession(hooks, index)
 
-  await runTransform(hooks, buildStandardBundle(SESSION_ID, "/data/metrics-invalid-a.txt"))
-  await runTransform(hooks, buildStandardBundle(SESSION_ID_B, "/data/metrics-invalid-b.txt"))
-  await runTransform(hooks, buildStandardBundle(BOUND_TEST_SESSION_C, "/data/metrics-invalid-c.txt"))
-
-  assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).evictions, 1)
+  assert.equal(countersOf(await lruStats(hooks, metricsSessionId(0))).evictions, 0)
+  assert.equal(countersOf(await lruStats(hooks, metricsSessionId(1))).evictions, 1)
+  assert.equal(countersOf(await lruStats(hooks, metricsSessionId(METRICS_SESSION_OVERFLOW_COUNT - 1))).evictions, 1)
 })
 
-test("lru_stats forgets the oldest evicted subject at the rememberedEvictedSubjects bound so its touch goes uncounted", async () => {
-  const hooks = await loadPluginHooksWith({ rememberedEvictedSubjects: REMEMBERED_SUBJECTS_OVERRIDE })
+const rememberedSubjectsTouchCountFor = async (optionValue: number): Promise<number> => {
+  const hooks = await loadPluginHooksWith({ rememberedEvictedSubjects: optionValue })
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
   const bundle = buildBundle([[pathToolPart(REMEMBERED_FIRST_SUBJECT, MIN_EVICTABLE_BYTES)], ...fillerMessages()])
@@ -5247,25 +5253,15 @@ test("lru_stats forgets the oldest evicted subject at the rememberedEvictedSubje
   bundle.messages.push(syntheticMessageFor(SESSION_ID, [pathToolPart(REMEMBERED_SECOND_SUBJECT, APPEARANCE_ONLY_OUTPUT_BYTES)]))
   await runTransform(hooks, bundle)
 
-  assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).postEvictionTouches, 1)
+  return countersOf(await lruStats(hooks, SESSION_ID)).postEvictionTouches
+}
+
+test("lru_stats forgets the oldest evicted subject at the rememberedEvictedSubjects bound so its touch goes uncounted", async () => {
+  assert.equal(await rememberedSubjectsTouchCountFor(REMEMBERED_SUBJECTS_OVERRIDE), 1)
 })
 
 test("lru_stats keeps both evicted subjects remembered when rememberedEvictedSubjects is invalid", async () => {
-  const hooks = await loadPluginHooksWith({ rememberedEvictedSubjects: REMEMBERED_SUBJECTS_INVALID })
-  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
-
-  const bundle = buildBundle([[pathToolPart(REMEMBERED_FIRST_SUBJECT, MIN_EVICTABLE_BYTES)], ...fillerMessages()])
-  await runTransform(hooks, bundle)
-
-  bundle.messages.push(syntheticMessageFor(SESSION_ID, [pathToolPart(REMEMBERED_SECOND_SUBJECT, MIN_EVICTABLE_BYTES)]))
-  fillerMessages().forEach((parts) => bundle.messages.push(syntheticMessageFor(SESSION_ID, parts)))
-  await runTransform(hooks, bundle)
-
-  bundle.messages.push(syntheticMessageFor(SESSION_ID, [pathToolPart(REMEMBERED_FIRST_SUBJECT, APPEARANCE_ONLY_OUTPUT_BYTES)]))
-  bundle.messages.push(syntheticMessageFor(SESSION_ID, [pathToolPart(REMEMBERED_SECOND_SUBJECT, APPEARANCE_ONLY_OUTPUT_BYTES)]))
-  await runTransform(hooks, bundle)
-
-  assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).postEvictionTouches, 2)
+  assert.equal(await rememberedSubjectsTouchCountFor(REMEMBERED_SUBJECTS_INVALID), 2)
 })
 
 test("transform applies a custom charsPerToken so the coarser estimate sits under a limit that evicts by default", async () => {
