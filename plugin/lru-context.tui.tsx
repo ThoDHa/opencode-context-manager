@@ -1,17 +1,18 @@
 /** @jsxImportSource @opentui/solid */
 
-// Both external specifiers below avoid runtime resolution on purpose. The
-// TuiPluginApi import is type-only, so the transpiler erases it; the deployed
-// plugin's realpath sits outside any node_modules up-tree (the same
-// constraint that forced lru-context.ts to register tools as plain
+// Neither external specifier below is resolved from node_modules on purpose,
+// because the deployed plugin's realpath sits outside any node_modules up-tree
+// (the same constraint that forced lru-context.ts to register tools as plain
 // definitions instead of calling tool() from @opencode-ai/plugin). The
-// @opentui/solid JSX runtime needs no install either: opencode's TUI loads
-// plugin files under a Bun transform plugin (@opentui/solid's
-// ensureRuntimePluginSupport) that rewrites @opentui/solid and solid-js
-// specifiers to the TUI's internal runtime modules for every file outside
-// node_modules.
+// TuiPluginApi import is type-only, so the transpiler erases it. The solid-js
+// import (signals and lifecycle for the sidebar entry) and the @opentui/solid
+// JSX runtime need no install either: opencode's TUI loads plugin files under
+// a Bun transform plugin (@opentui/solid's ensureRuntimePluginSupport) that
+// rewrites @opentui/solid and solid-js specifiers to the TUI's internal
+// runtime modules for every file outside node_modules.
 import type { TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
-import { loadPanelData, panelRows, type PanelData, type PanelRowTone } from "./lru-panel-data.ts"
+import { createSignal, onCleanup, onMount } from "solid-js"
+import { loadPanelData, panelRows, type PanelData, type PanelRow, type PanelRowTone } from "./lru-panel-data.ts"
 
 const PLUGIN_ID = "lru-context"
 const COMMAND_NAMESPACE = "palette"
@@ -20,7 +21,9 @@ const COMMAND_TITLE = "LRU context panel"
 const COMMAND_DESCRIPTION = "Open the LRU context manager's session panel"
 const COMMAND_CATEGORY = "LRU"
 const SLASH_NAME = "lru"
-const DIALOG_SIZE = "xlarge"
+const DIALOG_SIZE = "large"
+const SIDEBAR_SLOT_ORDER = 600
+const SIDEBAR_REFRESH_MS = 5000
 
 type PanelProps = { api: TuiPluginApi; data: PanelData }
 
@@ -32,11 +35,19 @@ const toneColor = (api: TuiPluginApi, tone: PanelRowTone) => {
   return theme.text
 }
 
-const PanelDialog = (props: PanelProps) => (
-  <box flexDirection="column" paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
-    {panelRows(props.data).map((row) => (
+type RowsViewProps = { api: TuiPluginApi; rows: PanelRow[] }
+
+const RowsView = (props: RowsViewProps) => (
+  <box flexDirection="column">
+    {props.rows.map((row) => (
       <text fg={toneColor(props.api, row.tone)}>{row.text}</text>
     ))}
+  </box>
+)
+
+const PanelDialog = (props: PanelProps) => (
+  <box paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
+    <RowsView api={props.api} rows={panelRows(props.data)} />
   </box>
 )
 
@@ -60,6 +71,29 @@ const openPanelSafely = (api: TuiPluginApi): void => {
   })
 }
 
+type SidebarEntryProps = { api: TuiPluginApi; sessionID: string }
+
+const SidebarEntry = (props: SidebarEntryProps) => {
+  const [rows, setRows] = createSignal<PanelRow[]>([])
+  onMount(() => {
+    const refresh = async (): Promise<void> => {
+      let next: PanelRow[] = []
+      try {
+        const data = await loadPanelData({ sessionID: props.sessionID })
+        if (data.current !== undefined) next = panelRows(data)
+      } catch {
+        // Startup and log rotation produce transient read failures; hide the
+        // entry for that tick and let the next poll repaint it.
+      }
+      setRows(next)
+    }
+    void refresh()
+    const poll = setInterval(() => void refresh(), SIDEBAR_REFRESH_MS)
+    onCleanup(() => clearInterval(poll))
+  })
+  return <RowsView api={props.api} rows={rows()} />
+}
+
 const tui: TuiPluginModule["tui"] = async (api) => {
   api.keymap.registerLayer({
     commands: [
@@ -75,6 +109,12 @@ const tui: TuiPluginModule["tui"] = async (api) => {
         },
       },
     ],
+  })
+  api.slots.register({
+    order: SIDEBAR_SLOT_ORDER,
+    slots: {
+      sidebar_content: (_ctx, props) => <SidebarEntry api={api} sessionID={props.session_id} />,
+    },
   })
 }
 
