@@ -27,10 +27,10 @@ const BUDGET_SOURCE_LABEL_OVERRIDE = "per-model override"
 const BUDGET_SOURCE_LABEL_MODEL = "per-model limit"
 const BUDGET_SOURCE_LABEL_DEFAULT = "plugin default"
 const BUDGET_SOURCE_LABEL_UNKNOWN = "inactive (no budget)"
-const MODE_LABEL_MANUAL = "mode: manual"
-const MODE_LABEL_AUTO = "mode: auto"
-const HOT_SUBJECTS_ROW_LABEL = "hot subjects:"
-const STASH_OCCUPANCY_SEPARATOR = ", occupancy: "
+const PANEL_TITLE = "LRU context manager"
+const MANUAL_MODE_TITLE_SUFFIX = " (manual)"
+const COUNTERS_ROW_LABEL = "counters:"
+const LAST_EVICTION_ROW_LABEL = "last evicted:"
 
 export type PanelEvictedEntry = {
   tool: string
@@ -490,26 +490,17 @@ const lastRunText = (current: SessionPanel): string => {
 }
 
 const countersText = (current: SessionPanel): string =>
-  `evictions: ${current.totals.evictions} (${formatBytes(current.totals.bytesReclaimed)} reclaimed), fences: ${current.totals.fenceEvicted}, dedup: ${current.totals.deduped}, reasoning: ${current.totals.reasoningExpired} (${formatBytes(current.totals.reasoningBytesExpired)}), touches: ${current.totals.postEvictionTouches}`
-
-const modeText = (current: SessionPanel): string => (current.manualMode === true ? MODE_LABEL_MANUAL : MODE_LABEL_AUTO)
-
-const stashText = (current: SessionPanel): string => {
-  const reads = `stash reads: ${current.stashReads} (${current.totals.stashHits} hits / ${current.totals.stashMisses} misses), dropped: ${current.totals.stashDropped}`
-  return current.stash === undefined ? reads : `${reads}${STASH_OCCUPANCY_SEPARATOR}${current.stash.entries}/${current.stash.capacity}`
-}
-
-const hotSubjectsText = (subjects: string[]): string => `${HOT_SUBJECTS_ROW_LABEL} ${subjects.join(", ")}`
+  `${COUNTERS_ROW_LABEL} ${current.totals.evictions} evictions (${formatBytes(current.totals.bytesReclaimed)} reclaimed), ${current.totals.deduped} dedup, ${current.stashReads} stash reads (${current.totals.stashHits} hits)`
 
 const evictionText = (entry: PanelEvictedEntry): string =>
   `${entry.tool} ${entry.subject} (${formatBytes(entry.bytes)}, ${entry.messagesAgo} msgs ago)`
 
-const historyText = (totals: GlobalTotals): string =>
-  `history: ${totals.sessions} sessions, ${totals.runs} runs, ${totals.evictions} evictions, ${totals.deduped} dedup`
+const headerText = (current: SessionPanel | undefined): string =>
+  current?.manualMode === true ? `${PANEL_TITLE}${MANUAL_MODE_TITLE_SUFFIX}` : PANEL_TITLE
 
 export const panelRows = (data: PanelData): PanelRow[] => {
-  const rows: PanelRow[] = [{ text: "LRU context manager", tone: "header" }]
   const current = data.current
+  const rows: PanelRow[] = [{ text: headerText(current), tone: "header" }]
   if (data.error !== undefined) {
     rows.push({ text: `metrics log unreadable: ${data.error}`, tone: "warning" })
     if (current === undefined) return rows
@@ -517,23 +508,14 @@ export const panelRows = (data: PanelData): PanelRow[] => {
   if (current === undefined) {
     const emptyText = data.activeSession === undefined ? "no active session" : "no metrics recorded for this session yet"
     rows.push({ text: emptyText, tone: "muted" })
-  } else {
-    rows.push({ text: `session: ${current.session}`, tone: "muted" })
-    if (current.manualMode !== undefined) rows.push({ text: modeText(current), tone: "muted" })
-    rows.push({ text: budgetText(current), tone: "normal" })
-    rows.push({ text: lastRunText(current), tone: "normal" })
-    rows.push({ text: countersText(current), tone: "normal" })
-    rows.push({ text: stashText(current), tone: "normal" })
-    if (current.hotSubjects !== undefined && current.hotSubjects.length > 0) {
-      rows.push({ text: hotSubjectsText(current.hotSubjects), tone: "muted" })
-    }
-    if (current.recentEvictions.length > 0) {
-      rows.push({ text: "recently evicted:", tone: "muted" })
-      for (const entry of current.recentEvictions) {
-        rows.push({ text: evictionText(entry), tone: "normal" })
-      }
-    }
+    return rows
   }
-  if (data.error === undefined) rows.push({ text: historyText(data.global), tone: "muted" })
+  rows.push({ text: budgetText(current), tone: "normal" })
+  rows.push({ text: lastRunText(current), tone: "normal" })
+  rows.push({ text: countersText(current), tone: "normal" })
+  const newestEviction = current.recentEvictions[0]
+  if (newestEviction !== undefined) {
+    rows.push({ text: `${LAST_EVICTION_ROW_LABEL} ${evictionText(newestEviction)}`, tone: "muted" })
+  }
   return rows
 }

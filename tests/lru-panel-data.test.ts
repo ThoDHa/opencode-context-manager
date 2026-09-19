@@ -45,6 +45,7 @@ const TOTALS_FENCE_EVICTED = 2
 const TOTALS_TOUCHES = 3
 const RECENT_LIMIT = 2
 const EVICTION_COUNT_PER_LINE = 3
+const COLLECTED_EVICTION_COUNT = 2
 const LINE_COUNT_THREE = 3
 const PARSED_LINE_COUNT = 2
 const KILO_BOUNDARY_TOKENS = 1000
@@ -510,15 +511,17 @@ test("loadPanelData prefers the live snapshot for the session block and keeps lo
     assert.equal(data.current.recentEvictions[0].subject, "/data/a.txt")
 
     const rows = panelRows(data)
-    assert.ok(rows.some((row) => row.text === "mode: manual"))
+    assert.equal(rows[0].text, "LRU context manager (manual)")
+    assert.equal(rows[0].tone, "header")
     assert.ok(
       rows.some(
         (row) =>
           row.text ===
-          `stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} (${TOTALS_STASH_HITS} hits / ${TOTALS_STASH_MISSES} misses), dropped: ${TOTALS_STASH_DROPPED}, occupancy: ${SNAPSHOT_STASH_ENTRIES}/${SNAPSHOT_STASH_CAPACITY}`,
+          `counters: ${TOTALS_EVICTIONS} evictions (12 kB reclaimed), ${TOTALS_DEDUPED} dedup, ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} stash reads (${TOTALS_STASH_HITS} hits)`,
       ),
     )
-    assert.ok(rows.some((row) => row.text === `hot subjects: ${SNAPSHOT_HOT_SUBJECTS.join(", ")}`))
+    assert.ok(!rows.some((row) => row.text.includes("occupancy:")))
+    assert.ok(!rows.some((row) => row.text.startsWith("hot subjects:")))
   })
 })
 
@@ -542,7 +545,7 @@ test("loadPanelData lets the session's newer log line win the fields it carries 
     assert.deepEqual(data.current.hotSubjects, SNAPSHOT_HOT_SUBJECTS)
     assert.equal(data.current.runs, SESSION_A_LOG_LINE_COUNT)
     assert.equal(data.current.recentEvictions.length, 1)
-    assert.ok(panelRows(data).some((row) => row.text === "mode: manual"))
+    assert.equal(panelRows(data)[0].text, "LRU context manager (manual)")
   })
 })
 
@@ -576,7 +579,7 @@ test("loadPanelData renders automatic mode for a snapshot recorded with manualMo
     const data = await loadPanelData({ path, stateDir, sessionID: SESSION_A })
 
     assert.equal(data.current?.manualMode, false)
-    assert.ok(panelRows(data).some((row) => row.text === "mode: auto"))
+    assert.equal(panelRows(data)[0].text, "LRU context manager")
   })
 })
 
@@ -598,7 +601,7 @@ test("loadPanelData renders the snapshot block with empty history when no metric
     assert.deepEqual(data.current.stash, { entries: SNAPSHOT_STASH_ENTRIES, capacity: SNAPSHOT_STASH_CAPACITY })
     assert.equal(data.current.runs, 0)
     assert.deepEqual(data.current.recentEvictions, [])
-    assert.ok(panelRows(data).some((row) => row.text === "mode: auto"))
+    assert.equal(panelRows(data)[0].text, "LRU context manager")
   })
 })
 
@@ -621,14 +624,14 @@ test("loadPanelData falls back to the metrics log when no snapshot exists for th
     assert.equal(data.current.runs, SESSION_A_LOG_LINE_COUNT)
 
     const rows = panelRows(data)
-    assert.ok(!rows.some((row) => row.text.startsWith("mode:")))
+    assert.equal(rows[0].text, "LRU context manager")
     assert.ok(!rows.some((row) => row.text.includes("occupancy:")))
     assert.ok(!rows.some((row) => row.text.startsWith("hot subjects:")))
     assert.ok(
       rows.some(
         (row) =>
           row.text ===
-          `stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} (${TOTALS_STASH_HITS} hits / ${TOTALS_STASH_MISSES} misses), dropped: ${TOTALS_STASH_DROPPED}`,
+          `counters: ${LOG_LINE_ONLY_EVICTIONS} evictions (12 kB reclaimed), ${TOTALS_DEDUPED} dedup, ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} stash reads (${TOTALS_STASH_HITS} hits)`,
       ),
     )
   })
@@ -691,7 +694,7 @@ test("loadPanelData serves the snapshot block alongside the log warning when the
 
     const rows = panelRows(data)
     assert.ok(rows.some((row) => row.text.startsWith("metrics log unreadable:")))
-    assert.ok(rows.some((row) => row.text === "mode: manual"))
+    assert.equal(rows[0].text, "LRU context manager (manual)")
     assert.ok(rows.some((row) => row.text === "budget: ~200k tokens (per-model limit)"))
     assert.ok(!rows.some((row) => row.text.startsWith("history:")))
   })
@@ -724,7 +727,7 @@ test("the default live state dir matches the plugin core's resolved state path",
   assert.equal(stats.options.liveStatePath, DEFAULT_LIVE_STATE_DIR)
 })
 
-test("panelRows renders the current session's budget, last run, counters, and recent evictions", () => {
+test("panelRows renders the session's budget, last run, compact counters, and newest eviction", () => {
   const data = {
     source: "/tmp/metrics.jsonl",
     activeSession: SESSION_A,
@@ -744,15 +747,70 @@ test("panelRows renders the current session's budget, last run, counters, and re
 
   assert.equal(rows[0].text, "LRU context manager")
   assert.equal(rows[0].tone, "header")
-  assert.ok(rows.some((row) => row.text === `session: ${SESSION_A}`))
   assert.ok(rows.some((row) => row.text === `budget: ~200k tokens (per-model limit)`))
   assert.ok(rows.some((row) => row.text === "last run: ~123.5k estimated vs ~100k watermark (over by ~23.5k)"))
-  assert.ok(rows.some((row) => row.text === `evictions: ${TOTALS_EVICTIONS} (12 kB reclaimed), fences: ${TOTALS_FENCE_EVICTED}, dedup: ${TOTALS_DEDUPED}, reasoning: ${TOTALS_REASONING_EXPIRED} (2.5 kB), touches: ${TOTALS_TOUCHES}`))
-  assert.ok(rows.some((row) => row.text === `stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} (${TOTALS_STASH_HITS} hits / ${TOTALS_STASH_MISSES} misses), dropped: ${TOTALS_STASH_DROPPED}`))
-  assert.ok(rows.some((row) => row.text === "recently evicted:"))
-  assert.ok(rows.some((row) => row.text === `read /data/a.txt (3 kB, ${EVICTED_MESSAGES_AGO} msgs ago)`))
-  assert.equal(rows[rows.length - 1].tone, "muted")
-  assert.ok(rows[rows.length - 1].text.startsWith("history: 1 sessions, 1 runs,"))
+  assert.ok(
+    rows.some(
+      (row) =>
+        row.text ===
+        `counters: ${TOTALS_EVICTIONS} evictions (12 kB reclaimed), ${TOTALS_DEDUPED} dedup, ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} stash reads (${TOTALS_STASH_HITS} hits)`,
+    ),
+  )
+  assert.ok(rows.some((row) => row.text === `last evicted: read /data/a.txt (3 kB, ${EVICTED_MESSAGES_AGO} msgs ago)`))
+  assert.equal(rows.length, 5)
+  assert.ok(!rows.some((row) => row.text === "recently evicted:"))
+  assert.ok(!rows.some((row) => row.text.startsWith("session:")))
+  assert.ok(!rows.some((row) => row.text.startsWith("mode:")))
+  assert.ok(!rows.some((row) => row.text.startsWith("hot subjects:")))
+  assert.ok(!rows.some((row) => row.text.startsWith("history:")))
+  assert.ok(!rows.some((row) => row.text.includes(`${TOTALS_FENCE_EVICTED} fences`)))
+  assert.ok(!rows.some((row) => row.text.includes(`${TOTALS_REASONING_EXPIRED} reasoning`)))
+})
+
+test("panelRows compresses multiple recent evictions to a single newest-subject line", () => {
+  const data = {
+    source: "/tmp/metrics.jsonl",
+    activeSession: SESSION_A,
+    current: sessionPanelData(
+      [
+        makeLine({
+          evictedThisRun: [
+            { tool: "read", subject: "/data/old.txt", bytes: EVICTED_BYTES, messagesAgo: EVICTED_MESSAGES_AGO },
+          ],
+        }),
+        makeLine({
+          evictedThisRun: [
+            { tool: "bash", subject: "tail-cmd", bytes: EVICTED_BYTES, messagesAgo: EVICTED_MESSAGES_AGO },
+          ],
+        }),
+      ],
+      SESSION_A,
+    ),
+    global: globalTotals([]),
+    error: undefined,
+  }
+
+  const rows = panelRows(data)
+
+  assert.equal(data.current?.recentEvictions.length, COLLECTED_EVICTION_COUNT)
+  assert.equal(rows.filter((row) => row.text.startsWith("last evicted:")).length, 1)
+  assert.ok(rows.some((row) => row.text === `last evicted: bash tail-cmd (3 kB, ${EVICTED_MESSAGES_AGO} msgs ago)`))
+  assert.ok(!rows.some((row) => row.text.includes("/data/old.txt")))
+})
+
+test("panelRows flags manual mode in the header and leaves the automatic-mode header unlabeled", () => {
+  const manualData = {
+    source: "/tmp/metrics.jsonl",
+    activeSession: SESSION_A,
+    current: { ...sessionPanelData([makeLine()], SESSION_A), manualMode: true },
+    global: globalTotals([]),
+    error: undefined,
+  }
+  const automaticData = { ...manualData, current: { ...sessionPanelData([makeLine()], SESSION_A), manualMode: false } }
+
+  assert.equal(panelRows(manualData)[0].text, "LRU context manager (manual)")
+  assert.equal(panelRows(automaticData)[0].text, "LRU context manager")
+  assert.ok(!panelRows(automaticData).some((row) => row.text.startsWith("mode:")))
 })
 
 test("panelRows marks an unknown budget inactive and omits watermark fields when null", () => {
@@ -801,13 +859,19 @@ test("panelRows reports a session without recorded runs distinctly from a panel 
   assert.ok(noMetricsRows.some((row) => row.text === "no metrics recorded for this session yet"))
   assert.ok(!noMetricsRows.some((row) => row.text === "no active session"))
   assert.ok(!noMetricsRows.some((row) => row.text.startsWith("budget:")))
-  assert.ok(noMetricsRows[noMetricsRows.length - 1].text.startsWith("history: 1 sessions, 1 runs,"))
+  assert.deepEqual(noMetricsRows, [
+    { text: "LRU context manager", tone: "header" },
+    { text: "no metrics recorded for this session yet", tone: "muted" },
+  ])
 
   const noSessionRows = panelRows({ ...noMetricsData, activeSession: undefined })
 
   assert.ok(noSessionRows.some((row) => row.text === "no active session"))
   assert.ok(!noSessionRows.some((row) => row.text === "no metrics recorded for this session yet"))
-  assert.ok(noSessionRows[noSessionRows.length - 1].text.startsWith("history: 1 sessions, 1 runs,"))
+  assert.deepEqual(noSessionRows, [
+    { text: "LRU context manager", tone: "header" },
+    { text: "no active session", tone: "muted" },
+  ])
 })
 
 test("panelRows surfaces a log read error as the warning row and omits session details", () => {
