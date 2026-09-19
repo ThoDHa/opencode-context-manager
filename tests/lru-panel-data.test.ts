@@ -1,13 +1,12 @@
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
-import { homedir, tmpdir } from "node:os"
+import { mkdirSync, writeFileSync } from "node:fs"
+import { homedir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
 
 import {
   DEFAULT_LIVE_STATE_DIR,
   DEFAULT_METRICS_PATH,
-  DEFAULT_SIDEBAR_ENABLED,
   budgetSourceLabel,
   formatBytes,
   formatTokenCount,
@@ -20,40 +19,52 @@ import {
   parseStateSnapshot,
   readMetricsLog,
   readStateSnapshot,
-  resolveSidebarEnabled,
   sessionPanelData,
-  sidebarRows,
-  SIDEBAR_COLUMN_LIMIT,
-  type PanelData,
   type PanelMetricsLine,
-  type PanelRow,
 } from "../plugin/lru-panel-data.ts"
 import lruContextFactory from "../plugin/lru-context.ts"
+import {
+  BUDGET_TOKENS_MODEL,
+  BUDGET_TOKENS_SMALL,
+  DEFICIT_TOKENS,
+  ESTIMATED_TOKENS,
+  EVICTED_BYTES,
+  EVICTED_MESSAGES_AGO,
+  HUGE_RECLAIMED_BYTES,
+  LOG_LINE_ONLY_EVICTIONS,
+  LOG_LINE_TS_STALE,
+  MODEL_BUDGET_SOURCE,
+  OVERRIDE_BUDGET_SOURCE,
+  SECOND_LINE_ESTIMATED,
+  SESSION_A,
+  SESSION_B,
+  SNAPSHOT_HOT_SUBJECTS,
+  SNAPSHOT_STASH_CAPACITY,
+  SNAPSHOT_STASH_ENTRIES,
+  SNAPSHOT_SUFFIX,
+  SNAPSHOT_TS,
+  TOTALS_BYTES,
+  TOTALS_DEDUPED,
+  TOTALS_EVICTIONS,
+  TOTALS_FENCE_EVICTED,
+  TOTALS_REASONING_BYTES,
+  TOTALS_REASONING_EXPIRED,
+  TOTALS_STASH_HITS,
+  TOTALS_STASH_MISSES,
+  UNKNOWN_BUDGET_SOURCE,
+  WATERMARK_TOKENS,
+  logLineAgainstSnapshot,
+  logLineStaleAgainstSnapshot,
+  makeLine,
+  makeSnapshot,
+  makeTotals,
+  serialize,
+  withTempDir,
+  writeSnapshot,
+} from "./lru-panel-fixtures.ts"
 
-const SESSION_A = "sess-panel-a"
-const SESSION_B = "sess-panel-b"
-const BUDGET_TOKENS_MODEL = 200000
-const BUDGET_TOKENS_SMALL = 600
-const ESTIMATED_TOKENS = 123456
-const WATERMARK_TOKENS = 100000
-const DEFICIT_TOKENS = 23456
-const EVICTED_BYTES = 3072
-const EVICTED_MESSAGES_AGO = 7
-const TOTALS_EVICTIONS = 5
-const TOTALS_BYTES = 12288
-const TOTALS_STASH_HITS = 4
-const TOTALS_STASH_MISSES = 6
-const TOTALS_STASH_DROPPED = 1
-const TOTALS_DEDUPED = 9
-const TOTALS_REASONING_EXPIRED = 7
-const TOTALS_REASONING_BYTES = 2560
-const TOTALS_FENCE_EVICTED = 2
-const TOTALS_TOUCHES = 3
-const TOTALS_EVICTION_TOKENS_SAVED = 3072
-const TOTALS_DEDUP_TOKENS_SAVED = 2250
 const RECENT_LIMIT = 2
 const EVICTION_COUNT_PER_LINE = 3
-const COLLECTED_EVICTION_COUNT = 2
 const LINE_COUNT_THREE = 3
 const PARSED_LINE_COUNT = 2
 const KILO_BOUNDARY_TOKENS = 1000
@@ -67,62 +78,13 @@ const KILOBYTE_BYTES = 2048
 const KILOBYTE_FRACTIONAL_BYTES = 1536
 const MEGABYTE_BYTES = 1500000
 const GIGABYTE_BYTES = 3 * 1024 ** 3
-const HUGE_RECLAIMED_BYTES = 123456789012
-const OVER_LONG_SUBJECT = `/data/${"b".repeat(60)}.txt`
-const LONG_READ_ERROR = "EACCES: permission denied, open '/sessions/deep/path/metrics.jsonl' for reading"
-const ZERO_DEFICIT = 0
-const NEGATIVE_DEFICIT = -5
 const SUBJECT_TAIL = "-tail"
-const SECOND_LINE_ESTIMATED = 200000
-const UNKNOWN_BUDGET_SOURCE = "unknown"
-const OVERRIDE_BUDGET_SOURCE = "override"
-const MODEL_BUDGET_SOURCE = "model"
 const DEFAULT_BUDGET_SOURCE = "default"
 
-const makeTotals = (): PanelMetricsLine["totals"] => ({
-  evictions: TOTALS_EVICTIONS,
-  bytesReclaimed: TOTALS_BYTES,
-  evictionTokensSaved: TOTALS_EVICTION_TOKENS_SAVED,
-  stashHits: TOTALS_STASH_HITS,
-  stashMisses: TOTALS_STASH_MISSES,
-  stashDropped: TOTALS_STASH_DROPPED,
-  deduped: TOTALS_DEDUPED,
-  dedupTokensSaved: TOTALS_DEDUP_TOKENS_SAVED,
-  reasoningExpired: TOTALS_REASONING_EXPIRED,
-  reasoningBytesExpired: TOTALS_REASONING_BYTES,
-  fenceEvicted: TOTALS_FENCE_EVICTED,
-  postEvictionTouches: TOTALS_TOUCHES,
-})
+const LOG_LINE_TS_NEWER = "2026-09-18T10:00:00.000Z"
+const SESSION_A_LOG_LINE_COUNT = 1
 
-const makeLine = (overrides: Partial<PanelMetricsLine> = {}): PanelMetricsLine => ({
-  session: SESSION_A,
-  ts: LOG_LINE_TS_STALE,
-  modelContextTokens: BUDGET_TOKENS_MODEL,
-  modelContextTokensSource: MODEL_BUDGET_SOURCE,
-  estimatedTokens: ESTIMATED_TOKENS,
-  watermarkTokens: WATERMARK_TOKENS,
-  deficitTokens: DEFICIT_TOKENS,
-  evictedThisRun: [{ tool: "read", subject: "/data/a.txt", bytes: EVICTED_BYTES, messagesAgo: EVICTED_MESSAGES_AGO }],
-  totals: makeTotals(),
-  ...overrides,
-})
-
-const serialize = (lines: PanelMetricsLine[]): string => lines.map((line) => JSON.stringify(line)).join("\n") + "\n"
-
-const withTempDir = async (run: (dir: string) => Promise<void>): Promise<void> => {
-  const dir = mkdtempSync(join(tmpdir(), "lru-panel-data-"))
-  try {
-    await run(dir)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-}
-
-const sidebarRowsWithinWidth = (data: PanelData): PanelRow[] => {
-  const rows = sidebarRows(data)
-  for (const row of rows) assert.ok(row.text.length <= SIDEBAR_COLUMN_LIMIT, `row exceeds the sidebar width: ${row.text}`)
-  return rows
-}
+const logLineNewerThanSnapshot = (): PanelMetricsLine => logLineAgainstSnapshot(LOG_LINE_TS_NEWER)
 
 test("parseMetricsLine parses a line carrying exactly the fields the panel consumes", () => {
   const raw = JSON.stringify(makeLine())
@@ -429,45 +391,6 @@ test("the panel's default metrics path matches the plugin core's resolved metric
   assert.equal(stats.options.metricsPath, DEFAULT_METRICS_PATH)
 })
 
-const SNAPSHOT_SUFFIX = ".json"
-const SNAPSHOT_STASH_ENTRIES = 2
-const SNAPSHOT_STASH_CAPACITY = 50
-const SNAPSHOT_HOT_SUBJECTS = ["/data/hot-a.txt", "/data/hot-b.txt"]
-const SNAPSHOT_TS = "2026-09-18T09:00:00.000Z"
-const LOG_LINE_TS_STALE = "2026-09-18T08:00:00.000Z"
-const LOG_LINE_TS_NEWER = "2026-09-18T10:00:00.000Z"
-const LOG_LINE_ONLY_EVICTIONS = TOTALS_EVICTIONS + 1
-const SESSION_A_LOG_LINE_COUNT = 1
-
-const makeSnapshot = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
-  ts: SNAPSHOT_TS,
-  session: SESSION_A,
-  manualMode: true,
-  modelContextTokens: BUDGET_TOKENS_MODEL,
-  modelContextTokensSource: MODEL_BUDGET_SOURCE,
-  lastRun: { estimatedTokens: ESTIMATED_TOKENS, watermarkTokens: WATERMARK_TOKENS, deficitTokens: DEFICIT_TOKENS },
-  totals: makeTotals(),
-  stash: { entries: SNAPSHOT_STASH_ENTRIES, capacity: SNAPSHOT_STASH_CAPACITY },
-  hotSubjects: SNAPSHOT_HOT_SUBJECTS,
-  ...overrides,
-})
-
-const writeSnapshot = (stateDir: string, sessionID: string, snapshot: unknown): void => {
-  writeFileSync(join(stateDir, `${sessionID}${SNAPSHOT_SUFFIX}`), `${JSON.stringify(snapshot)}\n`)
-}
-
-const logLineAgainstSnapshot = (ts: string): PanelMetricsLine =>
-  makeLine({
-    ts,
-    modelContextTokens: BUDGET_TOKENS_SMALL,
-    estimatedTokens: SECOND_LINE_ESTIMATED,
-    totals: { ...makeTotals(), evictions: LOG_LINE_ONLY_EVICTIONS },
-  })
-
-const logLineStaleAgainstSnapshot = (): PanelMetricsLine => logLineAgainstSnapshot(LOG_LINE_TS_STALE)
-
-const logLineNewerThanSnapshot = (): PanelMetricsLine => logLineAgainstSnapshot(LOG_LINE_TS_NEWER)
-
 test("parseStateSnapshot parses a snapshot carrying exactly the fields the panel consumes", () => {
   const snapshot = parseStateSnapshot(JSON.stringify(makeSnapshot()))
 
@@ -766,473 +689,4 @@ test("the default live state dir matches the plugin core's resolved state path",
 
   assert.equal(DEFAULT_LIVE_STATE_DIR, join(homedir(), ".local", "share", "opencode", "lru-state"))
   assert.equal(stats.options.liveStatePath, DEFAULT_LIVE_STATE_DIR)
-})
-
-test("panelRows renders the session's budget, last run, compact counters, and newest eviction", () => {
-  const data = {
-    source: "/tmp/metrics.jsonl",
-    activeSession: SESSION_A,
-    current: sessionPanelData(
-      [
-        makeLine({
-          evictedThisRun: [{ tool: "read", subject: "/data/a.txt", bytes: EVICTED_BYTES, messagesAgo: EVICTED_MESSAGES_AGO }],
-        }),
-      ],
-      SESSION_A,
-    ),
-    global: globalTotals([makeLine()]),
-    error: undefined,
-  }
-
-  const rows = panelRows(data)
-
-  assert.equal(rows[0].text, "LRU context manager")
-  assert.equal(rows[0].tone, "header")
-  assert.ok(rows.some((row) => row.text === `budget: ~200k tokens (per-model limit)`))
-  assert.ok(rows.some((row) => row.text === "last run: ~123.5k estimated vs ~100k watermark (over by ~23.5k)"))
-  assert.ok(
-    rows.some(
-      (row) =>
-        row.text ===
-        `counters: ${TOTALS_EVICTIONS} evictions (12 kB reclaimed, ~3.1k tokens saved), ${TOTALS_DEDUPED} dedup (~2.3k tokens saved), ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} stash reads (${TOTALS_STASH_HITS} hits)`,
-    ),
-  )
-  assert.ok(rows.some((row) => row.text === `last evicted: read /data/a.txt (3 kB, ${EVICTED_MESSAGES_AGO} msgs ago)`))
-  assert.equal(rows.length, 5)
-  assert.ok(!rows.some((row) => row.text === "recently evicted:"))
-  assert.ok(!rows.some((row) => row.text.startsWith("session:")))
-  assert.ok(!rows.some((row) => row.text.startsWith("mode:")))
-  assert.ok(!rows.some((row) => row.text.startsWith("hot subjects:")))
-  assert.ok(!rows.some((row) => row.text.startsWith("history:")))
-  assert.ok(!rows.some((row) => row.text.includes(`${TOTALS_FENCE_EVICTED} fences`)))
-  assert.ok(!rows.some((row) => row.text.includes(`${TOTALS_REASONING_EXPIRED} reasoning`)))
-})
-
-test("panelRows compresses multiple recent evictions to a single newest-subject line", () => {
-  const data = {
-    source: "/tmp/metrics.jsonl",
-    activeSession: SESSION_A,
-    current: sessionPanelData(
-      [
-        makeLine({
-          evictedThisRun: [
-            { tool: "read", subject: "/data/old.txt", bytes: EVICTED_BYTES, messagesAgo: EVICTED_MESSAGES_AGO },
-          ],
-        }),
-        makeLine({
-          evictedThisRun: [
-            { tool: "bash", subject: "tail-cmd", bytes: EVICTED_BYTES, messagesAgo: EVICTED_MESSAGES_AGO },
-          ],
-        }),
-      ],
-      SESSION_A,
-    ),
-    global: globalTotals([]),
-    error: undefined,
-  }
-
-  const rows = panelRows(data)
-
-  assert.equal(data.current?.recentEvictions.length, COLLECTED_EVICTION_COUNT)
-  assert.equal(rows.filter((row) => row.text.startsWith("last evicted:")).length, 1)
-  assert.ok(rows.some((row) => row.text === `last evicted: bash tail-cmd (3 kB, ${EVICTED_MESSAGES_AGO} msgs ago)`))
-  assert.ok(!rows.some((row) => row.text.includes("/data/old.txt")))
-})
-
-test("panelRows flags manual mode in the header and leaves the automatic-mode header unlabeled", () => {
-  const manualData = {
-    source: "/tmp/metrics.jsonl",
-    activeSession: SESSION_A,
-    current: { ...sessionPanelData([makeLine()], SESSION_A), manualMode: true },
-    global: globalTotals([]),
-    error: undefined,
-  }
-  const automaticData = { ...manualData, current: { ...sessionPanelData([makeLine()], SESSION_A), manualMode: false } }
-
-  assert.equal(panelRows(manualData)[0].text, "LRU context manager (manual)")
-  assert.equal(panelRows(automaticData)[0].text, "LRU context manager")
-  assert.ok(!panelRows(automaticData).some((row) => row.text.startsWith("mode:")))
-})
-
-test("panelRows marks an unknown budget inactive and omits watermark fields when null", () => {
-  const data = {
-    source: "/tmp/metrics.jsonl",
-    activeSession: SESSION_A,
-    current: sessionPanelData(
-      [makeLine({ modelContextTokens: null, modelContextTokensSource: UNKNOWN_BUDGET_SOURCE, watermarkTokens: null, deficitTokens: null })],
-      SESSION_A,
-    ),
-    global: globalTotals([]),
-    error: undefined,
-  }
-
-  const rows = panelRows(data)
-
-  assert.ok(rows.some((row) => row.text === "budget: inactive (no budget)"))
-  assert.ok(rows.some((row) => row.text === "last run: ~123.5k estimated, no watermark"))
-})
-
-test("panelRows labels an override-sourced budget as a per-model override", () => {
-  const data = {
-    source: "/tmp/metrics.jsonl",
-    activeSession: SESSION_A,
-    current: sessionPanelData([makeLine({ modelContextTokensSource: OVERRIDE_BUDGET_SOURCE })], SESSION_A),
-    global: globalTotals([]),
-    error: undefined,
-  }
-
-  const rows = panelRows(data)
-
-  assert.ok(rows.some((row) => row.text === "budget: ~200k tokens (per-model override)"))
-})
-
-test("panelRows reports a session without recorded runs distinctly from a panel opened outside any session", () => {
-  const noMetricsData = {
-    source: "/tmp/metrics.jsonl",
-    activeSession: SESSION_B,
-    current: undefined,
-    global: globalTotals([makeLine({ session: SESSION_B })]),
-    error: undefined,
-  }
-
-  const noMetricsRows = panelRows(noMetricsData)
-
-  assert.ok(noMetricsRows.some((row) => row.text === "no metrics recorded for this session yet"))
-  assert.ok(!noMetricsRows.some((row) => row.text === "no active session"))
-  assert.ok(!noMetricsRows.some((row) => row.text.startsWith("budget:")))
-  assert.deepEqual(noMetricsRows, [
-    { text: "LRU context manager", tone: "header" },
-    { text: "no metrics recorded for this session yet", tone: "muted" },
-  ])
-
-  const noSessionRows = panelRows({ ...noMetricsData, activeSession: undefined })
-
-  assert.ok(noSessionRows.some((row) => row.text === "no active session"))
-  assert.ok(!noSessionRows.some((row) => row.text === "no metrics recorded for this session yet"))
-  assert.deepEqual(noSessionRows, [
-    { text: "LRU context manager", tone: "header" },
-    { text: "no active session", tone: "muted" },
-  ])
-})
-
-test("panelRows surfaces a log read error as the warning row and omits session details", () => {
-  const data = {
-    source: "/tmp/metrics.jsonl",
-    activeSession: SESSION_A,
-    current: undefined,
-    global: globalTotals([]),
-    error: "EACCES: permission denied",
-  }
-
-  const rows = panelRows(data)
-
-  assert.deepEqual(rows, [
-    { text: "LRU context manager", tone: "header" },
-    { text: "metrics log unreadable: EACCES: permission denied", tone: "warning" },
-  ])
-})
-
-test("sidebarRows renders the approved layout's header, stat block, and eviction footer as blank-line groups", () => {
-  const data = {
-    source: "/tmp/metrics.jsonl",
-    activeSession: SESSION_A,
-    current: sessionPanelData(
-      [
-        makeLine({
-          evictedThisRun: [{ tool: "read", subject: "/data/a.txt", bytes: EVICTED_BYTES, messagesAgo: EVICTED_MESSAGES_AGO }],
-        }),
-      ],
-      SESSION_A,
-    ),
-    global: globalTotals([makeLine()]),
-    error: undefined,
-  }
-
-  const rows = sidebarRowsWithinWidth(data)
-
-  assert.deepEqual(rows, [
-    { text: "LRU context manager", tone: "header" },
-    { text: " ", tone: "normal" },
-    { text: "Budget: 200k", tone: "normal" },
-    { text: "Watermark: 100k", tone: "normal" },
-    { text: "Over by: 23.5k", tone: "normal" },
-    { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
-    { text: `Deduped: ${TOTALS_DEDUPED}, ~2.3k tokens`, tone: "normal" },
-    { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
-    { text: " ", tone: "normal" },
-    { text: "Last evicted: read /data/a.txt", tone: "muted" },
-    { text: `3 kB, ${EVICTED_MESSAGES_AGO} messages ago`, tone: "muted" },
-  ])
-})
-
-test("sidebarRows keeps the panel's manual-mode header suffix over the spaced groups", () => {
-  const manualData = {
-    source: "/tmp/metrics.jsonl",
-    activeSession: SESSION_A,
-    current: { ...sessionPanelData([makeLine()], SESSION_A), manualMode: true },
-    global: globalTotals([]),
-    error: undefined,
-  }
-  const automaticData = { ...manualData, current: { ...sessionPanelData([makeLine()], SESSION_A), manualMode: false } }
-
-  const rows = sidebarRowsWithinWidth(manualData)
-
-  assert.equal(rows[0].text, "LRU context manager (manual)")
-  assert.equal(rows[0].tone, "header")
-  assert.deepEqual(rows[1], { text: " ", tone: "normal" })
-  assert.equal(sidebarRowsWithinWidth(automaticData)[0].text, "LRU context manager")
-})
-
-test("sidebarRows reports a session without runs and a sidebar outside any session", () => {
-  const noMetricsData = {
-    source: "/tmp/metrics.jsonl",
-    activeSession: SESSION_B,
-    current: undefined,
-    global: globalTotals([makeLine({ session: SESSION_B })]),
-    error: undefined,
-  }
-
-  assert.deepEqual(sidebarRowsWithinWidth(noMetricsData), [
-    { text: "LRU context manager", tone: "header" },
-    { text: " ", tone: "normal" },
-    { text: "no metrics recorded for this session yet", tone: "muted" },
-  ])
-  assert.deepEqual(sidebarRowsWithinWidth({ ...noMetricsData, activeSession: undefined }), [
-    { text: "LRU context manager", tone: "header" },
-    { text: " ", tone: "normal" },
-    { text: "no active session", tone: "muted" },
-  ])
-})
-
-test("sidebarRows shows the empty-session state when the session's log lines are all malformed", async () => {
-  await withTempDir(async (dir) => {
-    const path = join(dir, "metrics.jsonl")
-    writeFileSync(path, "{not json\n")
-
-    const data = await loadPanelData({ path, sessionID: SESSION_A })
-
-    assert.equal(data.error, undefined)
-    assert.equal(data.current, undefined)
-    assert.deepEqual(sidebarRowsWithinWidth(data), [
-      { text: "LRU context manager", tone: "header" },
-      { text: " ", tone: "normal" },
-      { text: "no metrics recorded for this session yet", tone: "muted" },
-    ])
-  })
-})
-
-test("sidebarRows pins the unreadable-log warning as its own group when no snapshot serves the session", () => {
-  const data = {
-    source: "/tmp/metrics.jsonl",
-    activeSession: SESSION_A,
-    current: undefined,
-    global: globalTotals([]),
-    error: "EACCES: permission denied",
-  }
-
-  assert.deepEqual(sidebarRowsWithinWidth(data), [
-    { text: "LRU context manager", tone: "header" },
-    { text: " ", tone: "normal" },
-    { text: "metrics log unreadable: EACCES: permissio…", tone: "warning" },
-  ])
-})
-
-test("sidebarRows keeps the snapshot-fed session block under the warning group when the log is unreadable", async () => {
-  await withTempDir(async (dir) => {
-    const directoryPath = join(dir, "metrics-dir")
-    mkdirSync(directoryPath)
-    const stateDir = join(dir, "lru-state")
-    mkdirSync(stateDir)
-    writeSnapshot(stateDir, SESSION_A, makeSnapshot())
-
-    const data = await loadPanelData({ path: directoryPath, stateDir, sessionID: SESSION_A })
-
-    assert.ok(data.error !== undefined)
-    assert.ok(data.current !== undefined)
-    const rows = sidebarRowsWithinWidth(data)
-    assert.deepEqual(rows.slice(0, 2), [
-      { text: "LRU context manager (manual)", tone: "header" },
-      { text: " ", tone: "normal" },
-    ])
-    assert.ok(rows[2].text.startsWith("metrics log unreadable:"))
-    assert.equal(rows[2].tone, "warning")
-    assert.deepEqual(rows.slice(3), [
-      { text: " ", tone: "normal" },
-      { text: "Budget: 200k", tone: "normal" },
-      { text: "Watermark: 100k", tone: "normal" },
-      { text: "Over by: 23.5k", tone: "normal" },
-      { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
-      { text: `Deduped: ${TOTALS_DEDUPED}, ~2.3k tokens`, tone: "normal" },
-      { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
-    ])
-  })
-})
-
-test("sidebarRows renders the log-fed fallback session in the spaced groups", async () => {
-  await withTempDir(async (dir) => {
-    const path = join(dir, "metrics.jsonl")
-    const stateDir = join(dir, "lru-state")
-    mkdirSync(stateDir)
-    writeFileSync(path, serialize([logLineStaleAgainstSnapshot()]))
-
-    const data = await loadPanelData({ path, stateDir, sessionID: SESSION_A })
-
-    assert.equal(data.error, undefined)
-    assert.ok(data.current !== undefined)
-    assert.deepEqual(sidebarRowsWithinWidth(data), [
-      { text: "LRU context manager", tone: "header" },
-      { text: " ", tone: "normal" },
-      { text: `Budget: 600`, tone: "normal" },
-      { text: "Watermark: 100k", tone: "normal" },
-      { text: "Over by: 23.5k", tone: "normal" },
-      { text: `Evictions: ${LOG_LINE_ONLY_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
-      { text: `Deduped: ${TOTALS_DEDUPED}, ~2.3k tokens`, tone: "normal" },
-      { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
-      { text: " ", tone: "normal" },
-      { text: "Last evicted: read /data/a.txt", tone: "muted" },
-      { text: `3 kB, ${EVICTED_MESSAGES_AGO} messages ago`, tone: "muted" },
-    ])
-  })
-})
-
-test("sidebarRows caps an over-long eviction line and the footer's huge byte total at the sidebar column limit", () => {
-  const data = {
-    source: "/tmp/metrics.jsonl",
-    activeSession: SESSION_A,
-    current: sessionPanelData(
-      [
-        makeLine({
-          evictedThisRun: [{ tool: "read", subject: OVER_LONG_SUBJECT, bytes: HUGE_RECLAIMED_BYTES, messagesAgo: EVICTED_MESSAGES_AGO }],
-        }),
-      ],
-      SESSION_A,
-    ),
-    global: globalTotals([]),
-    error: undefined,
-  }
-
-  const rows = sidebarRowsWithinWidth(data)
-
-  assert.ok(OVER_LONG_SUBJECT.length > SIDEBAR_COLUMN_LIMIT)
-  assert.deepEqual(rows.slice(-3), [
-    { text: " ", tone: "normal" },
-    { text: `Last evicted: read /data/${"b".repeat(16)}…`, tone: "muted" },
-    { text: `115 GB, ${EVICTED_MESSAGES_AGO} messages ago`, tone: "muted" },
-  ])
-})
-
-test("sidebarRows caps an over-long read error in the warning group at the sidebar column limit", () => {
-  const data = {
-    source: "/tmp/metrics.jsonl",
-    activeSession: SESSION_A,
-    current: undefined,
-    global: globalTotals([]),
-    error: LONG_READ_ERROR,
-  }
-
-  assert.ok(LONG_READ_ERROR.length > SIDEBAR_COLUMN_LIMIT - "metrics log unreadable: ".length)
-  assert.deepEqual(sidebarRowsWithinWidth(data), [
-    { text: "LRU context manager", tone: "header" },
-    { text: " ", tone: "normal" },
-    { text: "metrics log unreadable: EACCES: permissio…", tone: "warning" },
-  ])
-})
-
-test("sidebarRows restyles a null budget and a missing watermark into the colon forms without an over-by line", () => {
-  const data = {
-    source: "/tmp/metrics.jsonl",
-    activeSession: SESSION_A,
-    current: sessionPanelData(
-      [
-        makeLine({
-          modelContextTokens: null,
-          modelContextTokensSource: UNKNOWN_BUDGET_SOURCE,
-          watermarkTokens: null,
-          deficitTokens: null,
-          evictedThisRun: [],
-        }),
-      ],
-      SESSION_A,
-    ),
-    global: globalTotals([]),
-    error: undefined,
-  }
-
-  assert.deepEqual(sidebarRowsWithinWidth(data), [
-    { text: "LRU context manager", tone: "header" },
-    { text: " ", tone: "normal" },
-    { text: "Budget: inactive (no budget)", tone: "normal" },
-    { text: "Watermark: none", tone: "normal" },
-    { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
-    { text: `Deduped: ${TOTALS_DEDUPED}, ~2.3k tokens`, tone: "normal" },
-    { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
-  ])
-})
-
-test("sidebarRows shows Watermark none for a present budget when only the watermark trio is null", () => {
-  const data = {
-    source: "/tmp/metrics.jsonl",
-    activeSession: SESSION_A,
-    current: sessionPanelData([makeLine({ watermarkTokens: null, deficitTokens: null, evictedThisRun: [] })], SESSION_A),
-    global: globalTotals([]),
-    error: undefined,
-  }
-
-  assert.deepEqual(sidebarRowsWithinWidth(data), [
-    { text: "LRU context manager", tone: "header" },
-    { text: " ", tone: "normal" },
-    { text: "Budget: 200k", tone: "normal" },
-    { text: "Watermark: none", tone: "normal" },
-    { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
-    { text: `Deduped: ${TOTALS_DEDUPED}, ~2.3k tokens`, tone: "normal" },
-    { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
-  ])
-})
-
-test("sidebarRows omits the over-by line when the deficit is zero or negative", () => {
-  const makeWithinData = (deficitTokens: number): PanelData => ({
-    source: "/tmp/metrics.jsonl",
-    activeSession: SESSION_A,
-    current: sessionPanelData([makeLine({ deficitTokens, evictedThisRun: [] })], SESSION_A),
-    global: globalTotals([]),
-    error: undefined,
-  })
-
-  for (const deficitTokens of [ZERO_DEFICIT, NEGATIVE_DEFICIT]) {
-    const rows = sidebarRowsWithinWidth(makeWithinData(deficitTokens))
-    assert.deepEqual(rows.slice(2), [
-      { text: `Budget: 200k`, tone: "normal" },
-      { text: "Watermark: 100k", tone: "normal" },
-      { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
-      { text: `Deduped: ${TOTALS_DEDUPED}, ~2.3k tokens`, tone: "normal" },
-      { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
-    ])
-  }
-})
-
-test("sidebarRows drops the budget source label while the panel keeps it", () => {
-  const data = {
-    source: "/tmp/metrics.jsonl",
-    activeSession: SESSION_A,
-    current: sessionPanelData([makeLine({ modelContextTokensSource: OVERRIDE_BUDGET_SOURCE, evictedThisRun: [] })], SESSION_A),
-    global: globalTotals([]),
-    error: undefined,
-  }
-
-  const rows = sidebarRowsWithinWidth(data)
-
-  assert.ok(rows.some((row) => row.text === "Budget: 200k"))
-  assert.ok(!rows.some((row) => row.text.includes("override")))
-  assert.ok(panelRows(data).some((row) => row.text === "budget: ~200k tokens (per-model override)"))
-})
-
-const SIDEBAR_ENABLED_INVALID_VALUES: unknown[] = ["false", 0, null]
-
-test("resolveSidebarEnabled defaults to true honors explicit false and falls back to true on non-boolean values", () => {
-  assert.equal(resolveSidebarEnabled(undefined), DEFAULT_SIDEBAR_ENABLED)
-  assert.equal(resolveSidebarEnabled(true), true)
-  assert.equal(resolveSidebarEnabled(false), false)
-  for (const invalid of SIDEBAR_ENABLED_INVALID_VALUES) {
-    assert.equal(resolveSidebarEnabled(invalid), true)
-  }
 })

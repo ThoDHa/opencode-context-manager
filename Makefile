@@ -1,6 +1,7 @@
 PLUGIN_FILES := lru-context.ts lru-context.tui.tsx lru-panel-data.ts
 PLUGIN_SRC := $(addprefix plugin/,$(PLUGIN_FILES))
 PLUGIN_TARGET_DIR := $(HOME)/.config/opencode/plugin
+TEST_FILES := tests/lru-context.test.ts tests/lru-panel-data.test.ts tests/lru-panel-rows.test.ts tests/lru-sidebar-rows.test.ts
 
 .PHONY: all test install uninstall help
 
@@ -9,7 +10,7 @@ all: test
 
 # Run the plugin test suites
 test:
-	node --test tests/lru-context.test.ts tests/lru-panel-data.test.ts
+	node --test $(TEST_FILES)
 
 # Symlink the plugin files into the opencode plugin directory.
 # Idempotent: existing symlinks are replaced in place; a regular file (or

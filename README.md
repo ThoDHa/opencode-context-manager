@@ -39,7 +39,7 @@ Installing the plugin means placing its three source files (`lru-context.ts`, `l
 - [opencode](https://opencode.ai), the host application: its sessions run the plugin, and its TUI serves the `/lru` panel and the session sidebar. The two TUI views additionally need a current opencode build carrying the slots API, since the TUI module calls `api.slots.register` unconditionally; on builds without it the views are absent while the core transform and both tools work unchanged.
 - git, to clone this repository and to pull later updates into it
 - make, to run the `test`, `install`, and `uninstall` targets the `Makefile` defines
-- node, to run the test suite, since `make test` invokes `node --test` over the plugin core suite (`tests/lru-context.test.ts`) and the panel data suite (`tests/lru-panel-data.test.ts`)
+- node, to run the test suite, since `make test` invokes `node --test` over the core suite (`tests/lru-context.test.ts`) and the three panel suites (`tests/lru-panel-data.test.ts`, `tests/lru-panel-rows.test.ts`, `tests/lru-sidebar-rows.test.ts`)
 
 ### Install
 
@@ -58,7 +58,7 @@ The install is the whole deployment: the three symlinked files sit in opencode's
 
 ### Staying updated
 
-The installed entries are symlinks into the clone, so an update is `git pull` in the repository: the links resolve into the working tree, and the code the plugin runs is whatever the pull left there. `make test` re-runs the two suites against the pulled tree.
+The installed entries are symlinks into the clone, so an update is `git pull` in the repository: the links resolve into the working tree, and the code the plugin runs is whatever the pull left there. `make test` re-runs the four suites against the pulled tree.
 
 ### Manual install
 
@@ -131,7 +131,7 @@ However they arrive, options follow a drop-on-invalid discipline: a value failin
 
 ## LRU Context Plugin Design
 
-The LRU context manager is the plugin at `plugin/lru-context.ts`, with the TUI panel and sidebar in `lru-context.tui.tsx` and their shared data layer in `lru-panel-data.ts`. It hooks the transform opencode runs on the message list before every model call and trims what the provider is about to receive. `make test` pins the mechanism claims (core suite `tests/lru-context.test.ts`, panel data suite `tests/lru-panel-data.test.ts`); the comparisons, the economics, and the observed session below are argument and measurement, not test outputs.
+The LRU context manager is the plugin at `plugin/lru-context.ts`, with the TUI panel and sidebar in `lru-context.tui.tsx` and their shared data layer in `lru-panel-data.ts`. It hooks the transform opencode runs on the message list before every model call and trims what the provider is about to receive. `make test` pins the mechanism claims (core suite `tests/lru-context.test.ts`, panel suites `tests/lru-panel-data.test.ts`, `tests/lru-panel-rows.test.ts`, `tests/lru-sidebar-rows.test.ts`); the comparisons, the economics, and the observed session below are argument and measurement, not test outputs.
 
 ### Why this plugin exists
 
