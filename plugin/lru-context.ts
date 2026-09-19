@@ -18,7 +18,7 @@ const DIGEST_LAST_PREVIEW_LABEL = "last"
 const DIGEST_HEAD_PREVIEW_LABEL = "head"
 const DIGEST_TAIL_PREVIEW_LABEL = "tail"
 const NEWLINE_SPLIT_PATTERN = /\r\n|\r|\n/
-const CHARS_PER_TOKEN = 4
+const DEFAULT_CHARS_PER_TOKEN = 4
 const DEFAULT_WATERMARK_RATIO = 0.5
 const DEFAULT_RECENT_WINDOW_MESSAGES = 4
 const DEFAULT_MIN_EVICTABLE_BYTES = 2048
@@ -37,14 +37,14 @@ const COMMAND_INPUT_KEY = "command"
 const OFFSET_INPUT_KEY = "offset"
 const LIMIT_INPUT_KEY = "limit"
 const PATTERN_INPUT_KEY = "pattern"
-const MIN_SUBJECT_LENGTH_FOR_SUBSTRING_MATCH = 3
+const DEFAULT_MIN_SUBSTRING_MATCH_CHARS = 3
 const UNKNOWN_TARGET_LABEL = "unknown target"
 const PATH_RANGE_SEPARATOR = ":"
 const RANGE_SEPARATOR = "-"
 const DEFAULT_STASH_LIMIT = 50
-const MAX_STASH_SESSIONS = 8
-const MAX_LIMIT_SESSIONS = 8
-const MAX_HINT_SESSIONS = 8
+const DEFAULT_STASH_SESSIONS = 8
+const DEFAULT_LIMIT_SESSIONS = 8
+const DEFAULT_HINT_SESSIONS = 8
 const RELOAD_TOOL_NAME = "read_evicted"
 const RELOAD_ARG_NAME = "subject"
 const RELOAD_TOOL_DESCRIPTION =
@@ -76,8 +76,8 @@ const TEXT_PART_TYPE = "text"
 const PURGED_INPUT_MARKER = "[lru-purged-input]"
 const REASONING_PART_TYPE = "reasoning"
 const REASONING_TEXT_KEY = "text"
-const MAX_METRICS_SESSIONS = 8
-const MAX_REMEMBERED_EVICTED_SUBJECTS = 100
+const DEFAULT_METRICS_SESSIONS = 8
+const DEFAULT_REMEMBERED_EVICTED_SUBJECTS = 100
 const TOUCH_SCAN_INITIAL_WATERMARK = -1
 const DEFAULT_METRICS_LOG_ENABLED = true
 const METRICS_DIR_SEGMENTS = [".local", "share", "opencode"]
@@ -145,6 +145,14 @@ type LruContextOptions = {
   hintSubjects?: number
   protectedTools?: string[]
   protectedPatterns?: string[]
+  stashLimit?: number
+  stashSessions?: number
+  limitSessions?: number
+  hintSessions?: number
+  metricsSessions?: number
+  rememberedEvictedSubjects?: number
+  charsPerToken?: number
+  minSubstringMatchChars?: number
   metricsLog?: boolean
   metricsPath?: string
   metricsRotationMaxBytes?: number
@@ -336,6 +344,9 @@ const userFenceEvictionOf = (raw: LruContextOptions["userFenceEviction"]): UserF
   }
 }
 
+const boundedIntegerOr = (value: number | undefined, fallback: number, min: number): number =>
+  typeof value === "number" && Number.isInteger(value) && value >= min ? value : fallback
+
 const resolveOptions = (raw: LruContextOptions = {}): ResolvedOptions => {
   const protectedPatterns =
     Array.isArray(raw.protectedPatterns) && raw.protectedPatterns.every((pattern) => typeof pattern === "string" && pattern.length > 0)
@@ -362,6 +373,17 @@ const resolveOptions = (raw: LruContextOptions = {}): ResolvedOptions => {
       const compiled = compiledGlobOf(pattern)
       return compiled === undefined ? [] : [compiled]
     }),
+    stashLimit: boundedIntegerOr(raw.stashLimit, DEFAULT_STASH_LIMIT, 0),
+    stashSessions: boundedIntegerOr(raw.stashSessions, DEFAULT_STASH_SESSIONS, 1),
+    limitSessions: boundedIntegerOr(raw.limitSessions, DEFAULT_LIMIT_SESSIONS, 1),
+    hintSessions: boundedIntegerOr(raw.hintSessions, DEFAULT_HINT_SESSIONS, 1),
+    metricsSessions: boundedIntegerOr(raw.metricsSessions, DEFAULT_METRICS_SESSIONS, 1),
+    rememberedEvictedSubjects: boundedIntegerOr(raw.rememberedEvictedSubjects, DEFAULT_REMEMBERED_EVICTED_SUBJECTS, 0),
+    charsPerToken:
+      typeof raw.charsPerToken === "number" && Number.isFinite(raw.charsPerToken) && raw.charsPerToken > 0
+        ? raw.charsPerToken
+        : DEFAULT_CHARS_PER_TOKEN,
+    minSubstringMatchChars: boundedIntegerOr(raw.minSubstringMatchChars, DEFAULT_MIN_SUBSTRING_MATCH_CHARS, 0),
     metricsLog: typeof raw.metricsLog === "boolean" ? raw.metricsLog : DEFAULT_METRICS_LOG_ENABLED,
     metricsPath: typeof raw.metricsPath === "string" && raw.metricsPath.length > 0 ? raw.metricsPath : DEFAULT_METRICS_PATH,
     metricsRotationMaxBytes:
@@ -474,13 +496,13 @@ const renderSubject = (subject: Subject): string => {
   return boundedSingleLineOf(rendered)
 }
 
-const appearanceTouches = (entrySubjects: Subject[], appearance: ToolAppearance): boolean =>
+const appearanceTouches = (entrySubjects: Subject[], appearance: ToolAppearance, minSubstringChars: number): boolean =>
   appearance.subjects.some((appearanceSubject) =>
     entrySubjects.some(
       (entrySubject) =>
         entrySubject.path === appearanceSubject.path ||
         (appearance.tool === BASH_TOOL_NAME &&
-          entrySubject.path.length > MIN_SUBJECT_LENGTH_FOR_SUBSTRING_MATCH &&
+          entrySubject.path.length > minSubstringChars &&
           appearanceSubject.path.includes(entrySubject.path)),
     ),
   )
@@ -605,7 +627,7 @@ const deduplicateFileAttachments = (messages: MessageBundle[], options: Resolved
   return tombstones
 }
 
-const estimateTokens = (messages: MessageBundle[]): number => {
+const estimateTokens = (messages: MessageBundle[], charsPerToken: number): number => {
   let chars = 0
   for (const message of messages) {
     for (const part of message.parts) {
@@ -617,7 +639,7 @@ const estimateTokens = (messages: MessageBundle[]): number => {
       }
     }
   }
-  return Math.ceil(chars / CHARS_PER_TOKEN)
+  return Math.ceil(chars / charsPerToken)
 }
 
 const purgeErroredToolInputs = (messages: MessageBundle[], options: ResolvedOptions): void => {
@@ -774,14 +796,18 @@ const evictLargeUserFences = (messages: MessageBundle[], options: ResolvedOption
         const blockText = text.slice(startOffset, endOffset)
         const subject = boundedSingleLineOf(firstLine)
         const tombstone = buildFenceTombstone(span.language, contentLines, subject)
-        stashDropped += stashEvictedOutput(stash, {
-          output: blockText,
-          tool: FENCE_STASH_TOOL_LABEL,
-          subject,
-          msgIndex,
-          partIndex,
-          stashSlot: span.startLine,
-        })
+        stashDropped += stashEvictedOutput(
+          stash,
+          {
+            output: blockText,
+            tool: FENCE_STASH_TOOL_LABEL,
+            subject,
+            msgIndex,
+            partIndex,
+            stashSlot: span.startLine,
+          },
+          options.stashLimit,
+        )
         plans.push({
           startOffset,
           endOffset,
@@ -859,18 +885,18 @@ const rememberSessionValue = <T>(map: Map<string, T>, key: string, value: T, bou
   map.set(key, value)
 }
 
-const stashForSession = (stashes: StashStore, sessionKey: string): SessionStash => {
+const stashForSession = (stashes: StashStore, sessionKey: string, sessionBound: number): SessionStash => {
   const touched = touchMapEntry(stashes, sessionKey)
   if (touched !== undefined) return touched
-  trimMapToBound(stashes, MAX_STASH_SESSIONS)
+  trimMapToBound(stashes, sessionBound)
   const created: SessionStash = new Map()
   stashes.set(sessionKey, created)
   return created
 }
 
-const trimStash = (stash: SessionStash): number => {
+const trimStash = (stash: SessionStash, limit: number): number => {
   let dropped = 0
-  while (stash.size > DEFAULT_STASH_LIMIT) {
+  while (stash.size > limit) {
     const oldest = stash.keys().next()
     if (oldest.done === true) break
     stash.delete(oldest.value)
@@ -879,9 +905,9 @@ const trimStash = (stash: SessionStash): number => {
   return dropped
 }
 
-const stashEvictedOutput = (stash: SessionStash, entry: StashEntry): number => {
+const stashEvictedOutput = (stash: SessionStash, entry: StashEntry, limit: number): number => {
   stash.set(stashKeyOf(entry.tool, entry.subject, entry.msgIndex, entry.partIndex, entry.stashSlot), entry)
-  return trimStash(stash)
+  return trimStash(stash, limit)
 }
 
 const stashMissTextFor = (subject: string): string =>
@@ -923,7 +949,7 @@ const sessionIDFromContext = (source: unknown): string | undefined => {
 
 const sessionKeyFromContext = (source: unknown): string => sessionIDFromContext(source) ?? FALLBACK_SESSION_KEY
 
-const executeReadEvicted = (stashes: StashStore, metrics: MetricsStore, args: unknown, toolContext: unknown): string => {
+const executeReadEvicted = (stashes: StashStore, metrics: MetricsStore, metricsSessionBound: number, args: unknown, toolContext: unknown): string => {
   const subject = typeof args === "object" && args !== null ? (args as { subject?: unknown }).subject : undefined
   if (typeof subject !== "string" || subject.length === 0) return invalidSubjectTextFor(typeof subject)
   const sessionKey = sessionKeyFromContext(toolContext)
@@ -934,7 +960,7 @@ const executeReadEvicted = (stashes: StashStore, metrics: MetricsStore, args: un
     if (existing !== undefined) existing.stashMisses += 1
     return stashMissTextFor(subject)
   }
-  const sessionMetrics = metricsForSession(metrics, sessionKey)
+  const sessionMetrics = metricsForSession(metrics, sessionKey, metricsSessionBound)
   sessionMetrics.stashHits += 1
   touchMapEntry(stashes, sessionKey)
   const newest = matches[matches.length - 1]
@@ -959,21 +985,21 @@ const createSessionMetrics = (): SessionMetrics => ({
   stashReadsLoggedThrough: 0,
 })
 
-const metricsForSession = (metrics: MetricsStore, sessionKey: string): SessionMetrics => {
+const metricsForSession = (metrics: MetricsStore, sessionKey: string, sessionBound: number): SessionMetrics => {
   const touched = touchMapEntry(metrics, sessionKey)
   if (touched !== undefined) return touched
-  trimMapToBound(metrics, MAX_METRICS_SESSIONS)
+  trimMapToBound(metrics, sessionBound)
   const created = createSessionMetrics()
   metrics.set(sessionKey, created)
   return created
 }
 
-const countPostEvictionTouches = (metrics: SessionMetrics, appearances: ToolAppearance[]): number => {
+const countPostEvictionTouches = (metrics: SessionMetrics, appearances: ToolAppearance[], minSubstringChars: number): number => {
   let touches = 0
   let latestIndex = metrics.touchScanThrough
   for (const appearance of appearances) {
     if (appearance.msgIndex <= metrics.touchScanThrough) continue
-    if (appearanceTouches(metrics.evictedSubjects, appearance)) touches += 1
+    if (appearanceTouches(metrics.evictedSubjects, appearance, minSubstringChars)) touches += 1
     latestIndex = appearance.msgIndex
   }
   metrics.touchScanThrough = latestIndex
@@ -986,7 +1012,7 @@ const lastRunMetricsOf = (eviction: EvictionResult): LastRunMetrics => ({
   deficitTokens: eviction.deficitTokens,
 })
 
-const recordRunOutcome = (metrics: SessionMetrics, run: RunOutcome): void => {
+const recordRunOutcome = (metrics: SessionMetrics, run: RunOutcome, rememberedSubjectsBound: number): void => {
   const { eviction, deduped: dedupedThisRun, touches: touchesThisRun, reasoningExpired: reasoningExpiredThisRun, fenceEvicted: fenceEvictedThisRun } = run
   metrics.lastRun = lastRunMetricsOf(eviction)
   metrics.evictions += eviction.evicted.length
@@ -995,7 +1021,7 @@ const recordRunOutcome = (metrics: SessionMetrics, run: RunOutcome): void => {
     metrics.bytesReclaimed += entry.bytes + entry.attachmentBytes
     metrics.evictedSubjects.push(...entry.subjects)
   }
-  while (metrics.evictedSubjects.length > MAX_REMEMBERED_EVICTED_SUBJECTS) metrics.evictedSubjects.shift()
+  while (metrics.evictedSubjects.length > rememberedSubjectsBound) metrics.evictedSubjects.shift()
   metrics.deduped += dedupedThisRun
   metrics.reasoningExpired += reasoningExpiredThisRun.parts
   metrics.reasoningBytesExpired += reasoningExpiredThisRun.bytes
@@ -1093,7 +1119,7 @@ const liveStateSnapshotOf = (
   modelContextTokensSource: budget.source,
   lastRun,
   totals: totalsOf(metrics),
-  stash: { entries: stash.size, capacity: DEFAULT_STASH_LIMIT },
+  stash: { entries: stash.size, capacity: options.stashLimit },
   hotSubjects: orderedRenderedSubjectsOf(hotSubjects, options.hintSubjects),
 })
 
@@ -1238,7 +1264,7 @@ const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
     },
     modelContextTokens: budget.tokens,
     modelContextTokensSource: budget.source,
-    stash: { entries: stash === undefined ? 0 : stash.size, capacity: DEFAULT_STASH_LIMIT },
+    stash: { entries: stash === undefined ? 0 : stash.size, capacity: source.options.stashLimit },
     counters: {
       evictions: metrics.evictions,
       bytesReclaimed: metrics.bytesReclaimed,
@@ -1303,7 +1329,7 @@ const scanToolOutputs = (
 
   for (const entry of entries) {
     for (const appearance of appearances) {
-      if (appearance.msgIndex > entry.lastTouch && appearanceTouches(entry.subjects, appearance)) {
+      if (appearance.msgIndex > entry.lastTouch && appearanceTouches(entry.subjects, appearance, options.minSubstringMatchChars)) {
         entry.lastTouch = appearance.msgIndex
       }
     }
@@ -1317,7 +1343,7 @@ const measureWithoutEvicting = (messages: MessageBundle[], options: ResolvedOpti
   return {
     hotSubjects: liveSubjectsOf(entries),
     appearances,
-    estimatedTokens: estimateTokens(messages),
+    estimatedTokens: estimateTokens(messages, options.charsPerToken),
     watermarkTokens: null,
     deficitTokens: null,
     evicted: [],
@@ -1340,7 +1366,7 @@ const evictLeastRecentlyUsed = (
     .filter((entry) => !isPatternProtected(entry.subjects, options))
     .sort((a, b) => a.lastTouch - b.lastTouch || b.bytes - a.bytes)
 
-  const estimatedTokens = estimateTokens(messages)
+  const estimatedTokens = estimateTokens(messages, options.charsPerToken)
   const deficitTokens = estimatedTokens - watermarkTokens
   const evicted: EvictedEntryInfo[] = []
   let stashDropped = 0
@@ -1361,10 +1387,10 @@ const evictLeastRecentlyUsed = (
         partIndex: entry.partIndex,
       }
       if (droppedAttachments !== undefined) stashed.attachments = droppedAttachments
-      stashDropped += stashEvictedOutput(stash, stashed)
+      stashDropped += stashEvictedOutput(stash, stashed, options.stashLimit)
       stripStateAttachments(entry.stateRef)
       entry.stateRef.output = `${tombstone}${buildReloadPointer(subject)}`
-      reclaimedTokens += entry.bytes / CHARS_PER_TOKEN
+      reclaimedTokens += entry.bytes / options.charsPerToken
       evicted.push({
         tool: entry.tool,
         subject,
@@ -1407,10 +1433,10 @@ const buildHintLine = (hotSubjects: HotSubject[], limit: number): string | undef
   return `${HINT_LINE_PREFIX} ${rendered.join(SUBJECT_SEPARATOR)}`
 }
 
-const storeHint = (hintBySession: Map<string, string>, sessionKey: string, hotSubjects: HotSubject[], limit: number): void => {
+const storeHint = (hintBySession: Map<string, string>, sessionKey: string, hotSubjects: HotSubject[], limit: number, sessionBound: number): void => {
   if (limit <= 0) return
   const hintLine = buildHintLine(hotSubjects, limit)
-  if (hintLine !== undefined) rememberSessionValue(hintBySession, sessionKey, hintLine, MAX_HINT_SESSIONS)
+  if (hintLine !== undefined) rememberSessionValue(hintBySession, sessionKey, hintLine, sessionBound)
 }
 
 const deliverHint = (hintBySession: Map<string, string>, input: unknown, output: { system: string[] }): void => {
@@ -1444,7 +1470,7 @@ export default (async (_input, rawOptions) => {
   // { type: "string" } schema below is sufficient. If this file ever ships
   // somewhere @opencode-ai/plugin resolves, switch back to tool().
   const readEvicted = async (args: unknown, toolContext: unknown): Promise<string> =>
-    executeReadEvicted(stashBySession, metricsBySession, args, toolContext)
+    executeReadEvicted(stashBySession, metricsBySession, options.metricsSessions, args, toolContext)
 
   const lruStats = async (_args: unknown, toolContext: unknown): Promise<string> =>
     executeLruStats({ options, limits: contextTokensBySession, stashes: stashBySession, metrics: metricsBySession }, toolContext)
@@ -1453,7 +1479,7 @@ export default (async (_input, rawOptions) => {
     "chat.params": async (input: { sessionID: string; model?: ChatParamsModel }) => {
       const captured = captureBudgetOf(input.model, options.modelContextTokens)
       if (captured !== undefined) {
-        rememberSessionValue(contextTokensBySession, input.sessionID, captured, MAX_LIMIT_SESSIONS)
+        rememberSessionValue(contextTokensBySession, input.sessionID, captured, options.limitSessions)
         return
       }
       const modelKey = modelKeyOf(input.model)
@@ -1469,8 +1495,8 @@ export default (async (_input, rawOptions) => {
       const sessionID = info?.sessionID
       const sessionLimit = sessionID !== undefined ? touchMapEntry(contextTokensBySession, sessionID) : undefined
       const budget = resolveSessionBudget(sessionLimit, options.defaultContextTokens)
-      const sessionStash = stashForSession(stashBySession, sessionKey)
-      const sessionMetrics = metricsForSession(metricsBySession, sessionKey)
+      const sessionStash = stashForSession(stashBySession, sessionKey, options.stashSessions)
+      const sessionMetrics = metricsForSession(metricsBySession, sessionKey, options.metricsSessions)
       stripLegacyHintParts(messages)
       const dedupedThisRun = deduplicateToolOutputs(messages, options) + deduplicateFileAttachments(messages, options)
       purgeErroredToolInputs(messages, options)
@@ -1480,7 +1506,7 @@ export default (async (_input, rawOptions) => {
         options.manualMode || budget.tokens === null
           ? measureWithoutEvicting(messages, options)
           : evictLeastRecentlyUsed(messages, options, budget.tokens * options.watermark, sessionStash)
-      const touchesThisRun = countPostEvictionTouches(sessionMetrics, eviction.appearances)
+      const touchesThisRun = countPostEvictionTouches(sessionMetrics, eviction.appearances, options.minSubstringMatchChars)
       const runOutcome: RunOutcome = {
         eviction,
         deduped: dedupedThisRun,
@@ -1488,8 +1514,8 @@ export default (async (_input, rawOptions) => {
         reasoningExpired: reasoningExpiredThisRun,
         fenceEvicted: fenceEvictedThisRun,
       }
-      recordRunOutcome(sessionMetrics, runOutcome)
-      storeHint(hintBySession, sessionKey, eviction.hotSubjects, options.hintSubjects)
+      recordRunOutcome(sessionMetrics, runOutcome, options.rememberedEvictedSubjects)
+      storeHint(hintBySession, sessionKey, eviction.hotSubjects, options.hintSubjects, options.hintSessions)
       await recordMetricsLine(options, sessionMetrics, sessionKey, budget, runOutcome)
       await recordLiveStateSnapshot(options, sessionKey, budget, sessionMetrics, sessionStash, eviction.hotSubjects, pruneThrottle)
     },

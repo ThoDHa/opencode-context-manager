@@ -5074,3 +5074,268 @@ test("transform still evicts under pressure when manualMode is invalid and falls
 
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
 })
+
+const STASH_LIMIT_OVERRIDE = 2
+const STASH_LIMIT_OVERFLOW_COUNT = 3
+const STASH_LIMIT_INVALID_VALUES = [-1, Infinity, Number.NaN, "2"]
+const SESSION_BOUND_OVERRIDE = 2
+const SESSION_BOUND_INVALID_ZERO = 0
+const SESSION_BOUND_TEST_COUNT = 3
+const BOUND_TEST_SESSION_C = "lru-bound-session-c"
+const REMEMBERED_SUBJECTS_OVERRIDE = 1
+const REMEMBERED_SUBJECTS_INVALID = -1
+const REMEMBERED_FIRST_SUBJECT = "/data/remembered-first.txt"
+const REMEMBERED_SECOND_SUBJECT = "/data/remembered-second.txt"
+const CHARS_PER_TOKEN_OVERRIDE = 8
+const CHARS_PER_TOKEN_INVALID_VALUES = [0, -1, Infinity, Number.NaN]
+const CHARS_TOKEN_BOUND_CONTEXT_LIMIT = 1000
+const SUBSTRING_FLOOR_OVERRIDE = 100
+const SUBSTRING_FLOOR_ZERO = 0
+const SUBSTRING_FLOOR_INVALID = -1
+const STASH_LIMIT_OVERRIDE_SUBJECT_PREFIX = "/data/slim-stash"
+
+test("lru_stats reports the default stash capacity of fifty entries when stashLimit is unset", async () => {
+  const stats = await lruStats(await loadPluginHooks(), SESSION_ID)
+
+  assert.deepEqual(stats.stash, { entries: 0, capacity: STASH_LIMIT })
+})
+
+test("read_evicted applies a custom stashLimit dropping the oldest stashed entry past the bound", async () => {
+  const hooks = await loadPluginHooksWith({ stashLimit: STASH_LIMIT_OVERRIDE })
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const subjects = Array.from({ length: STASH_LIMIT_OVERFLOW_COUNT }, (_, index) => `${STASH_LIMIT_OVERRIDE_SUBJECT_PREFIX}${index}.txt`)
+  const bundle = buildBundle([
+    ...subjects.map((subject) => [pathToolPart(subject, MIN_EVICTABLE_BYTES)]),
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.deepEqual((await lruStats(hooks, SESSION_ID)).stash, {
+    entries: STASH_LIMIT_OVERRIDE,
+    capacity: STASH_LIMIT_OVERRIDE,
+  })
+  assert.equal(await readEvicted(hooks, subjects[0], SESSION_ID), stashMissFor(subjects[0]))
+  assert.equal(await readEvicted(hooks, subjects[1], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(await readEvicted(hooks, subjects[2], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+})
+
+test("lru_stats keeps the default stash capacity when stashLimit is invalid", async () => {
+  for (const invalidLimit of STASH_LIMIT_INVALID_VALUES) {
+    const hooks = await loadPluginHooksWith({ stashLimit: invalidLimit })
+    const stats = await lruStats(hooks, SESSION_ID)
+
+    assert.deepEqual(stats.stash, { entries: 0, capacity: STASH_LIMIT })
+  }
+})
+
+test("read_evicted drops the least recently active session stash when the stashSessions bound is exceeded", async () => {
+  const hooks = await loadPluginHooksWith({ stashSessions: SESSION_BOUND_OVERRIDE })
+  for (let index = 0; index < SESSION_BOUND_OVERRIDE; index += 1) await evictStashSession(hooks, index)
+
+  await evictStashSession(hooks, SESSION_BOUND_OVERRIDE)
+
+  assert.equal(
+    await readEvicted(hooks, stashSessionSubject(0), stashSessionId(0)),
+    stashMissFor(stashSessionSubject(0)),
+  )
+  assert.equal(
+    await readEvicted(hooks, stashSessionSubject(1), stashSessionId(1)),
+    outputOfBytes(MIN_EVICTABLE_BYTES),
+  )
+  assert.equal(
+    await readEvicted(hooks, stashSessionSubject(SESSION_BOUND_OVERRIDE), stashSessionId(SESSION_BOUND_OVERRIDE)),
+    outputOfBytes(MIN_EVICTABLE_BYTES),
+  )
+})
+
+test("read_evicted keeps early session stashes when an invalid stashSessions falls back to the default bound", async () => {
+  const hooks = await loadPluginHooksWith({ stashSessions: SESSION_BOUND_INVALID_ZERO })
+  for (let index = 0; index < SESSION_BOUND_TEST_COUNT; index += 1) await evictStashSession(hooks, index)
+
+  assert.equal(
+    await readEvicted(hooks, stashSessionSubject(0), stashSessionId(0)),
+    outputOfBytes(MIN_EVICTABLE_BYTES),
+  )
+  assert.equal(
+    await readEvicted(hooks, stashSessionSubject(SESSION_BOUND_TEST_COUNT - 1), stashSessionId(SESSION_BOUND_TEST_COUNT - 1)),
+    outputOfBytes(MIN_EVICTABLE_BYTES),
+  )
+})
+
+test("chat params drops the oldest captured limit when the limitSessions bound is exceeded", async () => {
+  const hooks = await loadPluginHooksWith({ limitSessions: SESSION_BOUND_OVERRIDE })
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+  await setContextLimit(hooks, SESSION_ID_B, WATERMARK_PROBE_CONTEXT_LIMIT)
+  await setContextLimit(hooks, BOUND_TEST_SESSION_C, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const dropped = buildStandardBundle(SESSION_ID, "/data/limit-bound-dropped.txt")
+  await runTransform(hooks, dropped)
+  assert.equal(toolPartAt(dropped.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+
+  const retained = buildStandardBundle(SESSION_ID_B, "/data/limit-bound-retained.txt")
+  await runTransform(hooks, retained)
+  assert.ok(toolPartAt(retained.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+})
+
+test("chat params keeps captured limits when an invalid limitSessions falls back to the default bound", async () => {
+  const hooks = await loadPluginHooksWith({ limitSessions: SESSION_BOUND_INVALID_ZERO })
+  for (const sessionID of [SESSION_ID, SESSION_ID_B, BOUND_TEST_SESSION_C]) {
+    await setContextLimit(hooks, sessionID, WATERMARK_PROBE_CONTEXT_LIMIT)
+  }
+
+  const pressured = buildStandardBundle(SESSION_ID, "/data/limit-invalid-retained.txt")
+  await runTransform(hooks, pressured)
+  assert.ok(toolPartAt(pressured.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+})
+
+test("chat system transform drops the least recently active session hint when the hintSessions bound is exceeded", async () => {
+  const hooks = await loadPluginHooksWith({ hintSessions: SESSION_BOUND_OVERRIDE })
+  for (let index = 0; index < SESSION_BOUND_OVERRIDE; index += 1) await storeHintSession(hooks, index)
+
+  await storeHintSession(hooks, SESSION_BOUND_OVERRIDE)
+
+  assert.equal(hintBlocksIn(await runSystemTransform(hooks, hintSessionId(0))).length, 0)
+  assert.equal(hintBlocksIn(await runSystemTransform(hooks, hintSessionId(1))).length, 1)
+  assert.equal(hintBlocksIn(await runSystemTransform(hooks, hintSessionId(SESSION_BOUND_OVERRIDE))).length, 1)
+})
+
+test("chat system transform keeps session hints when an invalid hintSessions falls back to the default bound", async () => {
+  const hooks = await loadPluginHooksWith({ hintSessions: SESSION_BOUND_INVALID_ZERO })
+  for (let index = 0; index < SESSION_BOUND_TEST_COUNT; index += 1) await storeHintSession(hooks, index)
+
+  assert.equal(hintBlocksIn(await runSystemTransform(hooks, hintSessionId(0))).length, 1)
+  assert.equal(hintBlocksIn(await runSystemTransform(hooks, hintSessionId(SESSION_BOUND_TEST_COUNT - 1))).length, 1)
+})
+
+test("lru_stats drops the least recently active session metrics when the metricsSessions bound is exceeded", async () => {
+  const hooks = await loadPluginHooksWith({ metricsSessions: SESSION_BOUND_OVERRIDE })
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+  await setContextLimit(hooks, SESSION_ID_B, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  await runTransform(hooks, buildStandardBundle(SESSION_ID, "/data/metrics-bound-a.txt"))
+  await runTransform(hooks, buildStandardBundle(SESSION_ID_B, "/data/metrics-bound-b.txt"))
+  await runTransform(hooks, buildStandardBundle(BOUND_TEST_SESSION_C, "/data/metrics-bound-c.txt"))
+
+  assert.equal(countersOf(await lruStats(hooks, SESSION_ID_B)).evictions, 1)
+  assert.deepEqual(countersOf(await lruStats(hooks, SESSION_ID)), STATS_ZEROED_COUNTERS)
+})
+
+test("lru_stats keeps session metrics when an invalid metricsSessions falls back to the default bound", async () => {
+  const hooks = await loadPluginHooksWith({ metricsSessions: SESSION_BOUND_INVALID_ZERO })
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  await runTransform(hooks, buildStandardBundle(SESSION_ID, "/data/metrics-invalid-a.txt"))
+  await runTransform(hooks, buildStandardBundle(SESSION_ID_B, "/data/metrics-invalid-b.txt"))
+  await runTransform(hooks, buildStandardBundle(BOUND_TEST_SESSION_C, "/data/metrics-invalid-c.txt"))
+
+  assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).evictions, 1)
+})
+
+test("lru_stats forgets the oldest evicted subject at the rememberedEvictedSubjects bound so its touch goes uncounted", async () => {
+  const hooks = await loadPluginHooksWith({ rememberedEvictedSubjects: REMEMBERED_SUBJECTS_OVERRIDE })
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const bundle = buildBundle([[pathToolPart(REMEMBERED_FIRST_SUBJECT, MIN_EVICTABLE_BYTES)], ...fillerMessages()])
+  await runTransform(hooks, bundle)
+
+  bundle.messages.push(syntheticMessageFor(SESSION_ID, [pathToolPart(REMEMBERED_SECOND_SUBJECT, MIN_EVICTABLE_BYTES)]))
+  fillerMessages().forEach((parts) => bundle.messages.push(syntheticMessageFor(SESSION_ID, parts)))
+  await runTransform(hooks, bundle)
+
+  bundle.messages.push(syntheticMessageFor(SESSION_ID, [pathToolPart(REMEMBERED_FIRST_SUBJECT, APPEARANCE_ONLY_OUTPUT_BYTES)]))
+  bundle.messages.push(syntheticMessageFor(SESSION_ID, [pathToolPart(REMEMBERED_SECOND_SUBJECT, APPEARANCE_ONLY_OUTPUT_BYTES)]))
+  await runTransform(hooks, bundle)
+
+  assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).postEvictionTouches, 1)
+})
+
+test("lru_stats keeps both evicted subjects remembered when rememberedEvictedSubjects is invalid", async () => {
+  const hooks = await loadPluginHooksWith({ rememberedEvictedSubjects: REMEMBERED_SUBJECTS_INVALID })
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const bundle = buildBundle([[pathToolPart(REMEMBERED_FIRST_SUBJECT, MIN_EVICTABLE_BYTES)], ...fillerMessages()])
+  await runTransform(hooks, bundle)
+
+  bundle.messages.push(syntheticMessageFor(SESSION_ID, [pathToolPart(REMEMBERED_SECOND_SUBJECT, MIN_EVICTABLE_BYTES)]))
+  fillerMessages().forEach((parts) => bundle.messages.push(syntheticMessageFor(SESSION_ID, parts)))
+  await runTransform(hooks, bundle)
+
+  bundle.messages.push(syntheticMessageFor(SESSION_ID, [pathToolPart(REMEMBERED_FIRST_SUBJECT, APPEARANCE_ONLY_OUTPUT_BYTES)]))
+  bundle.messages.push(syntheticMessageFor(SESSION_ID, [pathToolPart(REMEMBERED_SECOND_SUBJECT, APPEARANCE_ONLY_OUTPUT_BYTES)]))
+  await runTransform(hooks, bundle)
+
+  assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).postEvictionTouches, 2)
+})
+
+test("transform applies a custom charsPerToken so the coarser estimate sits under a limit that evicts by default", async () => {
+  const defaultHooks = await loadPluginHooks()
+  const coarseHooks = await loadPluginHooksWith({ charsPerToken: CHARS_PER_TOKEN_OVERRIDE })
+  await setContextLimit(defaultHooks, SESSION_ID, CHARS_TOKEN_BOUND_CONTEXT_LIMIT)
+  await setContextLimit(coarseHooks, SESSION_ID, CHARS_TOKEN_BOUND_CONTEXT_LIMIT)
+
+  const defaultBundle = buildStandardBundle(SESSION_ID, "/data/estimate-default.txt")
+  const coarseBundle = buildStandardBundle(SESSION_ID, "/data/estimate-coarse.txt")
+  await runTransform(defaultHooks, defaultBundle)
+  await runTransform(coarseHooks, coarseBundle)
+
+  assert.ok(toolPartAt(defaultBundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  assert.equal(toolPartAt(coarseBundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+})
+
+test("transform falls back to the default charsPerToken when the option is invalid", async () => {
+  for (const invalidCharsPerToken of CHARS_PER_TOKEN_INVALID_VALUES) {
+    const hooks = await loadPluginHooksWith({ charsPerToken: invalidCharsPerToken })
+    await setContextLimit(hooks, SESSION_ID, CHARS_TOKEN_BOUND_CONTEXT_LIMIT)
+
+    const bundle = buildStandardBundle(SESSION_ID, "/data/estimate-invalid.txt")
+    await runTransform(hooks, bundle)
+
+    assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  }
+})
+
+test("transform blocks a bash substring refresh when minSubstringMatchChars exceeds the subject length", async () => {
+  const hooks = await loadPluginHooksWith({ minSubstringMatchChars: SUBSTRING_FLOOR_OVERRIDE })
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const bundle = buildBundle([
+    [bashToolPart(SUBSTRING_ENTRY_COMMAND, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(2),
+    [bashToolPart(SUBSTRING_APPEARANCE_COMMAND, APPEARANCE_ONLY_OUTPUT_BYTES)],
+    ...fillerMessages(1),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+})
+
+test("transform refreshes a three character bash entry via substring when minSubstringMatchChars is zero", async () => {
+  const hooks = await loadPluginHooksWith({ minSubstringMatchChars: SUBSTRING_FLOOR_ZERO })
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const bundle = buildBundle([
+    [bashToolPart(SHORT_SUBSTRING_ENTRY_COMMAND, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(2),
+    [bashToolPart(SHORT_SUBSTRING_APPEARANCE_COMMAND, APPEARANCE_ONLY_OUTPUT_BYTES)],
+    ...fillerMessages(1),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+})
+
+test("transform keeps the default substring floor when minSubstringMatchChars is invalid", async () => {
+  const hooks = await loadPluginHooksWith({ minSubstringMatchChars: SUBSTRING_FLOOR_INVALID })
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const bundle = buildBundle([
+    [bashToolPart(SHORT_SUBSTRING_ENTRY_COMMAND, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(2),
+    [bashToolPart(SHORT_SUBSTRING_APPEARANCE_COMMAND, APPEARANCE_ONLY_OUTPUT_BYTES)],
+    ...fillerMessages(1),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+})
