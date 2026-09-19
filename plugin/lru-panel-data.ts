@@ -548,34 +548,34 @@ const ELLIPSIS_MARKER = "…"
 const truncateToWidth = (text: string, maxWidth: number): string =>
   text.length > maxWidth ? `${text.slice(0, maxWidth - ELLIPSIS_MARKER.length)}${ELLIPSIS_MARKER}` : text
 
-const sidebarBudgetText = (current: SessionPanel): string => {
-  const label = budgetSourceLabel(current.budgetSource)
-  return current.budgetTokens === null
-    ? `Budget ${label}`
-    : `Budget ~${formatTokenCount(current.budgetTokens)} (${label})`
+const SIDEBAR_BUDGET_LABEL = "Budget"
+const SIDEBAR_WATERMARK_LABEL = "Watermark"
+const SIDEBAR_OVER_BY_LABEL = "Over by"
+const SIDEBAR_EVICTIONS_LABEL = "Evictions"
+const SIDEBAR_DEDUPED_LABEL = "Deduped"
+const SIDEBAR_STASH_READS_LABEL = "Stash reads"
+const SIDEBAR_TOKENS_UNIT = "tokens"
+const SIDEBAR_HITS_UNIT = "hits"
+const SIDEBAR_BUDGET_INACTIVE_TEXT = `${SIDEBAR_BUDGET_LABEL}: inactive (no budget)`
+const SIDEBAR_WATERMARK_MISSING_TEXT = `${SIDEBAR_WATERMARK_LABEL}: none`
+
+const sidebarBudgetText = (current: SessionPanel): string =>
+  current.budgetTokens === null ? SIDEBAR_BUDGET_INACTIVE_TEXT : `${SIDEBAR_BUDGET_LABEL}: ${formatTokenCount(current.budgetTokens)}`
+
+const sidebarWatermarkText = (current: SessionPanel): string => {
+  if (current.lastRun.watermarkTokens === null || current.lastRun.deficitTokens === null) return SIDEBAR_WATERMARK_MISSING_TEXT
+  return `${SIDEBAR_WATERMARK_LABEL}: ${formatTokenCount(current.lastRun.watermarkTokens)}`
 }
 
-const sidebarLastRunGroup = (current: SessionPanel): PanelRow[] => {
-  const rows: PanelRow[] = [
-    { text: `Last run ~${formatTokenCount(current.lastRun.estimatedTokens)} estimated`, tone: "normal" },
-  ]
-  if (current.lastRun.watermarkTokens === null || current.lastRun.deficitTokens === null) {
-    rows.push({ text: "no watermark recorded", tone: "normal" })
-    return rows
-  }
-  const watermark = `~${formatTokenCount(current.lastRun.watermarkTokens)} watermark`
-  rows.push(
-    current.lastRun.deficitTokens > 0
-      ? { text: `over ${watermark} by ~${formatTokenCount(current.lastRun.deficitTokens)}`, tone: "normal" }
-      : { text: `within ${watermark}`, tone: "normal" },
-  )
-  return rows
+const sidebarOverByRow = (current: SessionPanel): PanelRow | undefined => {
+  if (current.lastRun.deficitTokens === null || current.lastRun.deficitTokens <= 0) return undefined
+  return { text: `${SIDEBAR_OVER_BY_LABEL}: ${formatTokenCount(current.lastRun.deficitTokens)}`, tone: "normal" }
 }
 
 const sidebarCountersGroup = (current: SessionPanel): PanelRow[] => [
-  { text: `Evictions ${current.totals.evictions} (${formatBytes(current.totals.bytesReclaimed)} reclaimed)`, tone: "normal" },
-  { text: `Deduped ${current.totals.deduped}`, tone: "normal" },
-  { text: `Stash reads ${current.stashReads} (${current.totals.stashHits} hits)`, tone: "normal" },
+  { text: `${SIDEBAR_EVICTIONS_LABEL}: ${current.totals.evictions}, ~${formatTokenCount(current.totals.evictionTokensSaved)} ${SIDEBAR_TOKENS_UNIT}`, tone: "normal" },
+  { text: `${SIDEBAR_DEDUPED_LABEL}: ${current.totals.deduped}, ~${formatTokenCount(current.totals.dedupTokensSaved)} ${SIDEBAR_TOKENS_UNIT}`, tone: "normal" },
+  { text: `${SIDEBAR_STASH_READS_LABEL}: ${current.stashReads}, ${current.totals.stashHits} ${SIDEBAR_HITS_UNIT}`, tone: "normal" },
 ]
 
 const sidebarEvictionGroup = (entry: PanelEvictedEntry): PanelRow[] => [
@@ -597,9 +597,14 @@ export const sidebarRows = (data: PanelData): PanelRow[] => {
     groups.push([{ text: emptyStateText(data), tone: "muted" }])
     return withBlankSeparators(groups)
   }
-  groups.push([{ text: sidebarBudgetText(current), tone: "normal" }])
-  groups.push(sidebarLastRunGroup(current))
-  groups.push(sidebarCountersGroup(current))
+  const statGroup: PanelRow[] = [
+    { text: sidebarBudgetText(current), tone: "normal" },
+    { text: sidebarWatermarkText(current), tone: "normal" },
+  ]
+  const overByRow = sidebarOverByRow(current)
+  if (overByRow !== undefined) statGroup.push(overByRow)
+  statGroup.push(...sidebarCountersGroup(current))
+  groups.push(statGroup)
   const newestEviction = current.recentEvictions[0]
   if (newestEviction !== undefined) groups.push(sidebarEvictionGroup(newestEviction))
   return withBlankSeparators(groups)

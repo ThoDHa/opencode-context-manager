@@ -930,7 +930,7 @@ test("panelRows surfaces a log read error as the warning row and omits session d
   ])
 })
 
-test("sidebarRows spaces the session facts one per line in blank-line-separated groups", () => {
+test("sidebarRows renders the approved layout's header, stat block, and eviction footer as blank-line groups", () => {
   const data = {
     source: "/tmp/metrics.jsonl",
     activeSession: SESSION_A,
@@ -951,14 +951,12 @@ test("sidebarRows spaces the session facts one per line in blank-line-separated 
   assert.deepEqual(rows, [
     { text: "LRU context manager", tone: "header" },
     { text: " ", tone: "normal" },
-    { text: `Budget ~200k (per-model limit)`, tone: "normal" },
-    { text: " ", tone: "normal" },
-    { text: `Last run ~123.5k estimated`, tone: "normal" },
-    { text: "over ~100k watermark by ~23.5k", tone: "normal" },
-    { text: " ", tone: "normal" },
-    { text: `Evictions ${TOTALS_EVICTIONS} (12 kB reclaimed)`, tone: "normal" },
-    { text: `Deduped ${TOTALS_DEDUPED}`, tone: "normal" },
-    { text: `Stash reads ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} (${TOTALS_STASH_HITS} hits)`, tone: "normal" },
+    { text: "Budget: 200k", tone: "normal" },
+    { text: "Watermark: 100k", tone: "normal" },
+    { text: "Over by: 23.5k", tone: "normal" },
+    { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
+    { text: `Deduped: ${TOTALS_DEDUPED}, ~2.3k tokens`, tone: "normal" },
+    { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
     { text: " ", tone: "normal" },
     { text: "Last evicted: read /data/a.txt", tone: "muted" },
     { text: `3 kB, ${EVICTED_MESSAGES_AGO} messages ago`, tone: "muted" },
@@ -1058,14 +1056,12 @@ test("sidebarRows keeps the snapshot-fed session block under the warning group w
     assert.equal(rows[2].tone, "warning")
     assert.deepEqual(rows.slice(3), [
       { text: " ", tone: "normal" },
-      { text: `Budget ~200k (per-model limit)`, tone: "normal" },
-      { text: " ", tone: "normal" },
-      { text: `Last run ~123.5k estimated`, tone: "normal" },
-      { text: "over ~100k watermark by ~23.5k", tone: "normal" },
-      { text: " ", tone: "normal" },
-      { text: `Evictions ${TOTALS_EVICTIONS} (12 kB reclaimed)`, tone: "normal" },
-      { text: `Deduped ${TOTALS_DEDUPED}`, tone: "normal" },
-      { text: `Stash reads ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} (${TOTALS_STASH_HITS} hits)`, tone: "normal" },
+      { text: "Budget: 200k", tone: "normal" },
+      { text: "Watermark: 100k", tone: "normal" },
+      { text: "Over by: 23.5k", tone: "normal" },
+      { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
+      { text: `Deduped: ${TOTALS_DEDUPED}, ~2.3k tokens`, tone: "normal" },
+      { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
     ])
   })
 })
@@ -1084,14 +1080,12 @@ test("sidebarRows renders the log-fed fallback session in the spaced groups", as
     assert.deepEqual(sidebarRowsWithinWidth(data), [
       { text: "LRU context manager", tone: "header" },
       { text: " ", tone: "normal" },
-      { text: `Budget ~600 (per-model limit)`, tone: "normal" },
-      { text: " ", tone: "normal" },
-      { text: `Last run ~200k estimated`, tone: "normal" },
-      { text: "over ~100k watermark by ~23.5k", tone: "normal" },
-      { text: " ", tone: "normal" },
-      { text: `Evictions ${LOG_LINE_ONLY_EVICTIONS} (12 kB reclaimed)`, tone: "normal" },
-      { text: `Deduped ${TOTALS_DEDUPED}`, tone: "normal" },
-      { text: `Stash reads ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} (${TOTALS_STASH_HITS} hits)`, tone: "normal" },
+      { text: `Budget: 600`, tone: "normal" },
+      { text: "Watermark: 100k", tone: "normal" },
+      { text: "Over by: 23.5k", tone: "normal" },
+      { text: `Evictions: ${LOG_LINE_ONLY_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
+      { text: `Deduped: ${TOTALS_DEDUPED}, ~2.3k tokens`, tone: "normal" },
+      { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
       { text: " ", tone: "normal" },
       { text: "Last evicted: read /data/a.txt", tone: "muted" },
       { text: `3 kB, ${EVICTED_MESSAGES_AGO} messages ago`, tone: "muted" },
@@ -1099,7 +1093,7 @@ test("sidebarRows renders the log-fed fallback session in the spaced groups", as
   })
 })
 
-test("sidebarRows caps an over-long eviction line and huge byte totals at the sidebar column limit", () => {
+test("sidebarRows caps an over-long eviction line and the footer's huge byte total at the sidebar column limit", () => {
   const data = {
     source: "/tmp/metrics.jsonl",
     activeSession: SESSION_A,
@@ -1107,7 +1101,6 @@ test("sidebarRows caps an over-long eviction line and huge byte totals at the si
       [
         makeLine({
           evictedThisRun: [{ tool: "read", subject: OVER_LONG_SUBJECT, bytes: HUGE_RECLAIMED_BYTES, messagesAgo: EVICTED_MESSAGES_AGO }],
-          totals: { ...makeTotals(), bytesReclaimed: HUGE_RECLAIMED_BYTES },
         }),
       ],
       SESSION_A,
@@ -1119,13 +1112,11 @@ test("sidebarRows caps an over-long eviction line and huge byte totals at the si
   const rows = sidebarRowsWithinWidth(data)
 
   assert.ok(OVER_LONG_SUBJECT.length > SIDEBAR_COLUMN_LIMIT)
-  assert.equal(String(HUGE_RECLAIMED_BYTES).length, 12)
   assert.deepEqual(rows.slice(-3), [
     { text: " ", tone: "normal" },
     { text: `Last evicted: read /data/${"b".repeat(16)}…`, tone: "muted" },
     { text: `115 GB, ${EVICTED_MESSAGES_AGO} messages ago`, tone: "muted" },
   ])
-  assert.ok(rows.some((row) => row.text === `Evictions ${TOTALS_EVICTIONS} (115 GB reclaimed)`))
 })
 
 test("sidebarRows caps an over-long read error in the warning group at the sidebar column limit", () => {
@@ -1145,7 +1136,7 @@ test("sidebarRows caps an over-long read error in the warning group at the sideb
   ])
 })
 
-test("sidebarRows marks an unknown budget inactive and records a missing watermark like the panel", () => {
+test("sidebarRows restyles a null budget and a missing watermark into the colon forms without an over-by line", () => {
   const data = {
     source: "/tmp/metrics.jsonl",
     activeSession: SESSION_A,
@@ -1168,18 +1159,35 @@ test("sidebarRows marks an unknown budget inactive and records a missing waterma
   assert.deepEqual(sidebarRowsWithinWidth(data), [
     { text: "LRU context manager", tone: "header" },
     { text: " ", tone: "normal" },
-    { text: "Budget inactive (no budget)", tone: "normal" },
-    { text: " ", tone: "normal" },
-    { text: `Last run ~123.5k estimated`, tone: "normal" },
-    { text: "no watermark recorded", tone: "normal" },
-    { text: " ", tone: "normal" },
-    { text: `Evictions ${TOTALS_EVICTIONS} (12 kB reclaimed)`, tone: "normal" },
-    { text: `Deduped ${TOTALS_DEDUPED}`, tone: "normal" },
-    { text: `Stash reads ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} (${TOTALS_STASH_HITS} hits)`, tone: "normal" },
+    { text: "Budget: inactive (no budget)", tone: "normal" },
+    { text: "Watermark: none", tone: "normal" },
+    { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
+    { text: `Deduped: ${TOTALS_DEDUPED}, ~2.3k tokens`, tone: "normal" },
+    { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
   ])
 })
 
-test("sidebarRows renders the within-watermark relation when the deficit is zero or negative", () => {
+test("sidebarRows shows Watermark none for a present budget when only the watermark trio is null", () => {
+  const data = {
+    source: "/tmp/metrics.jsonl",
+    activeSession: SESSION_A,
+    current: sessionPanelData([makeLine({ watermarkTokens: null, deficitTokens: null, evictedThisRun: [] })], SESSION_A),
+    global: globalTotals([]),
+    error: undefined,
+  }
+
+  assert.deepEqual(sidebarRowsWithinWidth(data), [
+    { text: "LRU context manager", tone: "header" },
+    { text: " ", tone: "normal" },
+    { text: "Budget: 200k", tone: "normal" },
+    { text: "Watermark: none", tone: "normal" },
+    { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
+    { text: `Deduped: ${TOTALS_DEDUPED}, ~2.3k tokens`, tone: "normal" },
+    { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
+  ])
+})
+
+test("sidebarRows omits the over-by line when the deficit is zero or negative", () => {
   const makeWithinData = (deficitTokens: number): PanelData => ({
     source: "/tmp/metrics.jsonl",
     activeSession: SESSION_A,
@@ -1190,14 +1198,17 @@ test("sidebarRows renders the within-watermark relation when the deficit is zero
 
   for (const deficitTokens of [ZERO_DEFICIT, NEGATIVE_DEFICIT]) {
     const rows = sidebarRowsWithinWidth(makeWithinData(deficitTokens))
-    assert.deepEqual(rows.slice(4, 6), [
-      { text: `Last run ~123.5k estimated`, tone: "normal" },
-      { text: "within ~100k watermark", tone: "normal" },
+    assert.deepEqual(rows.slice(2), [
+      { text: `Budget: 200k`, tone: "normal" },
+      { text: "Watermark: 100k", tone: "normal" },
+      { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
+      { text: `Deduped: ${TOTALS_DEDUPED}, ~2.3k tokens`, tone: "normal" },
+      { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
     ])
   }
 })
 
-test("sidebarRows labels an override-sourced budget as a per-model override like the panel", () => {
+test("sidebarRows drops the budget source label while the panel keeps it", () => {
   const data = {
     source: "/tmp/metrics.jsonl",
     activeSession: SESSION_A,
@@ -1208,5 +1219,7 @@ test("sidebarRows labels an override-sourced budget as a per-model override like
 
   const rows = sidebarRowsWithinWidth(data)
 
-  assert.ok(rows.some((row) => row.text === "Budget ~200k (per-model override)"))
+  assert.ok(rows.some((row) => row.text === "Budget: 200k"))
+  assert.ok(!rows.some((row) => row.text.includes("override")))
+  assert.ok(panelRows(data).some((row) => row.text === "budget: ~200k tokens (per-model override)"))
 })
