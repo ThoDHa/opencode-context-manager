@@ -16,6 +16,7 @@ An [opencode](https://opencode.ai) plugin that manages context windows with LRU 
   - [Exemptions and hints](#exemptions-and-hints)
   - [Memory bounds](#memory-bounds)
   - [Metrics and live state](#metrics-and-live-state)
+  - [Full sample configuration](#full-sample-configuration)
 - [LRU Context Plugin Design](#lru-context-plugin-design)
   - [Why this plugin exists](#why-this-plugin-exists)
   - [The plugin landscape](#the-plugin-landscape)
@@ -128,6 +129,54 @@ However they arrive, options follow a drop-on-invalid discipline: a value failin
 | `liveStatePruneMaxAgeMs` | `number` | `604800000` (7 days) | finite, 0 or more (0 disables pruning) | Snapshot max age before prune |
 | `liveStatePruneMinIntervalMs` | `number` | `60000` (60 seconds) | finite, 0 or more (0 disables the throttle) | Minimum interval between prune directory scans |
 | `sidebarEnabled` | `boolean` | `true` | boolean; anything else falls back to true | Registers the session sidebar's `sidebar_content` slot; the `/lru` panel stays registered |
+
+### Full sample configuration
+
+The two plugin files take separate registrations: the core entry (`lru-context.ts`) takes every option above except `sidebarEnabled`, and the TUI entry (`lru-context.tui.tsx`) reads only `sidebarEnabled` through its own registration. Each first element below is the installed plugin file's path, so point it wherever your copies live.
+
+```json
+{
+  "plugin": [
+    [
+      "~/.config/opencode/plugin/lru-context.ts",
+      {
+        "watermark": 0.5,
+        "recentWindow": 4,
+        "minEvictableBytes": 2048,
+        "modelContextTokens": {},
+        "charsPerToken": 4,
+        "manualMode": false,
+        "userFenceEviction": { "enabled": false, "minBlockLines": 40 },
+        "protectedTools": ["task", "todowrite"],
+        "protectedPatterns": [],
+        "hintSubjects": 10,
+        "stashLimit": 50,
+        "stashSessions": 8,
+        "limitSessions": 8,
+        "hintSessions": 8,
+        "metricsSessions": 8,
+        "rememberedEvictedSubjects": 100,
+        "minSubstringMatchChars": 3,
+        "metricsLog": true,
+        "metricsPath": "~/.local/share/opencode/lru-metrics.jsonl",
+        "metricsRotationMaxBytes": 5242880,
+        "liveStateLog": true,
+        "liveStatePath": "~/.local/share/opencode/lru-state",
+        "liveStatePruneMaxAgeMs": 604800000,
+        "liveStatePruneMinIntervalMs": 60000
+      }
+    ],
+    [
+      "~/.config/opencode/plugin/lru-context.tui.tsx",
+      {
+        "sidebarEnabled": true
+      }
+    ]
+  ]
+}
+```
+
+Every value shown is that option's default, so omitting any key yields the same behavior, with one exception: the two path values are home-directory shorthand, and the plugin takes a configured path literally with no tilde expansion, so write `metricsPath` and `liveStatePath` expanded when you configure them; omitted, the plugin derives the real paths under your home directory. `defaultContextTokens` is absent because its default is unset, and adding it sets the fallback budget that applies when no model limit was captured.
 
 ## LRU Context Plugin Design
 
