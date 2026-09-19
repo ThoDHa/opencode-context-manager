@@ -34,7 +34,7 @@ An [opencode](https://opencode.ai) plugin that manages context windows with LRU 
 
 ## Installation
 
-Installing the plugin means placing its three source files (`lru-context.ts`, `lru-context.tui.tsx`, `lru-panel-data.ts`) in `~/.config/opencode/plugin/`, the directory the `Makefile` calls opencode's plugin directory. The `Makefile` automates the placement with symlinks and reverses it cleanly; the subsections cover the requirements, the make route, staying updated, the manual route, and the uninstall.
+Installing the plugin means placing its three source files (`lru-context.ts`, `lru-context.tui.tsx`, `lru-panel-data.ts`) in `~/.config/opencode/plugin/`, the directory the `Makefile` calls opencode's plugin directory. The `Makefile` automates the placement with symlinks and reverses it cleanly.
 
 ### Requirements
 
