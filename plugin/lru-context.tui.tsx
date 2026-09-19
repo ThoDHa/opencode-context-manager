@@ -75,6 +75,7 @@ type SidebarEntryProps = { api: TuiPluginApi; sessionID: string }
 
 const SidebarEntry = (props: SidebarEntryProps) => {
   const [rows, setRows] = createSignal<PanelRow[]>([])
+  let disposed = false
   onMount(() => {
     const refresh = async (): Promise<void> => {
       let next: PanelRow[] = []
@@ -85,11 +86,14 @@ const SidebarEntry = (props: SidebarEntryProps) => {
         // Startup and log rotation produce transient read failures; hide the
         // entry for that tick and let the next poll repaint it.
       }
-      setRows(next)
+      if (!disposed) setRows(next)
     }
     void refresh()
     const poll = setInterval(() => void refresh(), SIDEBAR_REFRESH_MS)
-    onCleanup(() => clearInterval(poll))
+    onCleanup(() => {
+      disposed = true
+      clearInterval(poll)
+    })
   })
   return <RowsView api={props.api} rows={rows()} />
 }
