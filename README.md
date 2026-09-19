@@ -1,6 +1,83 @@
 # opencode-lru-context
 
-An [opencode](https://opencode.ai) plugin that manages context windows with LRU eviction: it transforms chat requests to evict the least recently used tool outputs, reasoning blocks, duplicated attachments, and oversized fenced blocks, replaces evicted content with tombstones that can be restored through the `read_evicted` tool, reports live counters through `lru_stats`, and serves a `/lru` sidebar panel over the same data. Run `make test` for the test suite and `make install` to symlink the plugin files into `~/.config/opencode/plugin/`.
+An [opencode](https://opencode.ai) plugin that manages context windows with LRU eviction: it transforms chat requests to evict the least recently used tool outputs, reasoning blocks, duplicated attachments, and oversized fenced blocks, replaces evicted content with tombstones that can be restored through the `read_evicted` tool, reports live counters through `lru_stats`, and serves a `/lru` sidebar panel over the same data. [Installation](#installation) covers setup, updates, and removal.
+
+## Contents
+
+- [Installation](#installation)
+  - [Requirements](#requirements)
+  - [Install](#install)
+  - [How it runs](#how-it-runs)
+  - [Staying updated](#staying-updated)
+  - [Manual install](#manual-install)
+  - [Uninstall](#uninstall)
+- [LRU Context Plugin Design](#lru-context-plugin-design)
+  - [Why this plugin exists](#why-this-plugin-exists)
+    - [Why it is needed](#why-it-is-needed)
+    - [What exists today](#what-exists-today)
+    - [Why the alternatives are not good enough](#why-the-alternatives-are-not-good-enough)
+    - [Where this design is better, and where it is not](#where-this-design-is-better-and-where-it-is-not)
+    - [The plugin landscape](#the-plugin-landscape)
+  - [What the plugin does](#what-the-plugin-does)
+    - [Budget resolution and token accounting](#budget-resolution-and-token-accounting)
+    - [The no-loss passes](#the-no-loss-passes)
+    - [Watermark eviction](#watermark-eviction)
+    - [The stash and read_evicted](#the-stash-and-read_evicted)
+    - [User-fence eviction](#user-fence-eviction)
+    - [Manual mode](#manual-mode)
+    - [Observability: the hint line, the metrics log, lru_stats, the panel](#observability-the-hint-line-the-metrics-log-lru_stats-the-panel)
+  - [Why it works: the token economics](#why-it-works-the-token-economics)
+    - [The re-send tax](#the-re-send-tax)
+    - [Tier by tier](#tier-by-tier)
+  - [When it fires and when it never does](#when-it-fires-and-when-it-never-does)
+  - [Honest limits](#honest-limits)
+
+## Installation
+
+Installing the plugin means placing its three source files (`lru-context.ts`, `lru-context.tui.tsx`, `lru-panel-data.ts`) in `~/.config/opencode/plugin/`, the directory the `Makefile` calls opencode's plugin directory. The `Makefile` automates the placement with symlinks and reverses it cleanly; the subsections cover the requirements, the make route, staying updated, the manual route, and the uninstall.
+
+### Requirements
+
+- [opencode](https://opencode.ai), the host application: its sessions run the plugin, and its TUI serves the `/lru` panel
+- git, to clone this repository and to pull later updates into it
+- make, to run the `test`, `install`, and `uninstall` targets the `Makefile` defines
+- node, to run the test suite, since `make test` invokes `node --test` over the plugin core suite (`tests/lru-context.test.ts`) and the panel data suite (`tests/lru-panel-data.test.ts`)
+
+### Install
+
+```sh
+git clone https://github.com/ThoDHa/opencode-lru-context.git
+cd opencode-lru-context
+make test
+make install
+```
+
+`make install` creates `~/.config/opencode/plugin/` when it is missing and symlinks the three plugin files into it. The install is idempotent: a rerun replaces existing symlinks in place. It never overwrites anything else: when a regular file or directory occupies a target path, the install aborts with an error naming the path, and the file must be removed by hand before the install can succeed.
+
+### How it runs
+
+The design section documents the loading in deployment terms: `opencode.json`'s `plugin` array names `./plugin/lru-context.ts`, and every opencode session, interactive and subagent alike, then runs the plugin; the three files that mechanism names are the same three the install links into place. In a session, the surfaces to check are the ones [What the plugin does](#what-the-plugin-does) documents: `lru_stats` reports the live counters, the `/lru` panel (the `lru.panel` command) renders the metrics log as a read-only view, and eventful runs append one line each to `~/.local/share/opencode/lru-metrics.jsonl`.
+
+### Staying updated
+
+The installed entries are symlinks into the clone, so an update is `git pull` in the repository: the links resolve into the working tree, and the code the plugin runs is whatever the pull left there. `make test` re-runs the two suites against the pulled tree.
+
+### Manual install
+
+On a machine without make, the same layout is a handful of commands from the repository root:
+
+```sh
+mkdir -p ~/.config/opencode/plugin
+ln -sfn "$PWD/plugin/lru-context.ts" ~/.config/opencode/plugin/lru-context.ts
+ln -sfn "$PWD/plugin/lru-context.tui.tsx" ~/.config/opencode/plugin/lru-context.tui.tsx
+ln -sfn "$PWD/plugin/lru-panel-data.ts" ~/.config/opencode/plugin/lru-panel-data.ts
+```
+
+Copying the files instead of linking them works too, with one asymmetry: `make uninstall` removes only symlinks, so copies must be removed by hand as well.
+
+### Uninstall
+
+`make uninstall` removes the three plugin symlinks from `~/.config/opencode/plugin/`. Only symlinks are removed: a regular file left at a target path by a manual copy is untouched, and the repository checkout is unaffected.
 
 ## LRU Context Plugin Design
 
