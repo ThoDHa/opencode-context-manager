@@ -1,6 +1,6 @@
 # opencode-lru-context
 
-An [opencode](https://opencode.ai) plugin that manages context windows with LRU eviction: it transforms chat requests to evict the least recently used tool outputs, reasoning blocks, duplicated attachments, and oversized fenced blocks, replaces evicted content with tombstones that can be restored through the `read_evicted` tool, reports live counters through `lru_stats`, and serves a `/lru` sidebar panel over the same data. [Installation](#installation) covers setup, updates, and removal.
+An [opencode](https://opencode.ai) plugin that manages context windows with LRU eviction: it transforms chat requests to evict the least recently used tool outputs, reasoning blocks, duplicated attachments, and oversized fenced blocks, replaces evicted content with tombstones that can be restored through the `read_evicted` tool, reports live counters through `lru_stats`, and serves a `/lru` panel plus a persistent session-sidebar summary over the same data. [Installation](#installation) covers setup, updates, and removal; [Configuration](#configuration) covers the option surface.
 
 ## Contents
 
@@ -11,6 +11,11 @@ An [opencode](https://opencode.ai) plugin that manages context windows with LRU 
   - [Staying updated](#staying-updated)
   - [Manual install](#manual-install)
   - [Uninstall](#uninstall)
+- [Configuration](#configuration)
+  - [Budget and eviction](#budget-and-eviction)
+  - [Exemptions and hints](#exemptions-and-hints)
+  - [Memory bounds](#memory-bounds)
+  - [Metrics and live state](#metrics-and-live-state)
 - [LRU Context Plugin Design](#lru-context-plugin-design)
   - [Why this plugin exists](#why-this-plugin-exists)
   - [The plugin landscape](#the-plugin-landscape)
@@ -20,7 +25,7 @@ An [opencode](https://opencode.ai) plugin that manages context windows with LRU 
     - [Watermark eviction](#watermark-eviction)
     - [The stash and read_evicted](#the-stash-and-read_evicted)
     - [User-fence eviction](#user-fence-eviction)
-    - [Observability: the metrics log, the live-state snapshot, lru_stats, the panel](#observability-the-metrics-log-the-live-state-snapshot-lru_stats-the-panel)
+    - [Observability](#observability)
   - [Why it works: the token economics](#why-it-works-the-token-economics)
   - [When it fires and when it never does](#when-it-fires-and-when-it-never-does)
   - [Honest limits](#honest-limits)
@@ -31,7 +36,7 @@ Installing the plugin means placing its three source files (`lru-context.ts`, `l
 
 ### Requirements
 
-- [opencode](https://opencode.ai), the host application: its sessions run the plugin, and its TUI serves the `/lru` panel
+- [opencode](https://opencode.ai), the host application: its sessions run the plugin, and its TUI serves the `/lru` panel and the session sidebar
 - git, to clone this repository and to pull later updates into it
 - make, to run the `test`, `install`, and `uninstall` targets the `Makefile` defines
 - node, to run the test suite, since `make test` invokes `node --test` over the plugin core suite (`tests/lru-context.test.ts`) and the panel data suite (`tests/lru-panel-data.test.ts`)
@@ -49,7 +54,7 @@ make install
 
 ### How it runs
 
-The design section documents the loading in deployment terms: `opencode.json`'s `plugin` array names `./plugin/lru-context.ts`, and every opencode session, interactive and subagent alike, then runs the plugin; the three files that mechanism names are the same three the install links into place. In a session, the surfaces to check are the ones [What the plugin does](#what-the-plugin-does) documents: `lru_stats` reports the live counters, the `/lru` panel (the `lru.panel` command) renders the session's live-state snapshot and metrics log as a read-only view, eventful runs append one line each to `~/.local/share/opencode/lru-metrics.jsonl`, and every run with a last-run record rewrites the session's snapshot under `~/.local/share/opencode/lru-state/`.
+The install is the whole deployment: the three symlinked files sit in opencode's plugin directory, so every opencode session, interactive and subagent alike, runs the plugin with no config file entry required; [Configuration](#configuration) documents the option surface and the wiring that delivers it. In a session, the surfaces to check are the ones [What the plugin does](#what-the-plugin-does) documents: `lru_stats` reports the live counters, the `/lru` panel and the session sidebar render the same summary over the live-state snapshot and metrics log, eventful runs append one line each to `~/.local/share/opencode/lru-metrics.jsonl`, and every run with a last-run record rewrites the session's snapshot under `~/.local/share/opencode/lru-state/`.
 
 ### Staying updated
 
@@ -72,9 +77,60 @@ Copying the files instead of linking them works too. Unlike `make install`, thes
 
 `make uninstall` removes the three plugin symlinks from `~/.config/opencode/plugin/`. Only symlinks are removed: a regular file left at a target path by a manual copy is untouched and must be removed by hand, and the repository checkout is unaffected.
 
+## Configuration
+
+The plugin reads its options from the second argument opencode passes to a plugin function. In `opencode.json`'s `plugin` array an entry may be a plain string or a two-element tuple naming the plugin plus an options object; the tuple form is confirmed against the `@opencode-ai/plugin` type surface (version 1.18.5: `plugin?: Array<string | [string, PluginOptions]>`, with the object delivered as the plugin function's second parameter), while the official plugin and config pages document string entries only and are silent on options, so the tuple form is a type-surface fact, not a documented one. Two adjacent gaps are stated rather than papered over: the docs do not say how or whether options reach a plugin loaded from the plugin directory that `make install` populates, and they do not say what a plain string entry passes as options; the tuple entry is the only options channel verifiable today.
+
+However they arrive, options follow a drop-on-invalid discipline: a value failing the validation below is discarded and the documented default applies, so a mistyped option degrades to default behavior instead of blocking a session. One consequence is worth naming: `charsPerToken` accepts any finite number above zero, so extreme-but-valid values are not rejected either; a tenth or a ten-thousand-fold factor is accepted and the token estimate degrades gracefully with it (eviction starts implausibly early or late while the zero-loss passes and the budget resolution stay correct).
+
+### Budget and eviction
+
+| Option | Type | Default | Validation | Effect |
+|---|---|---|---|---|
+| `watermark` | `number` | `0.5` | above 0 and below 1 | Fraction of the context budget at which eviction starts |
+| `recentWindow` | `number` | `4` | number, 0 or more, floored | Messages treated as hot; shielded from eviction, reasoning expiry, input purge, and fence eviction |
+| `minEvictableBytes` | `number` | `2048` | 0 or more | Output size floor for evictability and for dedup supersede |
+| `defaultContextTokens` | `number` | unset | finite and above 0 | Fallback budget when no model limit was captured |
+| `modelContextTokens` | `Record<string, number>` | `{}` | per-entry finite and above 0 | Per `providerID/modelID` budget override |
+| `charsPerToken` | `number` | `4` | finite and above 0, floats allowed | Chars-per-token factor for the token estimate and eviction's reclaim accounting |
+| `manualMode` | `boolean` | `false` | boolean; anything else falls back to false | Disables budget-driven eviction; measurement-only runs |
+| `userFenceEviction` | `object` | `{ enabled: false, minBlockLines: 40 }` | `enabled` boolean; `minBlockLines` integer 0 or more | Evicts large fenced code blocks from old user messages |
+
+### Exemptions and hints
+
+| Option | Type | Default | Validation | Effect |
+|---|---|---|---|---|
+| `protectedTools` | `string[]` | `["task", "todowrite"]` | array of non-empty strings | Tool names never evicted |
+| `protectedPatterns` | `string[]` | `[]` | array of non-empty strings | Glob patterns protecting subjects and bash commands from eviction |
+| `hintSubjects` | `number` | `10` | integer, 0 or more (0 disables hints) | Cap on hot subjects in the hint line and the snapshot |
+
+### Memory bounds
+
+| Option | Type | Default | Validation | Effect |
+|---|---|---|---|---|
+| `stashLimit` | `number` | `50` | integer, 0 or more (0 turns stash retention off) | Per-session cap on stashed evictions; reported as `capacity` by `lru_stats` and the snapshot |
+| `stashSessions` | `number` | `8` | integer, 1 or more | Sessions keeping reloadable eviction stashes, least recently active evicted first |
+| `limitSessions` | `number` | `8` | integer, 1 or more | Sessions keeping captured context budgets |
+| `hintSessions` | `number` | `8` | integer, 1 or more | Sessions keeping hot-subject hint lines |
+| `metricsSessions` | `number` | `8` | integer, 1 or more | Sessions keeping live metrics counters |
+| `rememberedEvictedSubjects` | `number` | `100` | integer, 0 or more (0 disables post-eviction touch counting) | Evicted subjects remembered per session for touch counting |
+| `minSubstringMatchChars` | `number` | `3` | integer, 0 or more | Length a bash command must exceed for substring refresh matching (exact match always wins) |
+
+### Metrics and live state
+
+| Option | Type | Default | Validation | Effect |
+|---|---|---|---|---|
+| `metricsLog` | `boolean` | `true` | boolean | Metrics JSONL logging on or off |
+| `metricsPath` | `string` | `~/.local/share/opencode/lru-metrics.jsonl` | non-empty string | Metrics log location |
+| `metricsRotationMaxBytes` | `number` | `5242880` (5 MiB) | finite, 0 or more (0 disables rotation) | Metrics log rotation cap |
+| `liveStateLog` | `boolean` | `true` | boolean | Live snapshot writes on or off |
+| `liveStatePath` | `string` | `~/.local/share/opencode/lru-state` | non-empty string | Snapshot directory |
+| `liveStatePruneMaxAgeMs` | `number` | `604800000` (7 days) | finite, 0 or more (0 disables pruning) | Snapshot max age before prune |
+| `liveStatePruneMinIntervalMs` | `number` | `60000` (60 seconds) | finite, 0 or more (0 disables the throttle) | Minimum interval between prune directory scans |
+
 ## LRU Context Plugin Design
 
-The LRU context manager is the plugin at `plugin/lru-context.ts`, with the TUI panel in `lru-context.tui.tsx` and the panel's data layer in `lru-panel-data.ts`. It hooks the transform opencode runs on the message list before every model call and trims what the provider is about to receive. `make test` pins the mechanism claims (core suite `tests/lru-context.test.ts`, panel data suite `tests/lru-panel-data.test.ts`); the comparisons, the economics, and the observed session below are argument and measurement, not test outputs.
+The LRU context manager is the plugin at `plugin/lru-context.ts`, with the TUI panel and sidebar in `lru-context.tui.tsx` and their shared data layer in `lru-panel-data.ts`. It hooks the transform opencode runs on the message list before every model call and trims what the provider is about to receive. `make test` pins the mechanism claims (core suite `tests/lru-context.test.ts`, panel data suite `tests/lru-panel-data.test.ts`); the comparisons, the economics, and the observed session below are argument and measurement, not test outputs.
 
 ### Why this plugin exists
 
@@ -82,11 +138,11 @@ Chat APIs are stateless: every request re-sends the conversation so far, so per-
 
 opencode's config schema (https://opencode.ai/config.json) ships adjacent mechanisms: `tool_output.max_lines` and `tool_output.max_bytes` (defaults 2000 and 51200) truncate oversized tool output at ingestion, full text saved to disk and a preview returned, bounding what enters rather than what accumulates; `compaction.auto` (default true) fires, in the schema's words, "when context is full", with retention knobs (`tail_turns`, `preserve_recent_tokens`, `reserved`) and a manual on-demand form; `compaction.prune` (default false) clears old tool outputs into markers; per-model `cache_read` and `cache_write` pricing makes re-sent history cheaper rather than smaller. Each leaves the gap this plugin targets: compaction is reactive at the ceiling, one large lossy event whose summaries have no recovery path; the prune is positional, unaware of what the model still touches, its markers naming no subject, size, or way back; caching leaves the model attending over the full context with unknown quota effects.
 
-This plugin maintains per turn under a chosen watermark, tiers by information value (zero-loss dedup and expiry every turn; eviction last, only above the watermark, against candidates ordered by recency), makes eviction reversible through the stash and `read_evicted`, is observable end to end (metrics log, live-state snapshot, `lru_stats`, the `/lru` panel), and keeps native auto compaction as the overflow backstop. Two admissions bound it: on sessions that never grow it is inert, and where a provider discounts cached prefixes heavily its trimming can forfeit more in lost cache hits than it recovers in bytes; it does not model cache state and does not claim to.
+This plugin maintains per turn under a chosen watermark, tiers by information value (zero-loss dedup and expiry every turn; eviction last, only above the watermark, against candidates ordered by recency), makes eviction reversible through the stash and `read_evicted`, is observable end to end (metrics log, live-state snapshot, `lru_stats`, the `/lru` panel, the session sidebar), and keeps native auto compaction as the overflow backstop. Two admissions bound it: on sessions that never grow it is inert, and where a provider discounts cached prefixes heavily its trimming can forfeit more in lost cache hits than it recovers in bytes; it does not model cache state and does not claim to.
 
 ### The plugin landscape
 
-The third-party field (public descriptions and repository metadata as of 2026-09-18, the Sleev site as captured 2026-09-07) confirms the gap rather than filling it. DCP (`Opencode-DCP/opencode-dynamic-context-pruning`, about 4.2k stars, AGPL-3.0) is the strongest entry: a model-invoked `compress` tool replaces stale conversation spans with LLM-written summaries, and its deduplication and errored-input-purge strategies are adopted deliberately here as two of this plugin's passes; beyond that shared layer it fails every design commitment (model tokens spent per pass, the model deciding when and what to compress, the summary the only carrier of a replaced span with no reload path, recency gating a fixed turn window instead of refreshing on use), and its README measures the cache trade-off flagged below as this design's largest risk (roughly 85 percent hit rate with pruning against 90 without). Sleev, DCP's commercial successor proxying Claude Code, Codex, and OpenCode, shares the summary cost model and adds an infrastructure dependency every request routes through, where this design's problem is one opencode install kept deterministic and dependency-free. The observability projects (`IgorWarzocha/Opencode-Context-Analysis-Plugin`, about 180 stars, stale since 2025-10, no license, which alone bars code reuse; `ttalkkak-lab/opencode-contexty`, AGPL-3.0) analyze rather than trim, contexty's one trimming path being an embedded DCP configuration. `viiqswim/opencode-compaction-guard` repairs the native collapse's `tool_use without tool_result` failure, which this design's passes never cause; the better lever is shrinking how often the collapse fires. Upstream was asked for both halves of this design (issue #22407: pointer-based retrieval for compacted tool results; issue #32189: context-aware pruning) and closed both without maintainer engagement. The standing divergences: no pass calls a model, nothing reduced to a summary is unrecoverable, trimming adds zero marginal token cost, and eviction follows touches rather than position or model judgment.
+The third-party field (public descriptions and repository metadata as of 2026-09-18, the Sleev site as captured 2026-09-07) confirms the gap rather than filling it. DCP (`Opencode-DCP/opencode-dynamic-context-pruning`, about 4.2k stars, AGPL-3.0) is the strongest entry: a model-invoked `compress` tool replaces stale conversation spans with LLM-written summaries, and its deduplication and errored-input-purge strategies are adopted deliberately here as two of this plugin's passes; beyond that shared layer it fails every design commitment (model tokens spent per pass, the model deciding when and what to compress, the summary the only carrier of a replaced span with no reload path, recency gating a fixed turn window instead of refreshing on use), and its README measures the cache trade-off flagged below as this design's largest risk (roughly 85 percent hit rate with pruning against 90 without). Sleev, DCP's commercial successor proxying Claude Code, Codex, and OpenCode, shares the summary cost model and adds an infrastructure dependency every request routes through, where this design's problem is one opencode install kept deterministic and dependency-free. The observability projects (`IgorWarzocha/Opencode-Context-Analysis-Plugin`, about 180 stars, stale since 2025-10, no license, which alone bars code reuse; `ttalkkak-lab/opencode-contexty`, AGPL-3.0) analyze rather than trim, contexty's one trimming path being an embedded DCP configuration. `viiqswim/opencode-compaction-guard` repairs the native collapse's `tool_use without tool_result` failure, which this design's passes never cause; the better lever is shrinking how often the collapse fires. Upstream was asked for both halves of this design (issue #22407: pointer-based retrieval for compacted tool results; issue #32189: context-aware pruning) and closed both without maintainer engagement.
 
 ### Why Claude Code does not need this
 
@@ -96,7 +152,7 @@ The honest nuance is that the native mechanisms are lossy too: the documentation
 
 ### What the plugin does
 
-`opencode.json`'s `plugin` array names `./plugin/lru-context.ts`, so every opencode session runs the plugin, interactive and subagent alike. The surface is three hooks and two tools: `chat.params` captures the session's context budget when the model is chosen, `experimental.chat.messages.transform` rewrites the outgoing message list on every turn, and `experimental.chat.system.transform` delivers a one-line hint into the system prompt; `read_evicted` reloads evicted content from the session stash, and `lru_stats` reports the live counters as JSON. The `/lru` TUI panel (the `lru.panel` command, registered by `lru-context.tui.tsx`) is a read-only view over the plugin's metrics log and the per-session live-state snapshot.
+Loaded from opencode's plugin directory (the install's symlink target), the plugin runs in every session opencode opens, a subagent's included. The surface is three hooks and two tools: `chat.params` captures the session's context budget when the model is chosen, `experimental.chat.messages.transform` rewrites the outgoing message list on every turn, and `experimental.chat.system.transform` delivers a one-line hint into the system prompt; `read_evicted` reloads evicted content from the session stash, and `lru_stats` reports the live counters as JSON. The `/lru` TUI panel (the `lru.panel` command, registered by `lru-context.tui.tsx`) and the same file's persistent session-sidebar entry are read-only views over the plugin's metrics log and the per-session live-state snapshot.
 
 One transform run executes, in order:
 
@@ -112,7 +168,7 @@ One transform run executes, in order:
 
 After the passes, the run counts post-eviction touches, records counters, stores the hint line for the next system-prompt build, appends one metrics-log line when the run did anything at all, and rewrites the session's live-state snapshot.
 
-Token accounting is approximate by design: text parts and completed tool outputs are sized in characters divided by four, carrying tokenizer error without needing a tokenizer. The context budget resolves in a fixed order: a `modelContextTokens` entry keyed `providerID/modelID`, then the model's declared context limit from `chat.params` (accepted only when finite and positive), then an explicit `defaultContextTokens`, then nothing; unknown means eviction stands down rather than inventing a budget, while dedup, purge, expiry, fence eviction, and the hint still run and native auto-compaction remains the overflow backstop. The watermark is half the budget (the `watermark` ratio defaults to 0.5 and must lie strictly between 0 and 1), `recentWindow` defaults to 4 messages, `minEvictableBytes` to 2048.
+Token accounting is approximate by design: text parts and completed tool outputs are sized in characters divided by the `charsPerToken` factor (four by default), carrying tokenizer error without needing a tokenizer. The context budget resolves in a fixed order: a `modelContextTokens` entry keyed `providerID/modelID`, then the model's declared context limit from `chat.params` (accepted only when finite and positive), then an explicit `defaultContextTokens`, then nothing; unknown means eviction stands down rather than inventing a budget, while dedup, purge, expiry, fence eviction, and the hint still run and native auto-compaction remains the overflow backstop. The watermark is half the budget (the `watermark` ratio defaults to 0.5 and must lie strictly between 0 and 1), `recentWindow` defaults to 4 messages, `minEvictableBytes` to 2048.
 
 #### The no-loss passes
 
@@ -122,7 +178,7 @@ The errored-input purge keeps a failed call's error output (often the only recor
 
 #### Watermark eviction
 
-Every completed tool output of at least `minEvictableBytes` that is not already a tombstone is an evictable candidate, with subjects extracted: file paths (with `offset`/`limit` ranges when present), grep and glob `pattern` strings, bash command strings. A candidate's `lastTouch` starts at its own message index and refreshes forward on any later call against the same subject: exact match for paths, substring containment for bash commands over three characters, ranged and whole-path calls refreshing each other. Exemptions: outputs last touched inside the recent window, the `task` and `todowrite` tools (the `protectedTools` default, overridable), subjects matched by the `protectedPatterns` glob list (a bash command's path is the command, so the same globs guard commands), outputs under the floor, and anything already tombstoned.
+Every completed tool output of at least `minEvictableBytes` that is not already a tombstone is an evictable candidate, with subjects extracted: file paths (with `offset`/`limit` ranges when present), grep and glob `pattern` strings, bash command strings. A candidate's `lastTouch` starts at its own message index and refreshes forward on any later call against the same subject: exact match for paths, substring containment for bash commands whose length exceeds `minSubstringMatchChars` (three by default), ranged and whole-path calls refreshing each other. Exemptions: outputs last touched inside the recent window, the `task` and `todowrite` tools (the `protectedTools` default, overridable), subjects matched by the `protectedPatterns` glob list (a bash command's path is the command, so the same globs guard commands), outputs under the floor, and anything already tombstoned.
 
 Candidates sort coldest first (ascending `lastTouch`, ties by descending size); above the watermark the plugin computes the token deficit and walks the list until the reclaim covers it, so a one-token overshoot evicts exactly one output, and only the evicted output's own bytes earn credit (tombstone and digest bytes stay in context), so `bytesReclaimed` never overstates what left. A tombstone reads, in one line: `[lru-evicted] <tool> <subject> (<bytes> bytes[, attachments dropped], ~<age> messages ago) was evicted to reclaim context; re-run the tool to reload its output. Output digest: <digest>. Evicted output stashed; reload it with read_evicted (subject "<subject>").` The subject caps at 160 characters. The digest is deterministic string work, so identical content always yields an identical digest: `read` outputs contribute the subject plus previews of the first and last lines, `bash` outputs the command plus head and tail lines, every other tool a bounded excerpt of the output head; newlines collapse and the whole digest caps at 200 characters. Attachments leave with the output: the evicted part loses its `state.attachments` array entirely and the tombstone gains the `attachments dropped` clause.
 
@@ -134,15 +190,19 @@ Eviction does not destroy: each evicted output enters a per-session in-memory st
 
 Fence eviction is the one pass that edits user prose, so it ships default-off behind `userFenceEviction` (`{ enabled: false, minBlockLines: 40 }` when unset). When enabled, it scans the text parts of user messages outside the recent window for fenced code blocks under CommonMark fence rules: an opener is at least three backticks after at most three spaces of indent (four or more spaces is indented code, never a fence, and an info string holding a backtick never opens a block), the closer needs at least as many backticks as the opener, an unterminated block is never touched, an all-blank block is never evicted since it names nothing. A closed block whose content spans strictly more than `minBlockLines` lines becomes an `[lru-evicted-fence]` tombstone naming the language tag (the first word of the info string when present), the content line count, and the first non-empty content line as the reload subject; the prose before, between, and after the fences is preserved byte for byte, the exact removed span enters the session stash for verbatim `read_evicted` restore, and the pass runs before the budget decision, so fence bytes lower the estimate and can spare tool outputs an eviction.
 
-#### Observability: the metrics log, the live-state snapshot, lru_stats, the panel
+#### Observability
 
 After each run the plugin stores a `[lru-hot] recently active: ...` line naming up to ten (`hintSubjects`) most recently touched live subjects, newest first; the system-prompt hook appends it or replaces the previous one in place, making the working set visible so tombstones stay navigable.
 
 The metrics log is on by default and appends to `~/.local/share/opencode/lru-metrics.jsonl` (`metricsPath` relocates it). Every eventful run appends one JSON line; eventful means at least one eviction, dedup tombstone, expired reasoning part, fence eviction, or post-eviction touch, or any stash read since the previous line, so quiet runs write nothing. Each line carries a timestamp, the session id, the budget with its source (`override`, `model`, `default`, or `unknown`), the estimate against watermark and deficit, per-entry eviction records (tool, subject, bytes, attachment bytes, age in messages), dedup, expiry, fence, and touch counts, stash reads since the previous line, and running totals. `bytesReclaimed` counts evicted output and attachment data-URI characters plus fence-block bytes; dedup is count-only, expiry bytes go to `reasoningBytesExpired`, purged inputs count nowhere. `metricsRotationMaxBytes` (default 5 MiB, `0` disables) renames the file to `<metricsPath>.1` before an append that would exceed the cap, so only the current and previous generations exist; a failed stat, rename, or append surfaces as `logWriteError` through `lru_stats` without interrupting the session. A post-eviction touch, a later call re-referencing an evicted subject, is the feedback signal that makes eviction's error rate measurable rather than assumed.
 
-The live-state snapshot is the panel's second data source, on by default (`liveStateLog`; `liveStatePath` relocates the directory, `~/.local/share/opencode/lru-state/`). Every transform run with a last-run record rewrites `<session id>.json` there: a timestamp, the session id, manual mode, the resolved budget and its source, the last run against watermark and deficit, running totals, stash occupancy and capacity, and the hot subjects. The write is atomic (a sibling temp file renamed into place, never a torn read), a failure surfaces as `stateWriteError` through `lru_stats`, and files older than `liveStatePruneMaxAgeMs` (default seven days, `0` disables pruning) are removed on a directory scan throttled to one per `liveStatePruneMinIntervalMs` (default 60 seconds, `0` disables the throttle). Because the snapshot covers quiet runs, live state exists even when the log is silent.
+The live-state snapshot is the second data source for both TUI views, on by default (`liveStateLog`; `liveStatePath` relocates the directory, `~/.local/share/opencode/lru-state/`). Every transform run with a last-run record rewrites `<session id>.json` there: a timestamp, the session id, manual mode, the resolved budget and its source, the last run against watermark and deficit, running totals, stash occupancy and capacity, and the hot subjects. The write is atomic (a sibling temp file renamed into place, never a torn read), a failure surfaces as `stateWriteError` through `lru_stats`, and files older than `liveStatePruneMaxAgeMs` (default seven days, `0` disables pruning) are removed on a directory scan throttled to one per `liveStatePruneMinIntervalMs` (default 60 seconds, `0` disables the throttle). Because the snapshot covers quiet runs, live state exists even when the log is silent.
 
-`lru_stats` returns the resolved options, the effective budget with its source, stash occupancy and capacity, every counter, and the last run's estimate, watermark, and deficit. The `/lru` panel renders the same story through `panelRows` in `lru-panel-data.ts`, so the exact text is unit-tested without a terminal: opening reads the log anew, filters to the TUI route's session, and prefers the live snapshot for the session block (a session log line newer than the snapshot wins the fields it carries; a missing or malformed snapshot falls back to the log), showing the budget with its source, the last run against the watermark, cumulative counters, the newest evictions capped at eight, and a history line counting every parsed line in the log (its whole lifetime with rotation disabled, the current generation only with rotation enabled). Degradation is explicit: "no active session" outside a session, "no metrics recorded for this session yet" for a session with no runs, malformed lines skipped at parse, and an unreadable log leaving the snapshot-fed session block under a warning row when a snapshot serves the session, header and warning row alone otherwise.
+`lru_stats` returns an echo of the resolved options (a fixed subset covering the budget, logging, and mode settings, not the full [Configuration](#configuration) surface), the effective budget with its source, stash occupancy and capacity, every counter, and the last run's estimate, watermark, and deficit; it stays the full-detail surface. The rows the two views no longer spend stay reachable elsewhere: session id, stash occupancy, and the stash hit, miss, and drop counters through `lru_stats`, hot subjects through the hint line and the session snapshot, and the unfiltered run history only in the metrics log itself. Each view reads the log anew at open or poll, filters to the session it serves, and prefers the live snapshot for the session block: a session log line newer than the snapshot wins the fields it carries, and a missing or malformed snapshot falls back to the log. What renders is the same four or five rows through one shared code path (`panelRows` in `lru-panel-data.ts`), so the exact text is unit-tested without a terminal and panel and sidebar cannot drift: a header row (`LRU context manager`, suffixed `(manual)` only in manual mode), the budget with its source, the last run against the watermark with the deficit, one compact counters line (evictions with reclaimed bytes, dedup count, stash reads with hit count), and, once an eviction exists, the newest one as a single muted line naming tool, subject, size, and age.
+
+The sidebar entry registers through the TUI plugin API's `sidebar_content` slot and re-renders on a five-second poll of the same two files, visible only while the session has recorded data: a tick whose log read fails with no snapshot to fall back on hides it for that tick (startup and log rotation produce such transient failures), and the next poll repaints. The poll's timer and its post-await writes are dispose-guarded, so a route change or plugin shutdown cannot write through a disposed component.
+
+Degradation is explicit and comes through the same shared rows: "no active session" outside a session, "no metrics recorded for this session yet" for a session with no runs, malformed lines skipped at parse, and an unreadable log leaving the snapshot-fed session block under a warning row when a snapshot serves the session, header and warning row alone otherwise.
 
 ### Why it works: the token economics
 
