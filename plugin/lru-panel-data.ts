@@ -49,10 +49,12 @@ export type PanelEvictedEntry = {
 export type PanelTotals = {
   evictions: number
   bytesReclaimed: number
+  evictionTokensSaved: number
   stashHits: number
   stashMisses: number
   stashDropped: number
   deduped: number
+  dedupTokensSaved: number
   reasoningExpired: number
   reasoningBytesExpired: number
   fenceEvicted: number
@@ -160,10 +162,12 @@ const parseTotals = (value: unknown): PanelTotals | undefined => {
   if (!isRecord(value)) return undefined
   if (!isFiniteNumber(value["evictions"])) return undefined
   if (!isFiniteNumber(value["bytesReclaimed"])) return undefined
+  if (!isFiniteNumber(value["evictionTokensSaved"])) return undefined
   if (!isFiniteNumber(value["stashHits"])) return undefined
   if (!isFiniteNumber(value["stashMisses"])) return undefined
   if (!isFiniteNumber(value["stashDropped"])) return undefined
   if (!isFiniteNumber(value["deduped"])) return undefined
+  if (!isFiniteNumber(value["dedupTokensSaved"])) return undefined
   if (!isFiniteNumber(value["reasoningExpired"])) return undefined
   if (!isFiniteNumber(value["reasoningBytesExpired"])) return undefined
   if (!isFiniteNumber(value["fenceEvicted"])) return undefined
@@ -171,10 +175,12 @@ const parseTotals = (value: unknown): PanelTotals | undefined => {
   return {
     evictions: value["evictions"],
     bytesReclaimed: value["bytesReclaimed"],
+    evictionTokensSaved: value["evictionTokensSaved"],
     stashHits: value["stashHits"],
     stashMisses: value["stashMisses"],
     stashDropped: value["stashDropped"],
     deduped: value["deduped"],
+    dedupTokensSaved: value["dedupTokensSaved"],
     reasoningExpired: value["reasoningExpired"],
     reasoningBytesExpired: value["reasoningBytesExpired"],
     fenceEvicted: value["fenceEvicted"],
@@ -499,7 +505,7 @@ const lastRunText = (current: SessionPanel): string => {
 }
 
 const countersText = (current: SessionPanel): string =>
-  `${COUNTERS_ROW_LABEL} ${current.totals.evictions} evictions (${formatBytes(current.totals.bytesReclaimed)} reclaimed), ${current.totals.deduped} dedup, ${current.stashReads} stash reads (${current.totals.stashHits} hits)`
+  `${COUNTERS_ROW_LABEL} ${current.totals.evictions} evictions (${formatBytes(current.totals.bytesReclaimed)} reclaimed, ~${formatTokenCount(current.totals.evictionTokensSaved)} tokens saved), ${current.totals.deduped} dedup (~${formatTokenCount(current.totals.dedupTokensSaved)} tokens saved), ${current.stashReads} stash reads (${current.totals.stashHits} hits)`
 
 const evictionText = (entry: PanelEvictedEntry): string =>
   `${entry.tool} ${entry.subject} (${formatBytes(entry.bytes)}, ${entry.messagesAgo} msgs ago)`

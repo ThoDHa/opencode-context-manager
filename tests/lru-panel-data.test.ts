@@ -47,6 +47,8 @@ const TOTALS_REASONING_EXPIRED = 7
 const TOTALS_REASONING_BYTES = 2560
 const TOTALS_FENCE_EVICTED = 2
 const TOTALS_TOUCHES = 3
+const TOTALS_EVICTION_TOKENS_SAVED = 3072
+const TOTALS_DEDUP_TOKENS_SAVED = 2250
 const RECENT_LIMIT = 2
 const EVICTION_COUNT_PER_LINE = 3
 const COLLECTED_EVICTION_COUNT = 2
@@ -78,10 +80,12 @@ const DEFAULT_BUDGET_SOURCE = "default"
 const makeTotals = (): PanelMetricsLine["totals"] => ({
   evictions: TOTALS_EVICTIONS,
   bytesReclaimed: TOTALS_BYTES,
+  evictionTokensSaved: TOTALS_EVICTION_TOKENS_SAVED,
   stashHits: TOTALS_STASH_HITS,
   stashMisses: TOTALS_STASH_MISSES,
   stashDropped: TOTALS_STASH_DROPPED,
   deduped: TOTALS_DEDUPED,
+  dedupTokensSaved: TOTALS_DEDUP_TOKENS_SAVED,
   reasoningExpired: TOTALS_REASONING_EXPIRED,
   reasoningBytesExpired: TOTALS_REASONING_BYTES,
   fenceEvicted: TOTALS_FENCE_EVICTED,
@@ -158,9 +162,24 @@ test("parseMetricsLine rejects a line missing a required field", () => {
 test("parseMetricsLine rejects a line whose totals carry a non-numeric counter", () => {
   const rawNonNumericEvictions = JSON.stringify(makeLine({ totals: { ...makeTotals(), evictions: "many" } }))
   const rawNonNumericFenceEvictions = JSON.stringify(makeLine({ totals: { ...makeTotals(), fenceEvicted: "some" } }))
+  const rawNonNumericEvictionTokensSaved = JSON.stringify(
+    makeLine({ totals: { ...makeTotals(), evictionTokensSaved: "plenty" } }),
+  )
+  const rawNonNumericDedupTokensSaved = JSON.stringify(makeLine({ totals: { ...makeTotals(), dedupTokensSaved: "some" } }))
 
   assert.equal(parseMetricsLine(rawNonNumericEvictions), undefined)
   assert.equal(parseMetricsLine(rawNonNumericFenceEvictions), undefined)
+  assert.equal(parseMetricsLine(rawNonNumericEvictionTokensSaved), undefined)
+  assert.equal(parseMetricsLine(rawNonNumericDedupTokensSaved), undefined)
+})
+
+test("parseMetricsLine and parseStateSnapshot drop pre-upgrade records whose totals predate the token-savings keys", () => {
+  const { evictionTokensSaved: _evictionTokensSaved, dedupTokensSaved: _dedupTokensSaved, ...legacyTotals } = makeTotals()
+  const legacyLine = JSON.stringify(makeLine({ totals: legacyTotals }))
+  const legacySnapshot = JSON.stringify(makeSnapshot({ totals: legacyTotals }))
+
+  assert.equal(parseMetricsLine(legacyLine), undefined)
+  assert.equal(parseStateSnapshot(legacySnapshot), undefined)
 })
 
 test("parseMetricsLine rejects a line whose evicted entries are malformed", () => {
@@ -537,7 +556,7 @@ test("loadPanelData prefers the live snapshot for the session block and keeps lo
       rows.some(
         (row) =>
           row.text ===
-          `counters: ${TOTALS_EVICTIONS} evictions (12 kB reclaimed), ${TOTALS_DEDUPED} dedup, ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} stash reads (${TOTALS_STASH_HITS} hits)`,
+          `counters: ${TOTALS_EVICTIONS} evictions (12 kB reclaimed, ~3.1k tokens saved), ${TOTALS_DEDUPED} dedup (~2.3k tokens saved), ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} stash reads (${TOTALS_STASH_HITS} hits)`,
       ),
     )
     assert.ok(!rows.some((row) => row.text.includes("occupancy:")))
@@ -651,7 +670,7 @@ test("loadPanelData falls back to the metrics log when no snapshot exists for th
       rows.some(
         (row) =>
           row.text ===
-          `counters: ${LOG_LINE_ONLY_EVICTIONS} evictions (12 kB reclaimed), ${TOTALS_DEDUPED} dedup, ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} stash reads (${TOTALS_STASH_HITS} hits)`,
+          `counters: ${LOG_LINE_ONLY_EVICTIONS} evictions (12 kB reclaimed, ~3.1k tokens saved), ${TOTALS_DEDUPED} dedup (~2.3k tokens saved), ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} stash reads (${TOTALS_STASH_HITS} hits)`,
       ),
     )
   })
@@ -773,7 +792,7 @@ test("panelRows renders the session's budget, last run, compact counters, and ne
     rows.some(
       (row) =>
         row.text ===
-        `counters: ${TOTALS_EVICTIONS} evictions (12 kB reclaimed), ${TOTALS_DEDUPED} dedup, ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} stash reads (${TOTALS_STASH_HITS} hits)`,
+        `counters: ${TOTALS_EVICTIONS} evictions (12 kB reclaimed, ~3.1k tokens saved), ${TOTALS_DEDUPED} dedup (~2.3k tokens saved), ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} stash reads (${TOTALS_STASH_HITS} hits)`,
     ),
   )
   assert.ok(rows.some((row) => row.text === `last evicted: read /data/a.txt (3 kB, ${EVICTED_MESSAGES_AGO} msgs ago)`))

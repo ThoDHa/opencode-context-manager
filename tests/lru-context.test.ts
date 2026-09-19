@@ -18,6 +18,7 @@ const TOMBSTONE_SUFFIX = " was evicted to reclaim context; re-run the tool to re
 const SMALL_TEXT_CHARS = 60
 const SMALL_TOOL_OUTPUT_CHARS = 256
 const CHARS_PER_TOKEN = 4
+const SAVINGS_CUSTOM_CHARS_PER_TOKEN = 2
 const WATERMARK_RATIO = 0.5
 const LEGACY_DEFAULT_CONTEXT_TOKENS = 100000
 const EXPLICIT_DEFAULT_CONTEXT_TOKENS = 600
@@ -35,6 +36,7 @@ const HEADROOM_TOKENS = 100
 const OVER_BY_ONE_TOKENS = 1
 const THREE_ENTRY_OUTPUT_BYTES = 3000
 const THREE_ENTRY_COUNT = 3
+const DEDUP_SAVINGS_PAIR_COUNT = 2
 const PARTIAL_DEFICIT_TOKENS = 700
 const TWO_ENTRY_DEFICIT_TOKENS = 800
 const COLD_OUTPUT_BYTES = 2048
@@ -124,6 +126,7 @@ const STASH_ISOLATION_SESSION_C = "lru-harness-session-c"
 const DEDUP_MARKER = "[lru-deduped]"
 const DEDUP_SUPERSEDED_LEAD = "identical call superseded by the newer output at message"
 const DEDUP_PATH = "/data/dedup.txt"
+const DEDUP_SECOND_PATH = "/data/dedup-second.txt"
 const DEDUP_ENCODING_KEY = "encoding"
 const DEDUP_ENCODING_VALUE = "utf-8"
 const DEDUP_NESTED_TOP_KEY = "opts"
@@ -2975,10 +2978,12 @@ const METRICS_ROTATION_PANEL_SEED_BYTES = METRICS_ROTATION_PANEL_SEED_EVICTIONS 
 const STATS_ZEROED_COUNTERS = {
   evictions: 0,
   bytesReclaimed: 0,
+  evictionTokensSaved: 0,
   stashHits: 0,
   stashMisses: 0,
   stashDropped: 0,
   deduped: 0,
+  dedupTokensSaved: 0,
   postEvictionTouches: 0,
   reasoningExpired: 0,
   reasoningBytesExpired: 0,
@@ -3125,6 +3130,7 @@ test("lru_stats counts the eviction reclaimed bytes stash entry and last run def
     ...STATS_ZEROED_COUNTERS,
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
+    evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
   })
   assert.deepEqual(stats.stash, { entries: 1, capacity: STASH_LIMIT })
   assert.deepEqual(stats.lastRun, {
@@ -3132,6 +3138,34 @@ test("lru_stats counts the eviction reclaimed bytes stash entry and last run def
     watermarkTokens: tokensForChars(STANDARD_BUNDLE_CHARS) - OVER_BY_ONE_TOKENS,
     deficitTokens: OVER_BY_ONE_TOKENS,
   })
+})
+
+test("lru_stats derives the eviction token-savings estimate from the reclaimed bytes over the default charsPerToken", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+  const bundle = buildStandardBundle(SESSION_ID, STATS_SINGLE_EVICTION_SUBJECT)
+  await runTransform(hooks, bundle)
+
+  assert.deepEqual(countersOf(await lruStats(hooks, SESSION_ID)), {
+    ...STATS_ZEROED_COUNTERS,
+    evictions: 1,
+    bytesReclaimed: MIN_EVICTABLE_BYTES,
+    evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
+  })
+})
+
+test("lru_stats scales the eviction token-savings estimate by the resolved charsPerToken", async () => {
+  const hooks = await loadPluginHooksWith({ charsPerToken: SAVINGS_CUSTOM_CHARS_PER_TOKEN })
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+  const bundle = buildStandardBundle(SESSION_ID, STATS_SINGLE_EVICTION_SUBJECT)
+  await runTransform(hooks, bundle)
+
+  const counters = countersOf(await lruStats(hooks, SESSION_ID))
+  assert.equal(counters.evictions, 1)
+  assert.equal(counters.bytesReclaimed, MIN_EVICTABLE_BYTES)
+  assert.equal(counters.evictionTokensSaved, Math.ceil(MIN_EVICTABLE_BYTES / SAVINGS_CUSTOM_CHARS_PER_TOKEN))
 })
 
 test("lru_stats counts stash hits and misses from read_evicted and leaves invalid subject arguments uncounted", async () => {
@@ -3150,6 +3184,7 @@ test("lru_stats counts stash hits and misses from read_evicted and leaves invali
     ...STATS_ZEROED_COUNTERS,
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
+    evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
     stashMisses: 1,
   })
 
@@ -3165,6 +3200,7 @@ test("lru_stats counts stash hits and misses from read_evicted and leaves invali
     ...STATS_ZEROED_COUNTERS,
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
+    evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
     stashHits: 1,
     stashMisses: 1,
   })
@@ -3243,6 +3279,34 @@ test("lru_stats counts dedup tombstones without counting evictions and stays inc
 
   await runTransform(hooks, bundle)
   assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).deduped, 1)
+})
+
+test("lru_stats accumulates the dedup token-savings estimate from each superseded duplicate's bytes", async () => {
+  const hooks = await loadPluginHooks()
+
+  const bundle = buildBundle([
+    [pathToolPart(DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
+    ...fillerMessages(2),
+    [pathToolPart(DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
+    ...fillerMessages(2),
+    [pathToolPart(DEDUP_SECOND_PATH, THREE_ENTRY_OUTPUT_BYTES)],
+    ...fillerMessages(2),
+    [pathToolPart(DEDUP_SECOND_PATH, THREE_ENTRY_OUTPUT_BYTES)],
+    ...fillerMessages(2),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.deepEqual(countersOf(await lruStats(hooks, SESSION_ID)), {
+    ...STATS_ZEROED_COUNTERS,
+    deduped: DEDUP_SAVINGS_PAIR_COUNT,
+    dedupTokensSaved: tokensForChars(DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES),
+  })
+
+  await runTransform(hooks, bundle)
+  assert.equal(
+    countersOf(await lruStats(hooks, SESSION_ID)).dedupTokensSaved,
+    tokensForChars(DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES),
+  )
 })
 
 test("lru_stats counts stash drops when a single run evicts fifty one entries past the stash bound", async () => {
@@ -3344,7 +3408,12 @@ test("metrics log appends one eventful jsonl line with expected fields and nothi
     assert.equal(line.dedupedThisRun, 0)
     assert.equal(line.postEvictionTouchesThisRun, 0)
     assert.equal(line.stashReadsSinceLastLine, 0)
-    assert.deepEqual(line.totals, { ...STATS_ZEROED_COUNTERS, evictions: 1, bytesReclaimed: MIN_EVICTABLE_BYTES })
+    assert.deepEqual(line.totals, {
+      ...STATS_ZEROED_COUNTERS,
+      evictions: 1,
+      bytesReclaimed: MIN_EVICTABLE_BYTES,
+      evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
+    })
 
     await runTransform(hooks, bundle)
     assert.equal(metricsLinesIn(metricsLogPathIn(metricsDir)).length, STATS_LOG_FILE_LINES)
@@ -3374,6 +3443,11 @@ test("metrics log records an unknown budget skip state with null watermark on an
     assert.equal(lines[0].deficitTokens, null)
     assert.deepEqual(lines[0].evictedThisRun, [])
     assert.equal(lines[0].dedupedThisRun, 1)
+    assert.deepEqual(lines[0].totals, {
+      ...STATS_ZEROED_COUNTERS,
+      deduped: 1,
+      dedupTokensSaved: tokensForChars(THREE_ENTRY_OUTPUT_BYTES),
+    })
   } finally {
     cleanupMetricsDir(metricsDir)
   }
@@ -3446,6 +3520,7 @@ test("metrics log records stash reads since the last line on the next transform 
       ...STATS_ZEROED_COUNTERS,
       evictions: 1,
       bytesReclaimed: MIN_EVICTABLE_BYTES,
+      evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
       stashHits: 1,
     })
 
@@ -3508,13 +3583,19 @@ test("lru_stats keeps metrics isolated between two sessions", async () => {
 
   const statsA = await lruStats(hooks, SESSION_ID)
   assert.equal(statsA.session, SESSION_ID)
-  assert.deepEqual(countersOf(statsA), { ...STATS_ZEROED_COUNTERS, evictions: 1, bytesReclaimed: MIN_EVICTABLE_BYTES })
+  assert.deepEqual(countersOf(statsA), {
+    ...STATS_ZEROED_COUNTERS,
+    evictions: 1,
+    bytesReclaimed: MIN_EVICTABLE_BYTES,
+    evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
+  })
   const statsB = await lruStats(hooks, SESSION_ID_B)
   assert.equal(statsB.session, SESSION_ID_B)
   assert.deepEqual(countersOf(statsB), {
     ...STATS_ZEROED_COUNTERS,
     evictions: STATS_ISOLATION_B_EVICTED_COUNT,
     bytesReclaimed: STATS_ISOLATION_B_EVICTED_COUNT * THREE_ENTRY_OUTPUT_BYTES,
+    evictionTokensSaved: tokensForChars(STATS_ISOLATION_B_EVICTED_COUNT * THREE_ENTRY_OUTPUT_BYTES),
   })
 })
 
@@ -3670,6 +3751,7 @@ test("metrics log stays byte identical at exactly the rotation cap and rotates w
       ...STATS_ZEROED_COUNTERS,
       evictions: 1,
       bytesReclaimed: MIN_EVICTABLE_BYTES,
+      evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
       stashHits: 1,
     })
   } finally {
@@ -3915,6 +3997,7 @@ test("live state snapshot records eviction totals stash occupancy and an empty h
       ...STATS_ZEROED_COUNTERS,
       evictions: 1,
       bytesReclaimed: MIN_EVICTABLE_BYTES,
+      evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
     })
     assert.deepEqual(snapshot.stash, { entries: 1, capacity: STASH_LIMIT })
     assert.deepEqual(snapshot.hotSubjects, [])
@@ -4190,6 +4273,7 @@ test("lru_stats leaves reasoning counters at zero when a pressured session has n
     ...STATS_ZEROED_COUNTERS,
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
+    evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
   })
 })
 
@@ -4367,6 +4451,7 @@ test("transform ignores a non array attachments field when evicting and leaves t
     ...STATS_ZEROED_COUNTERS,
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
+    evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
   })
   assert.equal(await readEvicted(hooks, NON_ARRAY_ATTACHMENTS_PATH, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
 })
@@ -4434,6 +4519,24 @@ test("transform strips attachments from a dedup tombstoned older call while the 
   ])
 })
 
+test("lru_stats counts a superseded duplicate's attachment payload chars in the dedup token-savings estimate", async () => {
+  const hooks = await loadPluginHooks()
+
+  const bundle = buildBundle([
+    [attachedReadPart(ATTACHMENT_CALL_ID_OLDER, ATTACHMENT_PAYLOAD_CHARS_PRIMARY)],
+    ...fillerMessages(2),
+    [attachedReadPart(ATTACHMENT_CALL_ID_NEWER, ATTACHMENT_PAYLOAD_CHARS_SECONDARY)],
+    ...fillerMessages(2),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.deepEqual(countersOf(await lruStats(hooks, SESSION_ID)), {
+    ...STATS_ZEROED_COUNTERS,
+    deduped: 1,
+    dedupTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS),
+  })
+})
+
 test("transform ignores a non array attachments field when deduplicating and leaves the field in place", async () => {
   const hooks = await loadPluginHooks()
 
@@ -4463,6 +4566,7 @@ test("lru_stats counts attachment payload characters in bytesReclaimed for an at
     ...STATS_ZEROED_COUNTERS,
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS,
+    evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS),
   })
 })
 
@@ -4490,6 +4594,7 @@ test("metrics log records attachmentBytes on each evicted entry and adds the pay
       ...STATS_ZEROED_COUNTERS,
       evictions: 1,
       bytesReclaimed: MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS,
+      evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS),
     })
   } finally {
     cleanupMetricsDir(metricsDir)
@@ -4782,6 +4887,7 @@ test("lru_stats counts fence evictions in a distinct fenceEvicted counter withou
     ...STATS_ZEROED_COUNTERS,
     fenceEvicted: 1,
     bytesReclaimed: block.length + FENCE_TRAILING_NEWLINE_CHARS,
+    evictionTokensSaved: tokensForChars(block.length + FENCE_TRAILING_NEWLINE_CHARS),
   })
   assert.deepEqual(stats.options.userFenceEviction, { enabled: true, minBlockLines: FENCE_DEFAULT_MIN_BLOCK_LINES })
   assert.deepEqual(stats.stash, { entries: 1, capacity: STASH_LIMIT })
@@ -4805,6 +4911,7 @@ test("metrics log records a fence only run as eventful with the fenceEvictedThis
       ...STATS_ZEROED_COUNTERS,
       fenceEvicted: 1,
       bytesReclaimed: block.length + FENCE_TRAILING_NEWLINE_CHARS,
+      evictionTokensSaved: tokensForChars(block.length + FENCE_TRAILING_NEWLINE_CHARS),
     })
   } finally {
     cleanupMetricsDir(metricsDir)

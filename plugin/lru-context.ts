@@ -223,6 +223,7 @@ type LastRunMetrics = { estimatedTokens: number; watermarkTokens: number | null;
 type RunOutcome = {
   eviction: EvictionResult
   deduped: number
+  dedupedBytes: number
   touches: number
   reasoningExpired: ReasoningExpiry
   fenceEvicted: FenceEviction
@@ -251,6 +252,7 @@ type SessionMetrics = {
   stashMisses: number
   stashDropped: number
   deduped: number
+  dedupedBytes: number
   reasoningExpired: number
   reasoningBytesExpired: number
   postEvictionTouches: number
@@ -268,10 +270,12 @@ type MetricsStore = Map<string, SessionMetrics>
 type CumulativeCounters = {
   evictions: number
   bytesReclaimed: number
+  evictionTokensSaved: number
   stashHits: number
   stashMisses: number
   stashDropped: number
   deduped: number
+  dedupTokensSaved: number
   reasoningExpired: number
   reasoningBytesExpired: number
   postEvictionTouches: number
@@ -304,6 +308,8 @@ type FilePartFields = { mime: string; url: string; filename: string }
 type RetainedFileDuplicate = { msgIndex: number; label: string }
 
 type DedupTarget = { stateRef: { output: string; attachments?: unknown }; tool: string; input: Record<string, unknown> }
+
+type DedupOutcome = { tombstones: number; supersededBytes: number }
 
 type MessageBundle = {
   info: { sessionID?: string; role?: unknown }
@@ -561,9 +567,10 @@ const dedupTargetOf = (part: Record<string, unknown>): DedupTarget | undefined =
   return { stateRef: outputRef, tool, input }
 }
 
-const deduplicateToolOutputs = (messages: MessageBundle[], options: ResolvedOptions): number => {
+const deduplicateToolOutputs = (messages: MessageBundle[], options: ResolvedOptions): DedupOutcome => {
   const retainedByKey = new Map<string, RetainedDuplicate>()
   let tombstones = 0
+  let supersededBytes = 0
   for (let msgIndex = messages.length - 1; msgIndex >= 0; msgIndex -= 1) {
     for (const part of messages[msgIndex].parts) {
       const target = dedupTargetOf(part)
@@ -579,13 +586,14 @@ const deduplicateToolOutputs = (messages: MessageBundle[], options: ResolvedOpti
         continue
       }
       if (retained.supersedes) {
+        supersededBytes += target.stateRef.output.length + attachmentPayloadCharsOf(target.stateRef)
         target.stateRef.output = buildDedupTombstone(retained.tool, retained.msgIndex)
         stripStateAttachments(target.stateRef)
         tombstones += 1
       }
     }
   }
-  return tombstones
+  return { tombstones, supersededBytes }
 }
 
 const filePartOf = (part: Record<string, unknown>): FilePartFields | undefined => {
@@ -604,7 +612,7 @@ const fileDedupLabelOf = (file: FilePartFields): string => (file.filename.length
 const buildFileDedupTombstone = (label: string, msgIndex: number): string =>
   `${DEDUP_MARKER} ${label} ${DEDUP_FILE_SUPERSEDED_LEAD} ${msgIndex}`
 
-const deduplicateFileAttachments = (messages: MessageBundle[], options: ResolvedOptions): number => {
+const deduplicateFileAttachments = (messages: MessageBundle[], options: ResolvedOptions): DedupOutcome => {
   const retainedByKey = new Map<string, RetainedFileDuplicate>()
   const hotFromIndex = hotFromIndexOf(messages, options)
   let tombstones = 0
@@ -624,8 +632,12 @@ const deduplicateFileAttachments = (messages: MessageBundle[], options: Resolved
       tombstones += 1
     }
   }
-  return tombstones
+  // A file part's payload size is not observable from its url, so file dedup
+  // contributes tombstones but no superseded bytes to the savings estimate.
+  return { tombstones, supersededBytes: 0 }
 }
+
+const estimateTokensFromBytes = (bytes: number, charsPerToken: number): number => Math.ceil(bytes / charsPerToken)
 
 const estimateTokens = (messages: MessageBundle[], charsPerToken: number): number => {
   let chars = 0
@@ -639,7 +651,7 @@ const estimateTokens = (messages: MessageBundle[], charsPerToken: number): numbe
       }
     }
   }
-  return Math.ceil(chars / charsPerToken)
+  return estimateTokensFromBytes(chars, charsPerToken)
 }
 
 const purgeErroredToolInputs = (messages: MessageBundle[], options: ResolvedOptions): void => {
@@ -976,6 +988,7 @@ const createSessionMetrics = (): SessionMetrics => ({
   stashMisses: 0,
   stashDropped: 0,
   deduped: 0,
+  dedupedBytes: 0,
   reasoningExpired: 0,
   reasoningBytesExpired: 0,
   postEvictionTouches: 0,
@@ -1013,7 +1026,7 @@ const lastRunMetricsOf = (eviction: EvictionResult): LastRunMetrics => ({
 })
 
 const recordRunOutcome = (metrics: SessionMetrics, run: RunOutcome, rememberedSubjectsBound: number): void => {
-  const { eviction, deduped: dedupedThisRun, touches: touchesThisRun, reasoningExpired: reasoningExpiredThisRun, fenceEvicted: fenceEvictedThisRun } = run
+  const { eviction, deduped: dedupedThisRun, dedupedBytes: dedupedBytesThisRun, touches: touchesThisRun, reasoningExpired: reasoningExpiredThisRun, fenceEvicted: fenceEvictedThisRun } = run
   metrics.lastRun = lastRunMetricsOf(eviction)
   metrics.evictions += eviction.evicted.length
   metrics.stashDropped += eviction.stashDropped
@@ -1023,6 +1036,7 @@ const recordRunOutcome = (metrics: SessionMetrics, run: RunOutcome, rememberedSu
   }
   while (metrics.evictedSubjects.length > rememberedSubjectsBound) metrics.evictedSubjects.shift()
   metrics.deduped += dedupedThisRun
+  metrics.dedupedBytes += dedupedBytesThisRun
   metrics.reasoningExpired += reasoningExpiredThisRun.parts
   metrics.reasoningBytesExpired += reasoningExpiredThisRun.bytes
   metrics.postEvictionTouches += touchesThisRun
@@ -1077,7 +1091,7 @@ const recordMetricsLine = async (
     fenceEvictedThisRun: fenceEvictedThisRun.blocks,
     postEvictionTouchesThisRun: touchesThisRun,
     stashReadsSinceLastLine,
-    totals: totalsOf(metrics),
+    totals: totalsOf(metrics, options.charsPerToken),
   }
   try {
     const metricsJsonLine = `${JSON.stringify(line)}\n`
@@ -1090,13 +1104,15 @@ const recordMetricsLine = async (
   }
 }
 
-const totalsOf = (metrics: SessionMetrics): CumulativeCounters => ({
+const totalsOf = (metrics: SessionMetrics, charsPerToken: number): CumulativeCounters => ({
   evictions: metrics.evictions,
   bytesReclaimed: metrics.bytesReclaimed,
+  evictionTokensSaved: estimateTokensFromBytes(metrics.bytesReclaimed, charsPerToken),
   stashHits: metrics.stashHits,
   stashMisses: metrics.stashMisses,
   stashDropped: metrics.stashDropped,
   deduped: metrics.deduped,
+  dedupTokensSaved: estimateTokensFromBytes(metrics.dedupedBytes, charsPerToken),
   reasoningExpired: metrics.reasoningExpired,
   reasoningBytesExpired: metrics.reasoningBytesExpired,
   postEvictionTouches: metrics.postEvictionTouches,
@@ -1118,7 +1134,7 @@ const liveStateSnapshotOf = (
   modelContextTokens: budget.tokens,
   modelContextTokensSource: budget.source,
   lastRun,
-  totals: totalsOf(metrics),
+  totals: totalsOf(metrics, options.charsPerToken),
   stash: { entries: stash.size, capacity: options.stashLimit },
   hotSubjects: orderedRenderedSubjectsOf(hotSubjects, options.hintSubjects),
 })
@@ -1265,18 +1281,7 @@ const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
     modelContextTokens: budget.tokens,
     modelContextTokensSource: budget.source,
     stash: { entries: stash === undefined ? 0 : stash.size, capacity: source.options.stashLimit },
-    counters: {
-      evictions: metrics.evictions,
-      bytesReclaimed: metrics.bytesReclaimed,
-      stashHits: metrics.stashHits,
-      stashMisses: metrics.stashMisses,
-      stashDropped: metrics.stashDropped,
-      deduped: metrics.deduped,
-      reasoningExpired: metrics.reasoningExpired,
-      reasoningBytesExpired: metrics.reasoningBytesExpired,
-      postEvictionTouches: metrics.postEvictionTouches,
-      fenceEvicted: metrics.fenceEvicted,
-    },
+    counters: totalsOf(metrics, source.options.charsPerToken),
     lastRun: metrics.lastRun ?? null,
     ...(metrics.logWriteError === undefined ? {} : { logWriteError: metrics.logWriteError }),
     ...(metrics.stateWriteError === undefined ? {} : { stateWriteError: metrics.stateWriteError }),
@@ -1498,7 +1503,9 @@ export default (async (_input, rawOptions) => {
       const sessionStash = stashForSession(stashBySession, sessionKey, options.stashSessions)
       const sessionMetrics = metricsForSession(metricsBySession, sessionKey, options.metricsSessions)
       stripLegacyHintParts(messages)
-      const dedupedThisRun = deduplicateToolOutputs(messages, options) + deduplicateFileAttachments(messages, options)
+      const toolDedup = deduplicateToolOutputs(messages, options)
+      const fileDedup = deduplicateFileAttachments(messages, options)
+      const dedupedThisRun = toolDedup.tombstones + fileDedup.tombstones
       purgeErroredToolInputs(messages, options)
       const reasoningExpiredThisRun = expireAgedReasoning(messages, options)
       const fenceEvictedThisRun = evictLargeUserFences(messages, options, sessionStash)
@@ -1510,6 +1517,7 @@ export default (async (_input, rawOptions) => {
       const runOutcome: RunOutcome = {
         eviction,
         deduped: dedupedThisRun,
+        dedupedBytes: toolDedup.supersededBytes,
         touches: touchesThisRun,
         reasoningExpired: reasoningExpiredThisRun,
         fenceEvicted: fenceEvictedThisRun,
