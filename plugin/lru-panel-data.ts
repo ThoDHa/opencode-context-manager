@@ -12,6 +12,11 @@ const SNAPSHOT_FILE_SUFFIX = ".json"
 
 export const DEFAULT_RECENT_EVICTIONS = 8
 
+export const DEFAULT_SIDEBAR_ENABLED = true
+
+export const resolveSidebarEnabled = (value: unknown): boolean =>
+  typeof value === "boolean" ? value : DEFAULT_SIDEBAR_ENABLED
+
 const BYTES_PER_KILOBYTE = 1024
 const BYTES_PER_MEGABYTE = BYTES_PER_KILOBYTE * BYTES_PER_KILOBYTE
 const BYTES_PER_GIGABYTE = BYTES_PER_MEGABYTE * BYTES_PER_KILOBYTE

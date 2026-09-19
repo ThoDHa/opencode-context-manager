@@ -12,7 +12,7 @@
 // runtime modules for every file outside node_modules.
 import type { TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
 import { createSignal, onCleanup, onMount } from "solid-js"
-import { loadPanelData, panelRows, sidebarRows, type PanelData, type PanelRow, type PanelRowTone } from "./lru-panel-data.ts"
+import { loadPanelData, panelRows, resolveSidebarEnabled, sidebarRows, type PanelData, type PanelRow, type PanelRowTone } from "./lru-panel-data.ts"
 
 const PLUGIN_ID = "lru-context"
 const COMMAND_NAMESPACE = "palette"
@@ -98,7 +98,7 @@ const SidebarEntry = (props: SidebarEntryProps) => {
   return <RowsView api={props.api} rows={rows()} />
 }
 
-const tui: TuiPluginModule["tui"] = async (api) => {
+const tui: TuiPluginModule["tui"] = async (api, options) => {
   api.keymap.registerLayer({
     commands: [
       {
@@ -114,12 +114,14 @@ const tui: TuiPluginModule["tui"] = async (api) => {
       },
     ],
   })
-  api.slots.register({
-    order: SIDEBAR_SLOT_ORDER,
-    slots: {
-      sidebar_content: (_ctx, props) => <SidebarEntry api={api} sessionID={props.session_id} />,
-    },
-  })
+  if (resolveSidebarEnabled(options?.sidebarEnabled)) {
+    api.slots.register({
+      order: SIDEBAR_SLOT_ORDER,
+      slots: {
+        sidebar_content: (_ctx, props) => <SidebarEntry api={api} sessionID={props.session_id} />,
+      },
+    })
+  }
 }
 
 export default { id: PLUGIN_ID, tui } satisfies TuiPluginModule

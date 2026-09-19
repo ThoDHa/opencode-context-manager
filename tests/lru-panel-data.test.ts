@@ -7,6 +7,7 @@ import { test } from "node:test"
 import {
   DEFAULT_LIVE_STATE_DIR,
   DEFAULT_METRICS_PATH,
+  DEFAULT_SIDEBAR_ENABLED,
   budgetSourceLabel,
   formatBytes,
   formatTokenCount,
@@ -19,6 +20,7 @@ import {
   parseStateSnapshot,
   readMetricsLog,
   readStateSnapshot,
+  resolveSidebarEnabled,
   sessionPanelData,
   sidebarRows,
   SIDEBAR_COLUMN_LIMIT,
@@ -1222,4 +1224,15 @@ test("sidebarRows drops the budget source label while the panel keeps it", () =>
   assert.ok(rows.some((row) => row.text === "Budget: 200k"))
   assert.ok(!rows.some((row) => row.text.includes("override")))
   assert.ok(panelRows(data).some((row) => row.text === "budget: ~200k tokens (per-model override)"))
+})
+
+const SIDEBAR_ENABLED_INVALID_VALUES: unknown[] = ["false", 0, null]
+
+test("resolveSidebarEnabled defaults to true honors explicit false and falls back to true on non-boolean values", () => {
+  assert.equal(resolveSidebarEnabled(undefined), DEFAULT_SIDEBAR_ENABLED)
+  assert.equal(resolveSidebarEnabled(true), true)
+  assert.equal(resolveSidebarEnabled(false), false)
+  for (const invalid of SIDEBAR_ENABLED_INVALID_VALUES) {
+    assert.equal(resolveSidebarEnabled(invalid), true)
+  }
 })
