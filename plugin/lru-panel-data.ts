@@ -13,9 +13,13 @@ const SNAPSHOT_FILE_SUFFIX = ".json"
 export const DEFAULT_RECENT_EVICTIONS = 8
 
 const BYTES_PER_KILOBYTE = 1024
+const BYTES_PER_MEGABYTE = BYTES_PER_KILOBYTE * BYTES_PER_KILOBYTE
+const BYTES_PER_GIGABYTE = BYTES_PER_MEGABYTE * BYTES_PER_KILOBYTE
 const TOKENS_PER_KILOTOKEN = 1000
 const TOKENS_PER_MEGATOKEN = TOKENS_PER_KILOTOKEN * TOKENS_PER_KILOTOKEN
 const KILOBYTE_DECIMALS = 1
+const MEGABYTE_DECIMALS = 1
+const GIGABYTE_DECIMALS = 1
 const KILOTOKEN_DECIMALS = 1
 const MEGATOKEN_DECIMALS = 2
 
@@ -31,6 +35,9 @@ const PANEL_TITLE = "LRU context manager"
 const MANUAL_MODE_TITLE_SUFFIX = " (manual)"
 const COUNTERS_ROW_LABEL = "counters:"
 const LAST_EVICTION_ROW_LABEL = "last evicted:"
+const NO_SESSION_ROW_TEXT = "no active session"
+const NO_RUNS_ROW_TEXT = "no metrics recorded for this session yet"
+const METRICS_UNREADABLE_PREFIX = "metrics log unreadable: "
 
 export type PanelEvictedEntry = {
   tool: string
@@ -462,7 +469,9 @@ export const formatTokenCount = (tokens: number): string => {
 export const formatBytes = (bytes: number): string => {
   if (!Number.isFinite(bytes)) return String(bytes)
   if (Math.abs(bytes) < BYTES_PER_KILOBYTE) return `${bytes} B`
-  return compactNumber(bytes, BYTES_PER_KILOBYTE, KILOBYTE_DECIMALS, " kB")
+  if (Math.abs(bytes) < BYTES_PER_MEGABYTE) return compactNumber(bytes, BYTES_PER_KILOBYTE, KILOBYTE_DECIMALS, " kB")
+  if (Math.abs(bytes) < BYTES_PER_GIGABYTE) return compactNumber(bytes, BYTES_PER_MEGABYTE, MEGABYTE_DECIMALS, " MB")
+  return compactNumber(bytes, BYTES_PER_GIGABYTE, GIGABYTE_DECIMALS, " GB")
 }
 
 export type PanelRowTone = "header" | "normal" | "muted" | "warning"
@@ -498,16 +507,18 @@ const evictionText = (entry: PanelEvictedEntry): string =>
 const headerText = (current: SessionPanel | undefined): string =>
   current?.manualMode === true ? `${PANEL_TITLE}${MANUAL_MODE_TITLE_SUFFIX}` : PANEL_TITLE
 
+const emptyStateText = (data: PanelData): string =>
+  data.activeSession === undefined ? NO_SESSION_ROW_TEXT : NO_RUNS_ROW_TEXT
+
 export const panelRows = (data: PanelData): PanelRow[] => {
   const current = data.current
   const rows: PanelRow[] = [{ text: headerText(current), tone: "header" }]
   if (data.error !== undefined) {
-    rows.push({ text: `metrics log unreadable: ${data.error}`, tone: "warning" })
+    rows.push({ text: `${METRICS_UNREADABLE_PREFIX}${data.error}`, tone: "warning" })
     if (current === undefined) return rows
   }
   if (current === undefined) {
-    const emptyText = data.activeSession === undefined ? "no active session" : "no metrics recorded for this session yet"
-    rows.push({ text: emptyText, tone: "muted" })
+    rows.push({ text: emptyStateText(data), tone: "muted" })
     return rows
   }
   rows.push({ text: budgetText(current), tone: "normal" })
@@ -518,4 +529,72 @@ export const panelRows = (data: PanelData): PanelRow[] => {
     rows.push({ text: `${LAST_EVICTION_ROW_LABEL} ${evictionText(newestEviction)}`, tone: "muted" })
   }
   return rows
+}
+
+// A space, not an empty string: opentui sizes a text element by its content
+// lines, so zero-length text collapses to no line and the group spacing
+// would silently vanish.
+const SIDEBAR_BLANK_ROW: PanelRow = { text: " ", tone: "normal" }
+
+export const SIDEBAR_COLUMN_LIMIT = 42
+const ELLIPSIS_MARKER = "…"
+
+const truncateToWidth = (text: string, maxWidth: number): string =>
+  text.length > maxWidth ? `${text.slice(0, maxWidth - ELLIPSIS_MARKER.length)}${ELLIPSIS_MARKER}` : text
+
+const sidebarBudgetText = (current: SessionPanel): string => {
+  const label = budgetSourceLabel(current.budgetSource)
+  return current.budgetTokens === null
+    ? `Budget ${label}`
+    : `Budget ~${formatTokenCount(current.budgetTokens)} (${label})`
+}
+
+const sidebarLastRunGroup = (current: SessionPanel): PanelRow[] => {
+  const rows: PanelRow[] = [
+    { text: `Last run ~${formatTokenCount(current.lastRun.estimatedTokens)} estimated`, tone: "normal" },
+  ]
+  if (current.lastRun.watermarkTokens === null || current.lastRun.deficitTokens === null) {
+    rows.push({ text: "no watermark recorded", tone: "normal" })
+    return rows
+  }
+  const watermark = `~${formatTokenCount(current.lastRun.watermarkTokens)} watermark`
+  rows.push(
+    current.lastRun.deficitTokens > 0
+      ? { text: `over ${watermark} by ~${formatTokenCount(current.lastRun.deficitTokens)}`, tone: "normal" }
+      : { text: `within ${watermark}`, tone: "normal" },
+  )
+  return rows
+}
+
+const sidebarCountersGroup = (current: SessionPanel): PanelRow[] => [
+  { text: `Evictions ${current.totals.evictions} (${formatBytes(current.totals.bytesReclaimed)} reclaimed)`, tone: "normal" },
+  { text: `Deduped ${current.totals.deduped}`, tone: "normal" },
+  { text: `Stash reads ${current.stashReads} (${current.totals.stashHits} hits)`, tone: "normal" },
+]
+
+const sidebarEvictionGroup = (entry: PanelEvictedEntry): PanelRow[] => [
+  { text: truncateToWidth(`Last evicted: ${entry.tool} ${entry.subject}`, SIDEBAR_COLUMN_LIMIT), tone: "muted" },
+  { text: `${formatBytes(entry.bytes)}, ${entry.messagesAgo} messages ago`, tone: "muted" },
+]
+
+const withBlankSeparators = (groups: PanelRow[][]): PanelRow[] =>
+  groups.flatMap((group, index) => (index === 0 ? group : [SIDEBAR_BLANK_ROW, ...group]))
+
+export const sidebarRows = (data: PanelData): PanelRow[] => {
+  const current = data.current
+  const groups: PanelRow[][] = [[{ text: headerText(current), tone: "header" }]]
+  if (data.error !== undefined) {
+    groups.push([{ text: truncateToWidth(`${METRICS_UNREADABLE_PREFIX}${data.error}`, SIDEBAR_COLUMN_LIMIT), tone: "warning" }])
+    if (current === undefined) return withBlankSeparators(groups)
+  }
+  if (current === undefined) {
+    groups.push([{ text: emptyStateText(data), tone: "muted" }])
+    return withBlankSeparators(groups)
+  }
+  groups.push([{ text: sidebarBudgetText(current), tone: "normal" }])
+  groups.push(sidebarLastRunGroup(current))
+  groups.push(sidebarCountersGroup(current))
+  const newestEviction = current.recentEvictions[0]
+  if (newestEviction !== undefined) groups.push(sidebarEvictionGroup(newestEviction))
+  return withBlankSeparators(groups)
 }

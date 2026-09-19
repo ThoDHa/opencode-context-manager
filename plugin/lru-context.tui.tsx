@@ -12,7 +12,7 @@
 // runtime modules for every file outside node_modules.
 import type { TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
 import { createSignal, onCleanup, onMount } from "solid-js"
-import { loadPanelData, panelRows, type PanelData, type PanelRow, type PanelRowTone } from "./lru-panel-data.ts"
+import { loadPanelData, panelRows, sidebarRows, type PanelData, type PanelRow, type PanelRowTone } from "./lru-panel-data.ts"
 
 const PLUGIN_ID = "lru-context"
 const COMMAND_NAMESPACE = "palette"
@@ -81,7 +81,7 @@ const SidebarEntry = (props: SidebarEntryProps) => {
       let next: PanelRow[] = []
       try {
         const data = await loadPanelData({ sessionID: props.sessionID })
-        if (data.current !== undefined) next = panelRows(data)
+        if (data.current !== undefined) next = sidebarRows(data)
       } catch {
         // Startup and log rotation produce transient read failures; hide the
         // entry for that tick and let the next poll repaint it.
