@@ -6,9 +6,11 @@ import {
   SIDEBAR_COLUMN_LIMIT,
   SUBAGENT_FALLBACK_TYPE,
   SUBAGENT_RECENT_WINDOW_MS,
+  SUBAGENT_RUNNING_STATUS_TYPES,
   filterSubagentChildren,
   globalTotals,
   resolveSidebarSubagents,
+  resolveSubagentChildren,
   sessionPanelData,
   sidebarRows,
   sidebarSubagentsGroup,
@@ -222,4 +224,120 @@ test("sidebarRows with an absent or empty subagent group stays byte-identical to
   assert.deepEqual(sidebarRows(data, undefined), base)
   assert.deepEqual(sidebarRows(data, []), base)
   assert.deepEqual(sidebarRows({ ...data, subagentPanels: undefined }, []), base)
+})
+
+const makeRawChild = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+  id: CHILD_ID,
+  agent: "explore",
+  time: { updated: NOW_MS },
+  ...overrides,
+})
+
+const busyStatusLookup = (): { type: string } => ({ type: "busy" })
+
+const statusLookupFor = (typeForID: Record<string, string>) => (sessionID: string): { type: string } | undefined => {
+  const type = typeForID[sessionID]
+  return type === undefined ? undefined : { type }
+}
+
+const throwingStatusLookup = (): never => {
+  throw new Error("status exploded")
+}
+
+test("SUBAGENT_RUNNING_STATUS_TYPES is exactly the busy and retry status types", () => {
+  assert.deepEqual([...SUBAGENT_RUNNING_STATUS_TYPES].sort(), ["busy", "retry"])
+})
+
+test("resolveSubagentChildren degrades a rejecting children fetch to an empty group", async () => {
+  assert.deepEqual(await resolveSubagentChildren(Promise.reject(new Error("hostile host")), busyStatusLookup), [])
+})
+
+test("resolveSubagentChildren returns no children for an undefined, null, or non-object fetch result", async () => {
+  for (const result of [undefined, null, 42, "sessions", [makeRawChild()]]) {
+    assert.deepEqual(await resolveSubagentChildren(result, busyStatusLookup), [])
+  }
+})
+
+test("resolveSubagentChildren returns no children when the fetch result carries an error field", async () => {
+  assert.deepEqual(await resolveSubagentChildren({ error: "boom", data: [makeRawChild()] }, busyStatusLookup), [])
+  assert.deepEqual(await resolveSubagentChildren({ error: null, data: [makeRawChild()] }, busyStatusLookup), [])
+})
+
+test("resolveSubagentChildren returns no children when data is missing or not an array", async () => {
+  for (const data of [undefined, null, {}, "sessions", 7]) {
+    assert.deepEqual(await resolveSubagentChildren({ data }, busyStatusLookup), [])
+  }
+})
+
+test("resolveSubagentChildren maps a valid result field-for-field, honoring the running status set", async () => {
+  const busy = makeRawChild({ id: "sess-child-1" })
+  const retrying = makeRawChild({ id: "sess-child-2", agent: "general", time: { updated: NOW_MS - MINUTE_MS } })
+  const idle = makeRawChild({ id: "sess-child-3", agent: "scan", time: { updated: NOW_MS - 2 * MINUTE_MS } })
+  const archived = makeRawChild({ id: "sess-child-4", time: { updated: NOW_MS, archived: NOW_MS - MINUTE_MS } })
+  const untypedAgent = makeRawChild({ id: "sess-child-5", agent: undefined })
+
+  const children = await resolveSubagentChildren(
+    { data: [busy, retrying, idle, archived, untypedAgent] },
+    statusLookupFor({ "sess-child-1": "busy", "sess-child-2": "retry", "sess-child-3": "watching" }),
+  )
+
+  assert.deepEqual(children, [
+    { id: "sess-child-1", type: "explore", updatedAtMs: NOW_MS, running: true, archived: false },
+    { id: "sess-child-2", type: "general", updatedAtMs: NOW_MS - MINUTE_MS, running: true, archived: false },
+    { id: "sess-child-3", type: "scan", updatedAtMs: NOW_MS - 2 * MINUTE_MS, running: false, archived: false },
+    { id: "sess-child-4", type: "explore", updatedAtMs: NOW_MS, running: false, archived: true },
+    { id: "sess-child-5", type: SUBAGENT_FALLBACK_TYPE, updatedAtMs: NOW_MS, running: false, archived: false },
+  ])
+})
+
+test("resolveSubagentChildren accepts the fetch promise itself and maps what it resolves", async () => {
+  const child = makeRawChild({ id: "sess-child-1", agent: "general" })
+
+  assert.deepEqual(await resolveSubagentChildren(Promise.resolve({ data: [child] }), statusLookupFor({ "sess-child-1": "busy" })), [
+    { id: "sess-child-1", type: "general", updatedAtMs: NOW_MS, running: true, archived: false },
+  ])
+})
+
+test("resolveSubagentChildren drops a child with a hostile shape and keeps its usable siblings", async () => {
+  const usable = makeRawChild({ id: "sess-child-good" })
+
+  const children = await resolveSubagentChildren(
+    {
+      data: [
+        null,
+        42,
+        { agent: "explore", time: { updated: NOW_MS } },
+        { id: "", agent: "explore", time: { updated: NOW_MS } },
+        { id: "sess-no-time", agent: "explore" },
+        { id: "sess-empty-time", agent: "explore", time: {} },
+        { id: "sess-string-time", agent: "explore", time: { updated: "soon" } },
+        usable,
+      ],
+    },
+    statusLookupFor({ "sess-child-good": "busy" }),
+  )
+
+  assert.deepEqual(children, [{ id: "sess-child-good", type: "explore", updatedAtMs: NOW_MS, running: true, archived: false }])
+})
+
+test("resolveSubagentChildren keeps a child whose status lookup throws or is absent, running false", async () => {
+  const child = makeRawChild()
+  const expected = [{ id: CHILD_ID, type: "explore", updatedAtMs: NOW_MS, running: false, archived: false }]
+
+  assert.deepEqual(await resolveSubagentChildren({ data: [child] }, throwingStatusLookup), expected)
+  assert.deepEqual(await resolveSubagentChildren({ data: [child] }, undefined), expected)
+})
+
+test("resolveSubagentChildren drops only the child that throws while being mapped and keeps its siblings", async () => {
+  const hostile: Record<string, unknown> = { id: "sess-hostile" }
+  Object.defineProperty(hostile, "time", {
+    get() {
+      throw new Error("hostile getter")
+    },
+  })
+  const sibling = makeRawChild({ id: "sess-child-good" })
+
+  const children = await resolveSubagentChildren({ data: [hostile, sibling] }, busyStatusLookup)
+
+  assert.deepEqual(children, [{ id: "sess-child-good", type: "explore", updatedAtMs: NOW_MS, running: true, archived: false }])
 })

@@ -40,6 +40,66 @@ export const filterSubagentChildren = (children: readonly SubagentChild[], nowMs
     return nowMs - child.updatedAtMs <= SUBAGENT_RECENT_WINDOW_MS
   })
 
+export const SUBAGENT_RUNNING_STATUS_TYPES: ReadonlySet<string> = new Set(["busy", "retry"])
+
+export type SubagentStatusLookup = (sessionID: string) => { type?: string } | null | undefined
+
+const subagentChildRunning = (sessionID: string, statusLookup: SubagentStatusLookup | undefined): boolean => {
+  if (statusLookup === undefined) return false
+  try {
+    const status = statusLookup(sessionID)
+    return typeof status?.type === "string" && SUBAGENT_RUNNING_STATUS_TYPES.has(status.type)
+  } catch {
+    return false
+  }
+}
+
+const subagentChildFrom = (raw: unknown, statusLookup: SubagentStatusLookup | undefined): SubagentChild | undefined => {
+  if (!isRecord(raw)) return undefined
+  if (typeof raw["id"] !== "string" || raw["id"].length === 0) return undefined
+  const time = raw["time"]
+  if (!isRecord(time)) return undefined
+  if (!isFiniteNumber(time["updated"])) return undefined
+  return {
+    id: raw["id"],
+    type: typeof raw["agent"] === "string" ? raw["agent"] : SUBAGENT_FALLBACK_TYPE,
+    updatedAtMs: time["updated"],
+    running: subagentChildRunning(raw["id"], statusLookup),
+    archived: time["archived"] !== undefined,
+  }
+}
+
+// The live host surface behind the children fetch cannot be verified from the
+// stale plugin typings, so every access below is guarded: whatever the fetch
+// resolves to (or throws), the worst outcome is an empty group for this tick,
+// never an exception escaping into the sidebar's refresh loop.
+export const resolveSubagentChildren = async (
+  fetchResult: unknown,
+  statusLookup: SubagentStatusLookup | undefined,
+): Promise<SubagentChild[]> => {
+  let result: unknown
+  try {
+    result = await fetchResult
+  } catch {
+    return []
+  }
+  if (!isRecord(result)) return []
+  if (result["error"] !== undefined) return []
+  const data = result["data"]
+  if (!Array.isArray(data)) return []
+  const children: SubagentChild[] = []
+  for (const raw of data) {
+    let child: SubagentChild | undefined
+    try {
+      child = subagentChildFrom(raw, statusLookup)
+    } catch {
+      child = undefined
+    }
+    if (child !== undefined) children.push(child)
+  }
+  return children
+}
+
 const BYTES_PER_KILOBYTE = 1024
 const BYTES_PER_MEGABYTE = BYTES_PER_KILOBYTE * BYTES_PER_KILOBYTE
 const BYTES_PER_GIGABYTE = BYTES_PER_MEGABYTE * BYTES_PER_KILOBYTE

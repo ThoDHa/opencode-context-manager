@@ -13,12 +13,12 @@
 import type { TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
 import { createSignal, onCleanup, onMount } from "solid-js"
 import {
-  SUBAGENT_FALLBACK_TYPE,
   filterSubagentChildren,
   loadPanelData,
   panelRows,
   resolveSidebarEnabled,
   resolveSidebarSubagents,
+  resolveSubagentChildren,
   sidebarRows,
   sidebarSubagentsGroup,
   type PanelData,
@@ -30,14 +30,13 @@ import {
 const PLUGIN_ID = "lru-context"
 const COMMAND_NAMESPACE = "palette"
 const COMMAND_NAME = "lru.panel"
-const COMMAND_TITLE = "LRU context panel"
+const COMMAND_TITLE = "LRU context manager"
 const COMMAND_DESCRIPTION = "Open the LRU context manager's session panel"
 const COMMAND_CATEGORY = "LRU"
 const SLASH_NAME = "lru"
 const DIALOG_SIZE = "large"
 const SIDEBAR_SLOT_ORDER = 600
 const SIDEBAR_REFRESH_MS = 5000
-const SUBAGENT_RUNNING_STATUS_TYPES: ReadonlySet<string> = new Set(["busy", "retry"])
 
 type PanelProps = { api: TuiPluginApi; data: PanelData }
 
@@ -86,21 +85,16 @@ const openPanelSafely = (api: TuiPluginApi): void => {
 }
 
 const subagentChildrenOf = async (api: TuiPluginApi, sessionID: string): Promise<SubagentChild[]> => {
-  let result: Awaited<ReturnType<TuiPluginApi["client"]["session"]["children"]>>
   try {
-    result = await api.client.session.children({ sessionID })
+    // resolveSubagentChildren guards the result and the status lookups, but
+    // the children call itself (and whether api.client.session.children even
+    // exists on this host build) lives here: the whole body stays guarded so
+    // this tick degrades to a group-less sidebar instead of blanking one.
+    const result = await api.client.session.children({ sessionID })
+    return await resolveSubagentChildren(result, (childID) => api.session.status(childID))
   } catch {
-    // A failed children fetch degrades to the group-less sidebar for this tick.
     return []
   }
-  if (result.error !== undefined) return []
-  return (result.data ?? []).map((session) => ({
-    id: session.id,
-    type: session.agent ?? SUBAGENT_FALLBACK_TYPE,
-    updatedAtMs: session.time.updated,
-    running: SUBAGENT_RUNNING_STATUS_TYPES.has(api.session.status(session.id)?.type ?? ""),
-    archived: session.time.archived !== undefined,
-  }))
 }
 
 type SidebarEntryProps = { api: TuiPluginApi; sessionID: string; subagentsEnabled: boolean }
