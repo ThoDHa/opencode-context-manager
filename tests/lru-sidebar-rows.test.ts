@@ -66,7 +66,7 @@ test("sidebarRows renders the approved layout's header, stat block, and eviction
   const rows = sidebarRowsWithinWidth(data)
 
   assert.deepEqual(rows, [
-    { text: "LRU context manager", tone: "header" },
+    { text: "LRU Context Manager", tone: "header" },
     { text: " ", tone: "normal" },
     { text: "Budget: 200k", tone: "normal" },
     { text: "Watermark: 100k", tone: "normal" },
@@ -92,10 +92,10 @@ test("sidebarRows keeps the panel's manual-mode header suffix over the spaced gr
 
   const rows = sidebarRowsWithinWidth(manualData)
 
-  assert.equal(rows[0].text, "LRU context manager (manual)")
+  assert.equal(rows[0].text, "LRU Context Manager (manual)")
   assert.equal(rows[0].tone, "header")
   assert.deepEqual(rows[1], { text: " ", tone: "normal" })
-  assert.equal(sidebarRowsWithinWidth(automaticData)[0].text, "LRU context manager")
+  assert.equal(sidebarRowsWithinWidth(automaticData)[0].text, "LRU Context Manager")
 })
 
 test("sidebarRows reports a session without runs and a sidebar outside any session", () => {
@@ -108,12 +108,12 @@ test("sidebarRows reports a session without runs and a sidebar outside any sessi
   }
 
   assert.deepEqual(sidebarRowsWithinWidth(noMetricsData), [
-    { text: "LRU context manager", tone: "header" },
+    { text: "LRU Context Manager", tone: "header" },
     { text: " ", tone: "normal" },
     { text: "no metrics recorded for this session yet", tone: "muted" },
   ])
   assert.deepEqual(sidebarRowsWithinWidth({ ...noMetricsData, activeSession: undefined }), [
-    { text: "LRU context manager", tone: "header" },
+    { text: "LRU Context Manager", tone: "header" },
     { text: " ", tone: "normal" },
     { text: "no active session", tone: "muted" },
   ])
@@ -129,7 +129,7 @@ test("sidebarRows shows the empty-session state when the session's log lines are
     assert.equal(data.error, undefined)
     assert.equal(data.current, undefined)
     assert.deepEqual(sidebarRowsWithinWidth(data), [
-      { text: "LRU context manager", tone: "header" },
+      { text: "LRU Context Manager", tone: "header" },
       { text: " ", tone: "normal" },
       { text: "no metrics recorded for this session yet", tone: "muted" },
     ])
@@ -146,7 +146,7 @@ test("sidebarRows pins the unreadable-log warning as its own group when no snaps
   }
 
   assert.deepEqual(sidebarRowsWithinWidth(data), [
-    { text: "LRU context manager", tone: "header" },
+    { text: "LRU Context Manager", tone: "header" },
     { text: " ", tone: "normal" },
     { text: "metrics log unreadable: EACCES: permissio…", tone: "warning" },
   ])
@@ -166,7 +166,7 @@ test("sidebarRows keeps the snapshot-fed session block under the warning group w
     assert.ok(data.current !== undefined)
     const rows = sidebarRowsWithinWidth(data)
     assert.deepEqual(rows.slice(0, 2), [
-      { text: "LRU context manager (manual)", tone: "header" },
+      { text: "LRU Context Manager (manual)", tone: "header" },
       { text: " ", tone: "normal" },
     ])
     assert.ok(rows[2].text.startsWith("metrics log unreadable:"))
@@ -195,7 +195,7 @@ test("sidebarRows renders the log-fed fallback session in the spaced groups", as
     assert.equal(data.error, undefined)
     assert.ok(data.current !== undefined)
     assert.deepEqual(sidebarRowsWithinWidth(data), [
-      { text: "LRU context manager", tone: "header" },
+      { text: "LRU Context Manager", tone: "header" },
       { text: " ", tone: "normal" },
       { text: `Budget: 600`, tone: "normal" },
       { text: "Watermark: 100k", tone: "normal" },
@@ -247,7 +247,7 @@ test("sidebarRows caps an over-long read error in the warning group at the sideb
 
   assert.ok(LONG_READ_ERROR.length > SIDEBAR_COLUMN_LIMIT - "metrics log unreadable: ".length)
   assert.deepEqual(sidebarRowsWithinWidth(data), [
-    { text: "LRU context manager", tone: "header" },
+    { text: "LRU Context Manager", tone: "header" },
     { text: " ", tone: "normal" },
     { text: "metrics log unreadable: EACCES: permissio…", tone: "warning" },
   ])
@@ -274,7 +274,7 @@ test("sidebarRows restyles a null budget and a missing watermark into the colon 
   }
 
   assert.deepEqual(sidebarRowsWithinWidth(data), [
-    { text: "LRU context manager", tone: "header" },
+    { text: "LRU Context Manager", tone: "header" },
     { text: " ", tone: "normal" },
     { text: "Budget: inactive (no budget)", tone: "normal" },
     { text: "Watermark: none", tone: "normal" },
@@ -294,7 +294,7 @@ test("sidebarRows shows Watermark none for a present budget when only the waterm
   }
 
   assert.deepEqual(sidebarRowsWithinWidth(data), [
-    { text: "LRU context manager", tone: "header" },
+    { text: "LRU Context Manager", tone: "header" },
     { text: " ", tone: "normal" },
     { text: "Budget: 200k", tone: "normal" },
     { text: "Watermark: none", tone: "normal" },

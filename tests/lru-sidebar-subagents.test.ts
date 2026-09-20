@@ -217,7 +217,7 @@ test("sidebarRows with an absent or empty subagent group stays byte-identical to
   const base = sidebarRows(data)
 
   assert.deepEqual(base, [
-    { text: "LRU context manager", tone: "header" },
+    { text: "LRU Context Manager", tone: "header" },
     { text: " ", tone: "normal" },
     { text: "no metrics recorded for this session yet", tone: "muted" },
   ])

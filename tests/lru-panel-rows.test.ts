@@ -42,7 +42,7 @@ test("panelRows renders the session's budget, last run, compact counters, and ne
 
   const rows = panelRows(data)
 
-  assert.equal(rows[0].text, "LRU context manager")
+  assert.equal(rows[0].text, "LRU Context Manager")
   assert.equal(rows[0].tone, "header")
   assert.ok(rows.some((row) => row.text === `budget: ~200k tokens (per-model limit)`))
   assert.ok(rows.some((row) => row.text === "last run: ~123.5k estimated vs ~100k watermark (over by ~23.5k)"))
@@ -105,8 +105,8 @@ test("panelRows flags manual mode in the header and leaves the automatic-mode he
   }
   const automaticData = { ...manualData, current: { ...sessionPanelData([makeLine()], SESSION_A), manualMode: false } }
 
-  assert.equal(panelRows(manualData)[0].text, "LRU context manager (manual)")
-  assert.equal(panelRows(automaticData)[0].text, "LRU context manager")
+  assert.equal(panelRows(manualData)[0].text, "LRU Context Manager (manual)")
+  assert.equal(panelRows(automaticData)[0].text, "LRU Context Manager")
   assert.ok(!panelRows(automaticData).some((row) => row.text.startsWith("mode:")))
 })
 
@@ -157,7 +157,7 @@ test("panelRows reports a session without recorded runs distinctly from a panel 
   assert.ok(!noMetricsRows.some((row) => row.text === "no active session"))
   assert.ok(!noMetricsRows.some((row) => row.text.startsWith("budget:")))
   assert.deepEqual(noMetricsRows, [
-    { text: "LRU context manager", tone: "header" },
+    { text: "LRU Context Manager", tone: "header" },
     { text: "no metrics recorded for this session yet", tone: "muted" },
   ])
 
@@ -166,7 +166,7 @@ test("panelRows reports a session without recorded runs distinctly from a panel 
   assert.ok(noSessionRows.some((row) => row.text === "no active session"))
   assert.ok(!noSessionRows.some((row) => row.text === "no metrics recorded for this session yet"))
   assert.deepEqual(noSessionRows, [
-    { text: "LRU context manager", tone: "header" },
+    { text: "LRU Context Manager", tone: "header" },
     { text: "no active session", tone: "muted" },
   ])
 })
@@ -183,7 +183,7 @@ test("panelRows surfaces a log read error as the warning row and omits session d
   const rows = panelRows(data)
 
   assert.deepEqual(rows, [
-    { text: "LRU context manager", tone: "header" },
+    { text: "LRU Context Manager", tone: "header" },
     { text: "metrics log unreadable: EACCES: permission denied", tone: "warning" },
   ])
 })

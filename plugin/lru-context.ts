@@ -48,7 +48,7 @@ const DEFAULT_HINT_SESSIONS = 8
 const RELOAD_TOOL_NAME = "read_evicted"
 const RELOAD_ARG_NAME = "subject"
 const RELOAD_TOOL_DESCRIPTION =
-  "Return the full original content of anything the LRU context manager evicted and stashed: a tool call output or a fenced code block from an old user message. Pass the subject exactly as it appears in the eviction notice."
+  "Return the full original content of anything the LRU Context Manager evicted and stashed: a tool call output or a fenced code block from an old user message. Pass the subject exactly as it appears in the eviction notice."
 const RELOAD_ARG_DESCRIPTION = "The subject exactly as named in the eviction notice"
 const RELOAD_ARG_SCHEMA_TYPE = "string"
 const RELOAD_ARG_SCHEMA: Record<string, string> = {
@@ -103,7 +103,7 @@ const METRICS_ROTATION_DISABLED_MAX_BYTES = 0
 const METRICS_ROTATION_SUFFIX = ".1"
 const STATS_TOOL_NAME = "lru_stats"
 const STATS_TOOL_DESCRIPTION =
-  "Return live metrics for the LRU context manager in this session: eviction counters, expired reasoning counts, post-eviction touches, stash occupancy, the effective context budget, and the most recent transform run's token estimate."
+  "Return live metrics for the LRU Context Manager in this session: eviction counters, expired reasoning counts, post-eviction touches, stash occupancy, the effective context budget, and the most recent transform run's token estimate."
 const JSON_INDENT_SPACES = 2
 const CONTEXT_TOKENS_SOURCE_OVERRIDE = "override"
 const CONTEXT_TOKENS_SOURCE_MODEL = "model"

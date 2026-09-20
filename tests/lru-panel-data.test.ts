@@ -475,7 +475,7 @@ test("loadPanelData prefers the live snapshot for the session block and keeps lo
     assert.equal(data.current.recentEvictions[0].subject, "/data/a.txt")
 
     const rows = panelRows(data)
-    assert.equal(rows[0].text, "LRU context manager (manual)")
+    assert.equal(rows[0].text, "LRU Context Manager (manual)")
     assert.equal(rows[0].tone, "header")
     assert.ok(
       rows.some(
@@ -509,7 +509,7 @@ test("loadPanelData lets the session's newer log line win the fields it carries 
     assert.deepEqual(data.current.hotSubjects, SNAPSHOT_HOT_SUBJECTS)
     assert.equal(data.current.runs, SESSION_A_LOG_LINE_COUNT)
     assert.equal(data.current.recentEvictions.length, 1)
-    assert.equal(panelRows(data)[0].text, "LRU context manager (manual)")
+    assert.equal(panelRows(data)[0].text, "LRU Context Manager (manual)")
   })
 })
 
@@ -543,7 +543,7 @@ test("loadPanelData renders automatic mode for a snapshot recorded with manualMo
     const data = await loadPanelData({ path, stateDir, sessionID: SESSION_A })
 
     assert.equal(data.current?.manualMode, false)
-    assert.equal(panelRows(data)[0].text, "LRU context manager")
+    assert.equal(panelRows(data)[0].text, "LRU Context Manager")
   })
 })
 
@@ -565,7 +565,7 @@ test("loadPanelData renders the snapshot block with empty history when no metric
     assert.deepEqual(data.current.stash, { entries: SNAPSHOT_STASH_ENTRIES, capacity: SNAPSHOT_STASH_CAPACITY })
     assert.equal(data.current.runs, 0)
     assert.deepEqual(data.current.recentEvictions, [])
-    assert.equal(panelRows(data)[0].text, "LRU context manager")
+    assert.equal(panelRows(data)[0].text, "LRU Context Manager")
   })
 })
 
@@ -588,7 +588,7 @@ test("loadPanelData falls back to the metrics log when no snapshot exists for th
     assert.equal(data.current.runs, SESSION_A_LOG_LINE_COUNT)
 
     const rows = panelRows(data)
-    assert.equal(rows[0].text, "LRU context manager")
+    assert.equal(rows[0].text, "LRU Context Manager")
     assert.ok(!rows.some((row) => row.text.includes("occupancy:")))
     assert.ok(!rows.some((row) => row.text.startsWith("hot subjects:")))
     assert.ok(
@@ -658,7 +658,7 @@ test("loadPanelData serves the snapshot block alongside the log warning when the
 
     const rows = panelRows(data)
     assert.ok(rows.some((row) => row.text.startsWith("metrics log unreadable:")))
-    assert.equal(rows[0].text, "LRU context manager (manual)")
+    assert.equal(rows[0].text, "LRU Context Manager (manual)")
     assert.ok(rows.some((row) => row.text === "budget: ~200k tokens (per-model limit)"))
     assert.ok(!rows.some((row) => row.text.startsWith("history:")))
   })
