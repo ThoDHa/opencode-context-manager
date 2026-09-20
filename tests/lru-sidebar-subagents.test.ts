@@ -99,7 +99,7 @@ test("filterSubagentChildren keeps fresh non-running children and preserves the 
   assert.deepEqual(filterSubagentChildren([olderInWindow, fresh], NOW_MS), [olderInWindow, fresh])
 })
 
-test("sidebarSubagentsGroup aggregates a multi-child type into a lead row and one labeled muted row", () => {
+test("sidebarSubagentsGroup renders the type's agent count on its row and three indented stat rows beneath", () => {
   const childOne = makeChild({ id: "sess-child-1", type: "scout" })
   const childTwo = makeChild({ id: "sess-child-2", type: "scout", updatedAtMs: NOW_MS - MINUTE_MS })
   const data = dataWithChildren([
@@ -111,11 +111,14 @@ test("sidebarSubagentsGroup aggregates a multi-child type into a lead row and on
 
   assert.deepEqual(rows, [
     { text: "Subagents: 2", tone: "muted" },
-    { text: "scout: 2 agents, 2 evictions, ~900 tokens", tone: "muted" },
+    { text: "scout: 2 agents", tone: "muted" },
+    { text: "  Evictions: 2, ~900 tokens", tone: "muted" },
+    { text: "  Deduped: 18, ~4.5k tokens", tone: "muted" },
+    { text: "  Stash reads: 20, 8 hits", tone: "muted" },
   ])
 })
 
-test("sidebarSubagentsGroup omits the agents clause for a single-child type", () => {
+test("sidebarSubagentsGroup uses the singular agent unit for a single-child type", () => {
   const child = makeChild({ type: "scout" })
   const data = dataWithChildren([{ id: child.id, panel: makePanel(child.id, { evictions: 1, evictionTokensSaved: 900 }) }])
 
@@ -123,7 +126,10 @@ test("sidebarSubagentsGroup omits the agents clause for a single-child type", ()
 
   assert.deepEqual(rows, [
     { text: "Subagents: 1", tone: "muted" },
-    { text: "scout: 1 evictions, ~900 tokens", tone: "muted" },
+    { text: "scout: 1 agent", tone: "muted" },
+    { text: "  Evictions: 1, ~900 tokens", tone: "muted" },
+    { text: "  Deduped: 9, ~2.3k tokens", tone: "muted" },
+    { text: "  Stash reads: 10, 4 hits", tone: "muted" },
   ])
 })
 
@@ -147,7 +153,10 @@ test("sidebarSubagentsGroup sums the landed panels of a type and keeps the agent
 
   assert.deepEqual(rows, [
     { text: "Subagents: 2", tone: "muted" },
-    { text: "scout: 2 agents, 2 evictions, ~900 tokens", tone: "muted" },
+    { text: "scout: 2 agents", tone: "muted" },
+    { text: "  Evictions: 2, ~900 tokens", tone: "muted" },
+    { text: "  Deduped: 9, ~2.3k tokens", tone: "muted" },
+    { text: "  Stash reads: 10, 4 hits", tone: "muted" },
   ])
 })
 
@@ -161,21 +170,25 @@ test("sidebarSubagentsGroup sorts type rows by the type's most recent child upda
 
   assert.deepEqual(rows, [
     { text: "Subagents: 3", tone: "muted" },
-    { text: "probe: 2 agents, 2 evictions, ~900 tokens", tone: "muted" },
+    { text: "probe: 2 agents", tone: "muted" },
+    { text: "  Evictions: 2, ~900 tokens", tone: "muted" },
+    { text: "  Deduped: 9, ~2.3k tokens", tone: "muted" },
+    { text: "  Stash reads: 10, 4 hits", tone: "muted" },
     { text: "scan: no data yet", tone: "muted" },
   ])
 })
 
-test("sidebarSubagentsGroup caps an over-long type label's row at the sidebar column limit and carries eviction savings only", () => {
+test("sidebarSubagentsGroup caps an over-long type label's row at the sidebar column limit and indents the stat rows beneath it", () => {
   const child = makeChild({ type: "a".repeat(60) })
   const data = dataWithChildren([{ id: child.id, panel: makePanel(child.id) }])
 
   const rows = rowsWithinWidth(sidebarSubagentsGroup([child], data, NOW_MS))
 
-  assert.equal(rows.length, 2)
+  assert.equal(rows.length, 5)
   assert.equal(rows[1].text, `${"a".repeat(SIDEBAR_COLUMN_LIMIT - 1)}…`)
-  assert.ok(!rows.some((row) => /dedup|stash|Deduped|Stash/i.test(row.text)))
-  assert.ok(!rows.some((row) => row.text.includes(String(makeTotals().dedupTokensSaved))))
+  assert.equal(rows[2].text, "  Evictions: 5, ~3.1k tokens")
+  assert.equal(rows[3].text, "  Deduped: 9, ~2.3k tokens")
+  assert.equal(rows[4].text, "  Stash reads: 10, 4 hits")
 })
 
 test("sidebarSubagentsGroup returns no rows for an empty in-window set", () => {
@@ -187,7 +200,8 @@ test("sidebarRows appends a non-empty subagent group as the last blank-line-sepa
   const base = sidebarRows(data)
   const group: PanelRow[] = [
     { text: "Subagents: 1", tone: "muted" },
-    { text: "explore: 5 evictions, ~3.1k tokens", tone: "muted" },
+    { text: "explore: 1 agent", tone: "muted" },
+    { text: "  Evictions: 5, ~3.1k tokens", tone: "muted" },
   ]
 
   const rows = sidebarRows(data, group)
@@ -200,7 +214,7 @@ test("sidebarRows appends the subagent group after the eviction footer when the 
   const data: PanelData = { ...dataWithChildren(), current }
   const group: PanelRow[] = [
     { text: "Subagents: 1", tone: "muted" },
-    { text: "scout: 1 evictions, ~900 tokens", tone: "muted" },
+    { text: "scout: 1 agent", tone: "muted" },
   ]
 
   const rows = rowsWithinWidth(sidebarRows(data, group))

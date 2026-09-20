@@ -664,9 +664,10 @@ const SIDEBAR_HITS_UNIT = "hits"
 const SIDEBAR_BUDGET_INACTIVE_TEXT = `${SIDEBAR_BUDGET_LABEL}: inactive (no budget)`
 const SIDEBAR_WATERMARK_MISSING_TEXT = `${SIDEBAR_WATERMARK_LABEL}: none`
 const SIDEBAR_SUBAGENTS_LEAD_LABEL = "Subagents"
+const SUBAGENT_AGENT_SINGULAR = "agent"
 const SUBAGENT_AGENTS_UNIT = "agents"
-const SUBAGENT_EVICTIONS_UNIT = "evictions"
 const SUBAGENT_NO_DATA_TEXT = "no data yet"
+const SUBAGENT_STAT_INDENT = "  "
 
 const sidebarBudgetText = (current: SessionPanel): string =>
   current.budgetTokens === null ? SIDEBAR_BUDGET_INACTIVE_TEXT : `${SIDEBAR_BUDGET_LABEL}: ${formatTokenCount(current.budgetTokens)}`
@@ -681,10 +682,19 @@ const sidebarOverByRow = (current: SessionPanel): PanelRow | undefined => {
   return { text: `${SIDEBAR_OVER_BY_LABEL}: ${formatTokenCount(current.lastRun.deficitTokens)}`, tone: "normal" }
 }
 
+const evictionsStatText = (evictions: number, evictionTokensSaved: number): string =>
+  `${SIDEBAR_EVICTIONS_LABEL}: ${evictions}, ~${formatTokenCount(evictionTokensSaved)} ${SIDEBAR_TOKENS_UNIT}`
+
+const dedupedStatText = (deduped: number, dedupTokensSaved: number): string =>
+  `${SIDEBAR_DEDUPED_LABEL}: ${deduped}, ~${formatTokenCount(dedupTokensSaved)} ${SIDEBAR_TOKENS_UNIT}`
+
+const stashReadsStatText = (stashReads: number, stashHits: number): string =>
+  `${SIDEBAR_STASH_READS_LABEL}: ${stashReads}, ${stashHits} ${SIDEBAR_HITS_UNIT}`
+
 const sidebarCountersGroup = (current: SessionPanel): PanelRow[] => [
-  { text: `${SIDEBAR_EVICTIONS_LABEL}: ${current.totals.evictions}, ~${formatTokenCount(current.totals.evictionTokensSaved)} ${SIDEBAR_TOKENS_UNIT}`, tone: "normal" },
-  { text: `${SIDEBAR_DEDUPED_LABEL}: ${current.totals.deduped}, ~${formatTokenCount(current.totals.dedupTokensSaved)} ${SIDEBAR_TOKENS_UNIT}`, tone: "normal" },
-  { text: `${SIDEBAR_STASH_READS_LABEL}: ${current.stashReads}, ${current.totals.stashHits} ${SIDEBAR_HITS_UNIT}`, tone: "normal" },
+  { text: evictionsStatText(current.totals.evictions, current.totals.evictionTokensSaved), tone: "normal" },
+  { text: dedupedStatText(current.totals.deduped, current.totals.dedupTokensSaved), tone: "normal" },
+  { text: stashReadsStatText(current.stashReads, current.totals.stashHits), tone: "normal" },
 ]
 
 const sidebarEvictionGroup = (entry: PanelEvictedEntry): PanelRow[] => [
@@ -702,13 +712,27 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
   for (const entry of data.subagentPanels ?? []) {
     if (entry.panel !== undefined) panelByID.set(entry.id, entry.panel)
   }
-  type SubagentTypeAggregate = { count: number; evictions: number; evictionTokensSaved: number; hasPanel: boolean; newestUpdatedAtMs: number }
+  type SubagentTypeAggregate = {
+    count: number
+    evictions: number
+    evictionTokensSaved: number
+    deduped: number
+    dedupTokensSaved: number
+    stashReads: number
+    stashHits: number
+    hasPanel: boolean
+    newestUpdatedAtMs: number
+  }
   const aggregates = new Map<string, SubagentTypeAggregate>()
   for (const child of inWindow) {
     const aggregate = aggregates.get(child.type) ?? {
       count: 0,
       evictions: 0,
       evictionTokensSaved: 0,
+      deduped: 0,
+      dedupTokensSaved: 0,
+      stashReads: 0,
+      stashHits: 0,
       hasPanel: false,
       newestUpdatedAtMs: child.updatedAtMs,
     }
@@ -719,17 +743,23 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
       aggregate.hasPanel = true
       aggregate.evictions += panel.totals.evictions
       aggregate.evictionTokensSaved += panel.totals.evictionTokensSaved
+      aggregate.deduped += panel.totals.deduped
+      aggregate.dedupTokensSaved += panel.totals.dedupTokensSaved
+      aggregate.stashReads += panel.stashReads
+      aggregate.stashHits += panel.totals.stashHits
     }
     aggregates.set(child.type, aggregate)
   }
   const sortedTypes = [...aggregates.entries()].sort(([, first], [, second]) => second.newestUpdatedAtMs - first.newestUpdatedAtMs)
   const rows: PanelRow[] = [{ text: truncateToWidth(`${SIDEBAR_SUBAGENTS_LEAD_LABEL}: ${inWindow.length}`, SIDEBAR_COLUMN_LIMIT), tone: "muted" }]
   for (const [type, aggregate] of sortedTypes) {
-    const agentsClause = aggregate.count > 1 ? `${aggregate.count} ${SUBAGENT_AGENTS_UNIT}, ` : ""
-    const body = aggregate.hasPanel
-      ? `${agentsClause}${aggregate.evictions} ${SUBAGENT_EVICTIONS_UNIT}, ~${formatTokenCount(aggregate.evictionTokensSaved)} ${SIDEBAR_TOKENS_UNIT}`
-      : SUBAGENT_NO_DATA_TEXT
+    const agentsText = `${aggregate.count} ${aggregate.count === 1 ? SUBAGENT_AGENT_SINGULAR : SUBAGENT_AGENTS_UNIT}`
+    const body = aggregate.hasPanel ? agentsText : SUBAGENT_NO_DATA_TEXT
     rows.push({ text: truncateToWidth(`${type}: ${body}`, SIDEBAR_COLUMN_LIMIT), tone: "muted" })
+    if (!aggregate.hasPanel) continue
+    rows.push({ text: truncateToWidth(`${SUBAGENT_STAT_INDENT}${evictionsStatText(aggregate.evictions, aggregate.evictionTokensSaved)}`, SIDEBAR_COLUMN_LIMIT), tone: "muted" })
+    rows.push({ text: truncateToWidth(`${SUBAGENT_STAT_INDENT}${dedupedStatText(aggregate.deduped, aggregate.dedupTokensSaved)}`, SIDEBAR_COLUMN_LIMIT), tone: "muted" })
+    rows.push({ text: truncateToWidth(`${SUBAGENT_STAT_INDENT}${stashReadsStatText(aggregate.stashReads, aggregate.stashHits)}`, SIDEBAR_COLUMN_LIMIT), tone: "muted" })
   }
   return rows
 }
