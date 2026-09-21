@@ -5,8 +5,6 @@ import {
   DEFAULT_SIDEBAR_SUBAGENTS,
   SIDEBAR_COLUMN_LIMIT,
   SUBAGENT_FALLBACK_TYPE,
-  SUBAGENT_RECENT_WINDOW_MS,
-  SUBAGENT_RUNNING_STATUS_TYPES,
   filterSubagentChildren,
   globalTotals,
   resolveSidebarSubagents,
@@ -22,6 +20,7 @@ import {
 import { makeLine, makeTotals } from "./lru-panel-fixtures.ts"
 
 const MINUTE_MS = 60 * 1000
+const HOUR_MS = 60 * MINUTE_MS
 const NOW_MS = 1_758_300_000_000
 const CHILD_ID = "sess-child-1"
 const PARENT_ID = "sess-parent"
@@ -30,7 +29,6 @@ const makeChild = (overrides: Partial<SubagentChild> = {}): SubagentChild => ({
   id: CHILD_ID,
   type: "explore",
   updatedAtMs: NOW_MS,
-  running: false,
   archived: false,
   ...overrides,
 })
@@ -65,38 +63,28 @@ test("resolveSidebarSubagents defaults to false honors explicit false and falls 
   }
 })
 
-test("SUBAGENT_RECENT_WINDOW_MS is the approved 30-minute recency window and SUBAGENT_FALLBACK_TYPE the literal subagent", () => {
-  assert.equal(SUBAGENT_RECENT_WINDOW_MS, 30 * MINUTE_MS)
+test("SUBAGENT_FALLBACK_TYPE is the literal subagent", () => {
   assert.equal(SUBAGENT_FALLBACK_TYPE, "subagent")
 })
 
-test("filterSubagentChildren drops an archived child even when fresh and running", () => {
-  const children = [makeChild({ archived: true, running: true }), makeChild()]
+test("filterSubagentChildren keeps a non-archived child no matter how old its last update is", () => {
+  const ancient = makeChild({ updatedAtMs: NOW_MS - 24 * HOUR_MS })
 
-  const kept = filterSubagentChildren(children, NOW_MS)
-
-  assert.deepEqual(kept, [makeChild()])
+  assert.deepEqual(filterSubagentChildren([ancient]), [ancient])
 })
 
-test("filterSubagentChildren keeps a running child no matter how old its last update is", () => {
-  const staleRunning = makeChild({ updatedAtMs: NOW_MS - SUBAGENT_RECENT_WINDOW_MS * 10, running: true })
+test("filterSubagentChildren drops an archived child even when fresh and keeps its non-archived sibling", () => {
+  const archived = makeChild({ archived: true })
+  const fresh = makeChild({ id: "sess-child-2" })
 
-  assert.deepEqual(filterSubagentChildren([staleRunning], NOW_MS), [staleRunning])
+  assert.deepEqual(filterSubagentChildren([archived, fresh]), [fresh])
 })
 
-test("filterSubagentChildren keeps a non-running child exactly at the 30-minute boundary and drops it one millisecond later", () => {
-  const boundaryChild = makeChild({ updatedAtMs: NOW_MS - SUBAGENT_RECENT_WINDOW_MS })
-  const justPastChild = makeChild({ id: "sess-child-2", updatedAtMs: NOW_MS - SUBAGENT_RECENT_WINDOW_MS - 1 })
+test("filterSubagentChildren preserves the input order", () => {
+  const first = makeChild({ updatedAtMs: NOW_MS - 2 * HOUR_MS })
+  const second = makeChild({ id: "sess-child-2", type: "general", updatedAtMs: NOW_MS - HOUR_MS })
 
-  assert.deepEqual(filterSubagentChildren([boundaryChild], NOW_MS), [boundaryChild])
-  assert.deepEqual(filterSubagentChildren([justPastChild], NOW_MS), [])
-})
-
-test("filterSubagentChildren keeps fresh non-running children and preserves the input order", () => {
-  const fresh = makeChild({ updatedAtMs: NOW_MS - MINUTE_MS })
-  const olderInWindow = makeChild({ id: "sess-child-2", type: "general", updatedAtMs: NOW_MS - SUBAGENT_RECENT_WINDOW_MS + 1 })
-
-  assert.deepEqual(filterSubagentChildren([olderInWindow, fresh], NOW_MS), [olderInWindow, fresh])
+  assert.deepEqual(filterSubagentChildren([first, second]), [first, second])
 })
 
 test("sidebarSubagentsGroup renders the type's agent count on its row and three indented stat rows beneath", () => {
@@ -107,7 +95,7 @@ test("sidebarSubagentsGroup renders the type's agent count on its row and three 
     { id: childTwo.id, panel: makePanel(childTwo.id, { evictions: 1, evictionTokensSaved: 400 }) },
   ])
 
-  const rows = rowsWithinWidth(sidebarSubagentsGroup([childOne, childTwo], data, NOW_MS))
+  const rows = rowsWithinWidth(sidebarSubagentsGroup([childOne, childTwo], data))
 
   assert.deepEqual(rows, [
     { text: "Subagents: 2", tone: "muted" },
@@ -122,7 +110,7 @@ test("sidebarSubagentsGroup uses the singular agent unit for a single-child type
   const child = makeChild({ type: "scout" })
   const data = dataWithChildren([{ id: child.id, panel: makePanel(child.id, { evictions: 1, evictionTokensSaved: 900 }) }])
 
-  const rows = rowsWithinWidth(sidebarSubagentsGroup([child], data, NOW_MS))
+  const rows = rowsWithinWidth(sidebarSubagentsGroup([child], data))
 
   assert.deepEqual(rows, [
     { text: "Subagents: 1", tone: "muted" },
@@ -136,7 +124,7 @@ test("sidebarSubagentsGroup uses the singular agent unit for a single-child type
 test("sidebarSubagentsGroup renders no data yet for a type whose children all lack panel data", () => {
   const child = makeChild({ type: "general" })
 
-  const rows = rowsWithinWidth(sidebarSubagentsGroup([child], dataWithChildren(), NOW_MS))
+  const rows = rowsWithinWidth(sidebarSubagentsGroup([child], dataWithChildren()))
 
   assert.deepEqual(rows, [
     { text: "Subagents: 1", tone: "muted" },
@@ -149,7 +137,7 @@ test("sidebarSubagentsGroup sums the landed panels of a type and keeps the agent
   const dataless = makeChild({ id: "sess-child-2", type: "scout", updatedAtMs: NOW_MS - MINUTE_MS })
   const data = dataWithChildren([{ id: landed.id, panel: makePanel(landed.id, { evictions: 2, evictionTokensSaved: 900 }) }])
 
-  const rows = rowsWithinWidth(sidebarSubagentsGroup([landed, dataless], data, NOW_MS))
+  const rows = rowsWithinWidth(sidebarSubagentsGroup([landed, dataless], data))
 
   assert.deepEqual(rows, [
     { text: "Subagents: 2", tone: "muted" },
@@ -166,7 +154,7 @@ test("sidebarSubagentsGroup sorts type rows by the type's most recent child upda
   const olderProbe = makeChild({ id: "sess-child-3", type: "probe", updatedAtMs: NOW_MS - 2 * MINUTE_MS })
   const data = dataWithChildren([{ id: freshProbe.id, panel: makePanel(freshProbe.id, { evictions: 2, evictionTokensSaved: 900 }) }])
 
-  const rows = rowsWithinWidth(sidebarSubagentsGroup([olderExplore, olderProbe, freshProbe], data, NOW_MS))
+  const rows = rowsWithinWidth(sidebarSubagentsGroup([olderExplore, olderProbe, freshProbe], data))
 
   assert.deepEqual(rows, [
     { text: "Subagents: 3", tone: "muted" },
@@ -178,11 +166,38 @@ test("sidebarSubagentsGroup sorts type rows by the type's most recent child upda
   ])
 })
 
+test("sidebarSubagentsGroup renders an ancient child alongside fresh ones regardless of update age", () => {
+  const ancient = makeChild({ id: "sess-child-1", type: "scan", updatedAtMs: NOW_MS - 24 * HOUR_MS })
+  const fresh = makeChild({ id: "sess-child-2", type: "probe" })
+  const data = dataWithChildren([{ id: fresh.id, panel: makePanel(fresh.id) }])
+
+  const rows = rowsWithinWidth(sidebarSubagentsGroup([ancient, fresh], data))
+
+  assert.deepEqual(rows[0], { text: "Subagents: 2", tone: "muted" })
+  assert.deepEqual(rows[rows.length - 1], { text: "scan: no data yet", tone: "muted" })
+})
+
+test("sidebarSubagentsGroup excludes an archived child from the count and the type rows", () => {
+  const archived = makeChild({ id: "sess-child-1", type: "scan", archived: true })
+  const fresh = makeChild({ id: "sess-child-2", type: "probe" })
+  const data = dataWithChildren([{ id: fresh.id, panel: makePanel(fresh.id) }])
+
+  const rows = rowsWithinWidth(sidebarSubagentsGroup([archived, fresh], data))
+
+  assert.deepEqual(rows, [
+    { text: "Subagents: 1", tone: "muted" },
+    { text: "probe: 1 agent", tone: "muted" },
+    { text: "  Evictions: 5, ~3.1k tokens", tone: "muted" },
+    { text: "  Deduped: 9, ~2.3k tokens", tone: "muted" },
+    { text: "  Stash reads: 10, 4 hits", tone: "muted" },
+  ])
+})
+
 test("sidebarSubagentsGroup caps an over-long type label's row at the sidebar column limit and indents the stat rows beneath it", () => {
   const child = makeChild({ type: "a".repeat(60) })
   const data = dataWithChildren([{ id: child.id, panel: makePanel(child.id) }])
 
-  const rows = rowsWithinWidth(sidebarSubagentsGroup([child], data, NOW_MS))
+  const rows = rowsWithinWidth(sidebarSubagentsGroup([child], data))
 
   assert.equal(rows.length, 5)
   assert.equal(rows[1].text, `${"a".repeat(SIDEBAR_COLUMN_LIMIT - 1)}…`)
@@ -191,8 +206,14 @@ test("sidebarSubagentsGroup caps an over-long type label's row at the sidebar co
   assert.equal(rows[4].text, "  Stash reads: 10, 4 hits")
 })
 
-test("sidebarSubagentsGroup returns no rows for an empty in-window set", () => {
-  assert.deepEqual(sidebarSubagentsGroup([], dataWithChildren(), NOW_MS), [])
+test("sidebarSubagentsGroup returns no rows for an empty child list", () => {
+  assert.deepEqual(sidebarSubagentsGroup([], dataWithChildren()), [])
+})
+
+test("sidebarSubagentsGroup returns no rows when every child is archived", () => {
+  const archived = makeChild({ archived: true })
+
+  assert.deepEqual(sidebarSubagentsGroup([archived], dataWithChildren()), [])
 })
 
 test("sidebarRows appends a non-empty subagent group as the last blank-line-separated group", () => {
@@ -247,99 +268,68 @@ const makeRawChild = (overrides: Record<string, unknown> = {}): Record<string, u
   ...overrides,
 })
 
-const busyStatusLookup = (): { type: string } => ({ type: "busy" })
-
-const statusLookupFor = (typeForID: Record<string, string>) => (sessionID: string): { type: string } | undefined => {
-  const type = typeForID[sessionID]
-  return type === undefined ? undefined : { type }
-}
-
-const throwingStatusLookup = (): never => {
-  throw new Error("status exploded")
-}
-
-test("SUBAGENT_RUNNING_STATUS_TYPES is exactly the busy and retry status types", () => {
-  assert.deepEqual([...SUBAGENT_RUNNING_STATUS_TYPES].sort(), ["busy", "retry"])
-})
-
 test("resolveSubagentChildren degrades a rejecting children fetch to an empty group", async () => {
-  assert.deepEqual(await resolveSubagentChildren(Promise.reject(new Error("hostile host")), busyStatusLookup), [])
+  assert.deepEqual(await resolveSubagentChildren(Promise.reject(new Error("hostile host"))), [])
 })
 
 test("resolveSubagentChildren returns no children for an undefined, null, or non-object fetch result", async () => {
   for (const result of [undefined, null, 42, "sessions", [makeRawChild()]]) {
-    assert.deepEqual(await resolveSubagentChildren(result, busyStatusLookup), [])
+    assert.deepEqual(await resolveSubagentChildren(result), [])
   }
 })
 
 test("resolveSubagentChildren returns no children when the fetch result carries an error field", async () => {
-  assert.deepEqual(await resolveSubagentChildren({ error: "boom", data: [makeRawChild()] }, busyStatusLookup), [])
-  assert.deepEqual(await resolveSubagentChildren({ error: null, data: [makeRawChild()] }, busyStatusLookup), [])
+  assert.deepEqual(await resolveSubagentChildren({ error: "boom", data: [makeRawChild()] }), [])
+  assert.deepEqual(await resolveSubagentChildren({ error: null, data: [makeRawChild()] }), [])
 })
 
 test("resolveSubagentChildren returns no children when data is missing or not an array", async () => {
   for (const data of [undefined, null, {}, "sessions", 7]) {
-    assert.deepEqual(await resolveSubagentChildren({ data }, busyStatusLookup), [])
+    assert.deepEqual(await resolveSubagentChildren({ data }), [])
   }
 })
 
-test("resolveSubagentChildren maps a valid result field-for-field, honoring the running status set", async () => {
-  const busy = makeRawChild({ id: "sess-child-1" })
-  const retrying = makeRawChild({ id: "sess-child-2", agent: "general", time: { updated: NOW_MS - MINUTE_MS } })
-  const idle = makeRawChild({ id: "sess-child-3", agent: "scan", time: { updated: NOW_MS - 2 * MINUTE_MS } })
-  const archived = makeRawChild({ id: "sess-child-4", time: { updated: NOW_MS, archived: NOW_MS - MINUTE_MS } })
-  const untypedAgent = makeRawChild({ id: "sess-child-5", agent: undefined })
+test("resolveSubagentChildren maps a valid result field-for-field, deriving type and archived from the raw child", async () => {
+  const explore = makeRawChild({ id: "sess-child-1" })
+  const general = makeRawChild({ id: "sess-child-2", agent: "general", time: { updated: NOW_MS - MINUTE_MS } })
+  const archived = makeRawChild({ id: "sess-child-3", time: { updated: NOW_MS, archived: NOW_MS - MINUTE_MS } })
+  const untypedAgent = makeRawChild({ id: "sess-child-4", agent: undefined })
 
-  const children = await resolveSubagentChildren(
-    { data: [busy, retrying, idle, archived, untypedAgent] },
-    statusLookupFor({ "sess-child-1": "busy", "sess-child-2": "retry", "sess-child-3": "watching" }),
-  )
+  const children = await resolveSubagentChildren({ data: [explore, general, archived, untypedAgent] })
 
   assert.deepEqual(children, [
-    { id: "sess-child-1", type: "explore", updatedAtMs: NOW_MS, running: true, archived: false },
-    { id: "sess-child-2", type: "general", updatedAtMs: NOW_MS - MINUTE_MS, running: true, archived: false },
-    { id: "sess-child-3", type: "scan", updatedAtMs: NOW_MS - 2 * MINUTE_MS, running: false, archived: false },
-    { id: "sess-child-4", type: "explore", updatedAtMs: NOW_MS, running: false, archived: true },
-    { id: "sess-child-5", type: SUBAGENT_FALLBACK_TYPE, updatedAtMs: NOW_MS, running: false, archived: false },
+    { id: "sess-child-1", type: "explore", updatedAtMs: NOW_MS, archived: false },
+    { id: "sess-child-2", type: "general", updatedAtMs: NOW_MS - MINUTE_MS, archived: false },
+    { id: "sess-child-3", type: "explore", updatedAtMs: NOW_MS, archived: true },
+    { id: "sess-child-4", type: SUBAGENT_FALLBACK_TYPE, updatedAtMs: NOW_MS, archived: false },
   ])
 })
 
 test("resolveSubagentChildren accepts the fetch promise itself and maps what it resolves", async () => {
   const child = makeRawChild({ id: "sess-child-1", agent: "general" })
 
-  assert.deepEqual(await resolveSubagentChildren(Promise.resolve({ data: [child] }), statusLookupFor({ "sess-child-1": "busy" })), [
-    { id: "sess-child-1", type: "general", updatedAtMs: NOW_MS, running: true, archived: false },
+  assert.deepEqual(await resolveSubagentChildren(Promise.resolve({ data: [child] })), [
+    { id: "sess-child-1", type: "general", updatedAtMs: NOW_MS, archived: false },
   ])
 })
 
 test("resolveSubagentChildren drops a child with a hostile shape and keeps its usable siblings", async () => {
   const usable = makeRawChild({ id: "sess-child-good" })
 
-  const children = await resolveSubagentChildren(
-    {
-      data: [
-        null,
-        42,
-        { agent: "explore", time: { updated: NOW_MS } },
-        { id: "", agent: "explore", time: { updated: NOW_MS } },
-        { id: "sess-no-time", agent: "explore" },
-        { id: "sess-empty-time", agent: "explore", time: {} },
-        { id: "sess-string-time", agent: "explore", time: { updated: "soon" } },
-        usable,
-      ],
-    },
-    statusLookupFor({ "sess-child-good": "busy" }),
-  )
+  const children = await resolveSubagentChildren({
+    data: [
+      null,
+      42,
+      { agent: "explore", time: { updated: NOW_MS } },
+      { id: "", agent: "explore", time: { updated: NOW_MS } },
+      { id: "sess-no-time", agent: "explore" },
+      { id: "sess-empty-time", agent: "explore", time: {} },
+      { id: "sess-string-time", agent: "explore", time: { updated: "soon" } },
+      usable,
+    ],
+  })
 
-  assert.deepEqual(children, [{ id: "sess-child-good", type: "explore", updatedAtMs: NOW_MS, running: true, archived: false }])
-})
-
-test("resolveSubagentChildren keeps a child whose status lookup throws or is absent, running false", async () => {
-  const child = makeRawChild()
-  const expected = [{ id: CHILD_ID, type: "explore", updatedAtMs: NOW_MS, running: false, archived: false }]
-
-  assert.deepEqual(await resolveSubagentChildren({ data: [child] }, throwingStatusLookup), expected)
-  assert.deepEqual(await resolveSubagentChildren({ data: [child] }, undefined), expected)
+  assert.deepEqual(children, [{ id: "sess-child-good", type: "explore", updatedAtMs: NOW_MS, archived: false }])
 })
 
 test("resolveSubagentChildren drops only the child that throws while being mapped and keeps its siblings", async () => {
@@ -351,7 +341,7 @@ test("resolveSubagentChildren drops only the child that throws while being mappe
   })
   const sibling = makeRawChild({ id: "sess-child-good" })
 
-  const children = await resolveSubagentChildren({ data: [hostile, sibling] }, busyStatusLookup)
+  const children = await resolveSubagentChildren({ data: [hostile, sibling] })
 
-  assert.deepEqual(children, [{ id: "sess-child-good", type: "explore", updatedAtMs: NOW_MS, running: true, archived: false }])
+  assert.deepEqual(children, [{ id: "sess-child-good", type: "explore", updatedAtMs: NOW_MS, archived: false }])
 })

@@ -86,12 +86,12 @@ const openPanelSafely = (api: TuiPluginApi): void => {
 
 const subagentChildrenOf = async (api: TuiPluginApi, sessionID: string): Promise<SubagentChild[]> => {
   try {
-    // resolveSubagentChildren guards the result and the status lookups, but
-    // the children call itself (and whether api.client.session.children even
-    // exists on this host build) lives here: the whole body stays guarded so
-    // this tick degrades to a group-less sidebar instead of blanking one.
+    // resolveSubagentChildren guards the fetch result and each child's shape,
+    // but the children call itself (and whether api.client.session.children
+    // even exists on this host build) lives here: the whole body stays guarded
+    // so this tick degrades to a group-less sidebar instead of blanking one.
     const result = await api.client.session.children({ sessionID })
-    return await resolveSubagentChildren(result, (childID) => api.session.status(childID))
+    return await resolveSubagentChildren(result)
   } catch {
     return []
   }
@@ -107,16 +107,13 @@ const SidebarEntry = (props: SidebarEntryProps) => {
       let next: PanelRow[] = []
       try {
         const children = props.subagentsEnabled ? await subagentChildrenOf(props.api, props.sessionID) : []
-        // Pre-filter before the loader so archived and out-of-window children
-        // cost no snapshot reads; the builder re-filters and stays the sole
-        // determinant of the rendered rows.
-        const inWindow = filterSubagentChildren(children, Date.now())
-        const data = await loadPanelData({
-          sessionID: props.sessionID,
-          childSessionIDs: inWindow.length > 0 ? inWindow.map((child) => child.id) : undefined,
-        })
+        // Pre-filter before the loader so archived children cost no snapshot
+        // reads; what renders is the builder's call over all fetched children.
+        const kept = filterSubagentChildren(children)
+        const childSessionIDs = kept.length > 0 ? kept.map((child) => child.id) : undefined
+        const data = await loadPanelData({ sessionID: props.sessionID, childSessionIDs })
         if (data.current !== undefined) {
-          next = sidebarRows(data, inWindow.length > 0 ? sidebarSubagentsGroup(children, data) : undefined)
+          next = sidebarRows(data, sidebarSubagentsGroup(children, data))
         }
       } catch {
         // Startup and log rotation produce transient read failures; hide the

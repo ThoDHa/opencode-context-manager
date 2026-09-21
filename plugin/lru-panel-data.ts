@@ -22,39 +22,19 @@ export const DEFAULT_SIDEBAR_SUBAGENTS = false
 export const resolveSidebarSubagents = (value: unknown): boolean =>
   typeof value === "boolean" ? value : DEFAULT_SIDEBAR_SUBAGENTS
 
-export const SUBAGENT_RECENT_WINDOW_MS = 30 * 60 * 1000
 export const SUBAGENT_FALLBACK_TYPE = "subagent"
 
 export type SubagentChild = {
   id: string
   type: string
   updatedAtMs: number
-  running: boolean
   archived: boolean
 }
 
-export const filterSubagentChildren = (children: readonly SubagentChild[], nowMs: number): SubagentChild[] =>
-  children.filter((child) => {
-    if (child.archived) return false
-    if (child.running) return true
-    return nowMs - child.updatedAtMs <= SUBAGENT_RECENT_WINDOW_MS
-  })
+export const filterSubagentChildren = (children: readonly SubagentChild[]): SubagentChild[] =>
+  children.filter((child) => !child.archived)
 
-export const SUBAGENT_RUNNING_STATUS_TYPES: ReadonlySet<string> = new Set(["busy", "retry"])
-
-export type SubagentStatusLookup = (sessionID: string) => { type?: string } | null | undefined
-
-const subagentChildRunning = (sessionID: string, statusLookup: SubagentStatusLookup | undefined): boolean => {
-  if (statusLookup === undefined) return false
-  try {
-    const status = statusLookup(sessionID)
-    return typeof status?.type === "string" && SUBAGENT_RUNNING_STATUS_TYPES.has(status.type)
-  } catch {
-    return false
-  }
-}
-
-const subagentChildFrom = (raw: unknown, statusLookup: SubagentStatusLookup | undefined): SubagentChild | undefined => {
+const subagentChildFrom = (raw: unknown): SubagentChild | undefined => {
   if (!isRecord(raw)) return undefined
   if (typeof raw["id"] !== "string" || raw["id"].length === 0) return undefined
   const time = raw["time"]
@@ -64,7 +44,6 @@ const subagentChildFrom = (raw: unknown, statusLookup: SubagentStatusLookup | un
     id: raw["id"],
     type: typeof raw["agent"] === "string" ? raw["agent"] : SUBAGENT_FALLBACK_TYPE,
     updatedAtMs: time["updated"],
-    running: subagentChildRunning(raw["id"], statusLookup),
     archived: time["archived"] !== undefined,
   }
 }
@@ -73,10 +52,7 @@ const subagentChildFrom = (raw: unknown, statusLookup: SubagentStatusLookup | un
 // stale plugin typings, so every access below is guarded: whatever the fetch
 // resolves to (or throws), the worst outcome is an empty group for this tick,
 // never an exception escaping into the sidebar's refresh loop.
-export const resolveSubagentChildren = async (
-  fetchResult: unknown,
-  statusLookup: SubagentStatusLookup | undefined,
-): Promise<SubagentChild[]> => {
+export const resolveSubagentChildren = async (fetchResult: unknown): Promise<SubagentChild[]> => {
   let result: unknown
   try {
     result = await fetchResult
@@ -91,7 +67,7 @@ export const resolveSubagentChildren = async (
   for (const raw of data) {
     let child: SubagentChild | undefined
     try {
-      child = subagentChildFrom(raw, statusLookup)
+      child = subagentChildFrom(raw)
     } catch {
       child = undefined
     }
@@ -705,9 +681,9 @@ const sidebarEvictionGroup = (entry: PanelEvictedEntry): PanelRow[] => [
 const withBlankSeparators = (groups: PanelRow[][]): PanelRow[] =>
   groups.flatMap((group, index) => (index === 0 ? group : [SIDEBAR_BLANK_ROW, ...group]))
 
-export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: PanelData, nowMs: number = Date.now()): PanelRow[] => {
-  const inWindow = filterSubagentChildren(children, nowMs)
-  if (inWindow.length === 0) return []
+export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: PanelData): PanelRow[] => {
+  const kept = filterSubagentChildren(children)
+  if (kept.length === 0) return []
   const panelByID = new Map<string, SessionPanel>()
   for (const entry of data.subagentPanels ?? []) {
     if (entry.panel !== undefined) panelByID.set(entry.id, entry.panel)
@@ -724,7 +700,7 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
     newestUpdatedAtMs: number
   }
   const aggregates = new Map<string, SubagentTypeAggregate>()
-  for (const child of inWindow) {
+  for (const child of kept) {
     const aggregate = aggregates.get(child.type) ?? {
       count: 0,
       evictions: 0,
@@ -751,7 +727,7 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
     aggregates.set(child.type, aggregate)
   }
   const sortedTypes = [...aggregates.entries()].sort(([, first], [, second]) => second.newestUpdatedAtMs - first.newestUpdatedAtMs)
-  const rows: PanelRow[] = [{ text: truncateToWidth(`${SIDEBAR_SUBAGENTS_LEAD_LABEL}: ${inWindow.length}`, SIDEBAR_COLUMN_LIMIT), tone: "muted" }]
+  const rows: PanelRow[] = [{ text: truncateToWidth(`${SIDEBAR_SUBAGENTS_LEAD_LABEL}: ${kept.length}`, SIDEBAR_COLUMN_LIMIT), tone: "muted" }]
   for (const [type, aggregate] of sortedTypes) {
     const agentsText = `${aggregate.count} ${aggregate.count === 1 ? SUBAGENT_AGENT_SINGULAR : SUBAGENT_AGENTS_UNIT}`
     const body = aggregate.hasPanel ? agentsText : SUBAGENT_NO_DATA_TEXT
