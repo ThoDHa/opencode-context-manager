@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readdir, rename, stat, unlink, writeFile } from "node:fs/promises"
+import { appendFile, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import type { Plugin } from "@opencode-ai/plugin"
@@ -267,6 +267,37 @@ type SessionMetrics = {
 
 type MetricsStore = Map<string, SessionMetrics>
 
+// The raw counters a session's persisted totals can seed, anchored to
+// SessionMetrics by the exhaustiveness assertion below so a renamed or
+// removed counter fails to compile here instead of silently missing its
+// seed. The runtime seeder iterates this same list.
+const RAW_COUNTER_KEYS = [
+  "evictions",
+  "bytesReclaimed",
+  "stashHits",
+  "stashMisses",
+  "stashDropped",
+  "deduped",
+  "dedupedBytes",
+  "reasoningExpired",
+  "reasoningBytesExpired",
+  "postEvictionTouches",
+  "fenceEvicted",
+] as const
+
+type RawCounterKey = (typeof RAW_COUNTER_KEYS)[number]
+
+// Two-directional exhaustiveness: every number-valued SessionMetrics key
+// other than the per-process cursors must appear in RawCounterKey, so a
+// newly added counter fails to compile until it is added to the seeded set.
+type NumberValuedSessionMetricKey = {
+  [K in keyof SessionMetrics]-?: SessionMetrics[K] extends number ? K : never
+}[keyof SessionMetrics]
+type MetricsCursorKey = "touchScanThrough" | "stashReadsLoggedThrough"
+type UnseededMetricKeys = Exclude<Exclude<NumberValuedSessionMetricKey, MetricsCursorKey>, RawCounterKey>
+type AssertEveryMetricSeeded = UnseededMetricKeys extends never ? true : never
+const everyMetricIsSeeded: AssertEveryMetricSeeded = true
+
 type CumulativeCounters = {
   evictions: number
   bytesReclaimed: number
@@ -275,6 +306,7 @@ type CumulativeCounters = {
   stashMisses: number
   stashDropped: number
   deduped: number
+  dedupedBytes: number
   dedupTokensSaved: number
   reasoningExpired: number
   reasoningBytesExpired: number
@@ -961,20 +993,35 @@ const sessionIDFromContext = (source: unknown): string | undefined => {
 
 const sessionKeyFromContext = (source: unknown): string => sessionIDFromContext(source) ?? FALLBACK_SESSION_KEY
 
-const executeReadEvicted = (stashes: StashStore, metrics: MetricsStore, metricsSessionBound: number, args: unknown, toolContext: unknown): string => {
+const executeReadEvicted = async (
+  stashes: StashStore,
+  metrics: MetricsStore,
+  hydrations: MetricsHydration,
+  persistedTotalsForSession: (sessionKey: string) => Promise<PersistedTotals | undefined>,
+  metricsSessionBound: number,
+  args: unknown,
+  toolContext: unknown,
+): Promise<string> => {
   const subject = typeof args === "object" && args !== null ? (args as { subject?: unknown }).subject : undefined
   if (typeof subject !== "string" || subject.length === 0) return invalidSubjectTextFor(typeof subject)
   const sessionKey = sessionKeyFromContext(toolContext)
   const stash = stashes.get(sessionKey)
   const matches = stash === undefined ? [] : stashedMatchesFor(stash, subject)
   if (matches.length === 0) {
+    // A first-touch hydration may still be seeding this session: await it
+    // so the miss lands on the settled entry instead of vanishing with the
+    // entry the seed replaces.
+    const inFlight = hydrations.get(sessionKey)
+    if (inFlight !== undefined) await inFlight.promise
     const existing = metrics.get(sessionKey)
     if (existing !== undefined) existing.stashMisses += 1
     return stashMissTextFor(subject)
   }
-  const sessionMetrics = metricsForSession(metrics, sessionKey, metricsSessionBound)
-  sessionMetrics.stashHits += 1
+  // Refreshed before the await so the hit counts even if stash churn during
+  // the hydration read evicts this session's stash entry.
   touchMapEntry(stashes, sessionKey)
+  const sessionMetrics = await metricsForSession(metrics, hydrations, persistedTotalsForSession, sessionKey, metricsSessionBound)
+  sessionMetrics.stashHits += 1
   const newest = matches[matches.length - 1]
   const older = matches.slice(0, -1)
   const output = older.length === 0 ? newest.output : `${newest.output}\n${olderMatchesLineFor(subject, older)}`
@@ -998,13 +1045,167 @@ const createSessionMetrics = (): SessionMetrics => ({
   stashReadsLoggedThrough: 0,
 })
 
-const metricsForSession = (metrics: MetricsStore, sessionKey: string, sessionBound: number): SessionMetrics => {
-  const touched = touchMapEntry(metrics, sessionKey)
-  if (touched !== undefined) return touched
-  trimMapToBound(metrics, sessionBound)
-  const created = createSessionMetrics()
-  metrics.set(sessionKey, created)
-  return created
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+
+const persistedMsOf = (value: unknown): number | undefined => {
+  if (typeof value !== "string") return undefined
+  const ms = Date.parse(value)
+  return Number.isNaN(ms) ? undefined : ms
+}
+
+// Absent keys default to 0 (records written before a counter existed),
+// while a present-but-non-finite value rejects the whole record: a corrupt
+// raw counter means the record cannot be trusted, so the seeder refuses it
+// and falls through to the next-newest record.
+const persistedCounterOf = (totals: Record<string, unknown>, key: RawCounterKey): number | undefined => {
+  const value = totals[key]
+  if (value === undefined) return 0
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined
+}
+
+type PersistedCounters = Pick<SessionMetrics, RawCounterKey>
+
+type PersistedTotals = { tsMs: number; counters: PersistedCounters }
+
+const persistedCountersOf = (value: unknown): PersistedCounters | undefined => {
+  if (!isRecord(value)) return undefined
+  const counters = {} as PersistedCounters
+  for (const key of RAW_COUNTER_KEYS) {
+    const seeded = persistedCounterOf(value, key)
+    if (seeded === undefined) return undefined
+    counters[key] = seeded
+  }
+  return counters
+}
+
+const snapshotTotalsSeedOf = async (options: ResolvedOptions, sessionKey: string): Promise<PersistedTotals | undefined> => {
+  if (options.liveStateLog === false) return undefined
+  if (!isSafeSessionFileStem(sessionKey)) return undefined
+  let content: string
+  try {
+    content = await readFile(join(options.liveStatePath, `${sessionKey}${LIVE_STATE_FILE_SUFFIX}`), "utf8")
+  } catch {
+    return undefined
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(content)
+  } catch {
+    return undefined
+  }
+  if (!isRecord(parsed) || parsed["session"] !== sessionKey) return undefined
+  const tsMs = persistedMsOf(parsed["ts"])
+  const counters = persistedCountersOf(parsed["totals"])
+  if (tsMs === undefined || counters === undefined) return undefined
+  return { tsMs, counters }
+}
+
+const logTotalsSeedOf = async (options: ResolvedOptions, sessionKey: string): Promise<PersistedTotals | undefined> => {
+  if (options.metricsLog === false) return undefined
+  let content: string
+  try {
+    content = await readFile(options.metricsPath, "utf8")
+  } catch {
+    return undefined
+  }
+  // Newest line first: the last match for the session wins, matching the
+  // panel's newest-line preference including equal timestamps.
+  const lines = content.split("\n")
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const trimmed = lines[index].trim()
+    if (trimmed.length === 0) continue
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(trimmed)
+    } catch {
+      continue
+    }
+    if (!isRecord(parsed) || parsed["session"] !== sessionKey) continue
+    const tsMs = persistedMsOf(parsed["ts"])
+    const counters = persistedCountersOf(parsed["totals"])
+    if (tsMs === undefined || counters === undefined) continue
+    return { tsMs, counters }
+  }
+  return undefined
+}
+
+// The newest record wins, mirroring the panel's snapshot-versus-log
+// preference: the snapshot covers quiet runs, while a strictly newer log
+// line means another writer landed after the last snapshot.
+const newestPersistedTotalsOf = async (options: ResolvedOptions, sessionKey: string): Promise<PersistedTotals | undefined> => {
+  const [snapshotSeed, logSeed] = await Promise.all([snapshotTotalsSeedOf(options, sessionKey), logTotalsSeedOf(options, sessionKey)])
+  if (snapshotSeed === undefined) return logSeed
+  if (logSeed === undefined) return snapshotSeed
+  return logSeed.tsMs > snapshotSeed.tsMs ? logSeed : snapshotSeed
+}
+
+const seedSessionCounters = (metrics: SessionMetrics, persisted: PersistedTotals): void => {
+  Object.assign(metrics, persisted.counters)
+  // Raised with the seeded reads: without it the first post-restart run
+  // would count every pre-restart stash read as read-since-last-line and
+  // write a spurious eventful line.
+  metrics.stashReadsLoggedThrough = persisted.counters.stashHits + persisted.counters.stashMisses
+}
+
+type MetricsHydrationEntry = { promise: Promise<void>; settled: boolean }
+
+type MetricsHydration = Map<string, MetricsHydrationEntry>
+
+// One hydration per session key while it is in flight, and one seed per
+// entry lifetime: the settled guard is replaced only when a freshly
+// re-created entry asks for a reseed (the metrics LRU evicted the key and
+// this call created it again), and that replacement loads from disk again
+// rather than from the first-touch record, which this process's own later
+// runs have already superseded. An entry still in the map is never
+// re-seeded. Read or parse failures resolve to no seed, never an error.
+const startMetricsHydration = (
+  metrics: MetricsStore,
+  hydrations: MetricsHydration,
+  persistedTotalsForSession: (sessionKey: string) => Promise<PersistedTotals | undefined>,
+  sessionKey: string,
+  reseed: boolean,
+): Promise<void> => {
+  const guard = hydrations.get(sessionKey)
+  if (guard !== undefined && (guard.settled === false || reseed === false)) return guard.promise
+  const promise = persistedTotalsForSession(sessionKey)
+    .then((persisted) => {
+      if (persisted === undefined) return
+      const current = metrics.get(sessionKey)
+      if (current !== undefined) seedSessionCounters(current, persisted)
+    })
+    .catch(() => {})
+  const next: MetricsHydrationEntry = { promise, settled: false }
+  hydrations.set(sessionKey, next)
+  void promise.then(() => {
+    next.settled = true
+  })
+  return promise
+}
+
+const metricsForSession = async (
+  metrics: MetricsStore,
+  hydrations: MetricsHydration,
+  persistedTotalsForSession: (sessionKey: string) => Promise<PersistedTotals | undefined>,
+  sessionKey: string,
+  sessionBound: number,
+): Promise<SessionMetrics> => {
+  // An eventful run on a zeroed entry (freshly created because the metrics
+  // LRU evicted this key, or created while its seed was still loading)
+  // would persist a regressed newest record and poison later rehydration,
+  // so loop until the entry survives the hydration await; the settled
+  // guard makes retries microtask-cheap. A re-created entry reseeds.
+  for (;;) {
+    const existing = touchMapEntry(metrics, sessionKey)
+    const reseed = existing === undefined
+    if (reseed) {
+      trimMapToBound(metrics, sessionBound)
+      metrics.set(sessionKey, createSessionMetrics())
+    }
+    await startMetricsHydration(metrics, hydrations, persistedTotalsForSession, sessionKey, reseed)
+    const settled = touchMapEntry(metrics, sessionKey)
+    if (settled !== undefined) return settled
+  }
 }
 
 const countPostEvictionTouches = (metrics: SessionMetrics, appearances: ToolAppearance[], minSubstringChars: number): number => {
@@ -1112,6 +1313,7 @@ const totalsOf = (metrics: SessionMetrics, charsPerToken: number): CumulativeCou
   stashMisses: metrics.stashMisses,
   stashDropped: metrics.stashDropped,
   deduped: metrics.deduped,
+  dedupedBytes: metrics.dedupedBytes,
   dedupTokensSaved: estimateTokensFromBytes(metrics.dedupedBytes, charsPerToken),
   reasoningExpired: metrics.reasoningExpired,
   reasoningBytesExpired: metrics.reasoningBytesExpired,
@@ -1460,7 +1662,10 @@ export default (async (_input, rawOptions) => {
   const stashBySession = new Map<string, SessionStash>()
   const hintBySession = new Map<string, string>()
   const metricsBySession: MetricsStore = new Map()
+  const metricsHydrationBySession: MetricsHydration = new Map()
   const pruneThrottle: PruneThrottle = { lastScanMs: PRUNE_SCAN_NEVER }
+  const persistedTotalsForSession = (sessionKey: string): Promise<PersistedTotals | undefined> =>
+    newestPersistedTotalsOf(options, sessionKey)
 
   // Workaround: read_evicted and lru_stats are registered as plain
   // { description, args, execute } definitions instead of calling tool() from
@@ -1475,7 +1680,7 @@ export default (async (_input, rawOptions) => {
   // { type: "string" } schema below is sufficient. If this file ever ships
   // somewhere @opencode-ai/plugin resolves, switch back to tool().
   const readEvicted = async (args: unknown, toolContext: unknown): Promise<string> =>
-    executeReadEvicted(stashBySession, metricsBySession, options.metricsSessions, args, toolContext)
+    executeReadEvicted(stashBySession, metricsBySession, metricsHydrationBySession, persistedTotalsForSession, options.metricsSessions, args, toolContext)
 
   const lruStats = async (_args: unknown, toolContext: unknown): Promise<string> =>
     executeLruStats({ options, limits: contextTokensBySession, stashes: stashBySession, metrics: metricsBySession }, toolContext)
@@ -1500,8 +1705,8 @@ export default (async (_input, rawOptions) => {
       const sessionID = info?.sessionID
       const sessionLimit = sessionID !== undefined ? touchMapEntry(contextTokensBySession, sessionID) : undefined
       const budget = resolveSessionBudget(sessionLimit, options.defaultContextTokens)
+      const sessionMetrics = await metricsForSession(metricsBySession, metricsHydrationBySession, persistedTotalsForSession, sessionKey, options.metricsSessions)
       const sessionStash = stashForSession(stashBySession, sessionKey, options.stashSessions)
-      const sessionMetrics = metricsForSession(metricsBySession, sessionKey, options.metricsSessions)
       stripLegacyHintParts(messages)
       const toolDedup = deduplicateToolOutputs(messages, options)
       const fileDedup = deduplicateFileAttachments(messages, options)

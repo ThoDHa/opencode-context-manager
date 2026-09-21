@@ -2975,6 +2975,7 @@ const METRICS_ROTATION_PANEL_SEED_EVICTIONS = 5
 const METRICS_ROTATION_PANEL_SEED_MESSAGES_AGO = 3
 const METRICS_ROTATION_PANEL_SEED_ESTIMATED_TOKENS = 900
 const METRICS_ROTATION_PANEL_SEED_BYTES = METRICS_ROTATION_PANEL_SEED_EVICTIONS * MIN_EVICTABLE_BYTES
+const METRICS_ROTATION_PANEL_SEED_SESSION = "lru-rotation-seed-session"
 const STATS_ZEROED_COUNTERS = {
   evictions: 0,
   bytesReclaimed: 0,
@@ -2983,6 +2984,7 @@ const STATS_ZEROED_COUNTERS = {
   stashMisses: 0,
   stashDropped: 0,
   deduped: 0,
+  dedupedBytes: 0,
   dedupTokensSaved: 0,
   postEvictionTouches: 0,
   reasoningExpired: 0,
@@ -3031,9 +3033,9 @@ const storeMetricsSession = async (hooks: HookMap, index: number): Promise<void>
   await runTransform(hooks, buildStandardBundle(metricsSessionId(index), metricsSessionSubject(index)))
 }
 
-const metricsRotationPanelSeedLine = (): Record<string, unknown> => ({
+const metricsRotationPanelSeedLine = (session: string = SESSION_ID): Record<string, unknown> => ({
   ts: "2026-09-17T00:00:00.000Z",
-  session: SESSION_ID,
+  session,
   modelContextTokens: null,
   modelContextTokensSource: CONTEXT_TOKENS_SOURCE_UNKNOWN,
   estimatedTokens: METRICS_ROTATION_PANEL_SEED_ESTIMATED_TOKENS,
@@ -3299,6 +3301,7 @@ test("lru_stats accumulates the dedup token-savings estimate from each supersede
   assert.deepEqual(countersOf(await lruStats(hooks, SESSION_ID)), {
     ...STATS_ZEROED_COUNTERS,
     deduped: DEDUP_SAVINGS_PAIR_COUNT,
+    dedupedBytes: DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES,
     dedupTokensSaved: tokensForChars(DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES),
   })
 
@@ -3446,6 +3449,7 @@ test("metrics log records an unknown budget skip state with null watermark on an
     assert.deepEqual(lines[0].totals, {
       ...STATS_ZEROED_COUNTERS,
       deduped: 1,
+      dedupedBytes: THREE_ENTRY_OUTPUT_BYTES,
       dedupTokensSaved: tokensForChars(THREE_ENTRY_OUTPUT_BYTES),
     })
   } finally {
@@ -3816,7 +3820,9 @@ test("panel data parses the post rotation state with the pre rotation line gone 
   const metricsDir = makeMetricsDir()
   try {
     const metricsPath = metricsLogPathIn(metricsDir)
-    writeFileSync(metricsPath, `${JSON.stringify(metricsRotationPanelSeedLine())}\n`)
+    // The seed line sits on its own session so the pre-rotation history stays
+    // out of SESSION_ID's rehydration totals, which this test does not vary.
+    writeFileSync(metricsPath, `${JSON.stringify(metricsRotationPanelSeedLine(METRICS_ROTATION_PANEL_SEED_SESSION))}\n`)
     const hooks = await loadPluginHooksWith({
       metricsLog: true,
       metricsPath,
@@ -3828,7 +3834,7 @@ test("panel data parses the post rotation state with the pre rotation line gone 
 
     const rotatedLines = metricsLinesIn(rotatedMetricsPathIn(metricsDir))
     assert.equal(rotatedLines.length, STATS_LOG_FILE_LINES)
-    assert.equal(rotatedLines[0].session, SESSION_ID)
+    assert.equal(rotatedLines[0].session, METRICS_ROTATION_PANEL_SEED_SESSION)
 
     const panel = await loadPanelData({ path: metricsPath, sessionID: SESSION_ID })
     assert.equal(panel.error, undefined)
@@ -4533,6 +4539,7 @@ test("lru_stats counts a superseded duplicate's attachment payload chars in the 
   assert.deepEqual(countersOf(await lruStats(hooks, SESSION_ID)), {
     ...STATS_ZEROED_COUNTERS,
     deduped: 1,
+    dedupedBytes: MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS,
     dedupTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS),
   })
 })
@@ -5441,4 +5448,367 @@ test("transform keeps the default substring floor when minSubstringMatchChars is
   await runTransform(hooks, bundle)
 
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+})
+
+const REHYDRA_FRESH_SESSION = "lru-rehydrate-fresh-session"
+const REHYDRA_SECOND_SESSION = "lru-rehydrate-second-session"
+const REHYDRA_EVICTION_SUBJECT_A = "/data/rehydrate-eviction-a.txt"
+const REHYDRA_EVICTION_SUBJECT_B = "/data/rehydrate-eviction-b.txt"
+const REHYDRA_MISS_SUBJECT = "/data/rehydrate-miss.txt"
+const REHYDRA_DEDUP_PATH = "/data/rehydrate-dedup.txt"
+const REHYDRA_FENCE_TAG = "rehydrate"
+const REHYDRA_FENCE_BLOCK = fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, REHYDRA_FENCE_TAG))
+const REHYDRA_FENCE_BYTES = REHYDRA_FENCE_BLOCK.length + FENCE_TRAILING_NEWLINE_CHARS
+const REHYDRA_REASONING_TEXT = "rehydrated cold reasoning block"
+const REHYDRA_PROBE_TEXT_CHARS = 60
+const REHYDRA_DEDUP_POST_CHARS =
+  dedupTombstoneFor(READ_TOOL, 1).length + THREE_ENTRY_OUTPUT_BYTES + 2 * FILLER_TEXT_CHARS
+const REHYDRA_LINES_FROM_SECOND_SITTING = 5
+const REHYDRA_STALE_RECORD_EVICTIONS = 10
+const REHYDRA_NEWER_RECORD_EVICTIONS = 20
+const REHYDRA_EARLIER_TS = "2026-09-17T00:00:00.000Z"
+const REHYDRA_LATER_TS = "2026-09-17T00:05:00.000Z"
+
+const loadPluginHooksWithPersistence = async (metricsPath: string, stateDir: string, extra: Record<string, unknown> = {}): Promise<HookMap> =>
+  loadPluginHooksWithLiveState(stateDir, { metricsLog: true, metricsPath, ...extra })
+
+const runEvictionTransform = async (hooks: HookMap, sessionID: string, path: string): Promise<void> => {
+  await setContextLimit(hooks, sessionID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+  await runTransform(hooks, buildStandardBundle(sessionID, path))
+}
+
+const runDedupTransform = async (hooks: HookMap, sessionID: string): Promise<void> => {
+  await setContextLimit(hooks, sessionID, contextForWatermarkTokens(tokensForChars(REHYDRA_DEDUP_POST_CHARS) + HEADROOM_TOKENS))
+  await runTransform(
+    hooks,
+    buildBundle([
+      [pathToolPart(REHYDRA_DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
+      ...fillerMessages(2),
+      [pathToolPart(REHYDRA_DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
+      ...fillerMessages(2),
+    ]),
+  )
+}
+
+const runReasoningTransform = async (hooks: HookMap, sessionID: string): Promise<void> => {
+  await setContextLimit(hooks, sessionID, WATERMARK_PROBE_CONTEXT_LIMIT)
+  await runTransform(
+    hooks,
+    buildBundle([
+      [reasoningPart(REHYDRA_REASONING_TEXT), pathToolPart("/data/rehydrate-reasoning.txt", APPEARANCE_ONLY_OUTPUT_BYTES)],
+      ...fillerMessages(),
+    ]),
+  )
+}
+
+const runFenceTransform = async (hooks: HookMap): Promise<void> => {
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+  await runTransform(hooks, userFenceBundle(`${FENCE_PROSE_BEFORE}\n${REHYDRA_FENCE_BLOCK}\n${FENCE_PROSE_AFTER}`))
+}
+
+const runQuietProbeTransform = async (hooks: HookMap, sessionID: string): Promise<void> =>
+  runTransform(hooks, buildBundle([[textPart(textOfChars(REHYDRA_PROBE_TEXT_CHARS))], ...fillerMessages(2)], sessionID))
+
+const metricsLinesForSession = (metricsPath: string, sessionID: string): Record<string, unknown>[] =>
+  metricsLinesIn(metricsPath).filter((line) => line.session === sessionID)
+
+const rehydrateSeedLine = (session: string, ts: string, evictions: number): Record<string, unknown> => ({
+  ts,
+  session,
+  modelContextTokens: null,
+  modelContextTokensSource: CONTEXT_TOKENS_SOURCE_UNKNOWN,
+  estimatedTokens: 0,
+  watermarkTokens: null,
+  deficitTokens: null,
+  evictedThisRun: [],
+  dedupedThisRun: 0,
+  reasoningExpiredThisRun: 0,
+  reasoningBytesExpiredThisRun: 0,
+  fenceEvictedThisRun: 0,
+  postEvictionTouchesThisRun: 0,
+  stashReadsSinceLastLine: 0,
+  totals: { ...STATS_ZEROED_COUNTERS, evictions },
+})
+
+const rehydrateSeedSnapshot = (session: string, ts: string, evictions: number): string =>
+  `${JSON.stringify({
+    ts,
+    session,
+    manualMode: false,
+    modelContextTokens: null,
+    modelContextTokensSource: CONTEXT_TOKENS_SOURCE_UNKNOWN,
+    lastRun: { estimatedTokens: 0, watermarkTokens: null, deficitTokens: null },
+    totals: { ...STATS_ZEROED_COUNTERS, evictions },
+    stash: { entries: 0, capacity: STASH_LIMIT },
+    hotSubjects: [],
+  })}\n`
+
+const withCounterDeltas = (baseline: Record<string, number>, deltas: Record<string, number>): Record<string, number> => {
+  const expected = { ...baseline }
+  for (const [key, delta] of Object.entries(deltas)) expected[key] = (expected[key] ?? 0) + delta
+  expected.evictionTokensSaved = tokensForChars(expected.bytesReclaimed)
+  expected.dedupTokensSaved = tokensForChars(expected.dedupedBytes)
+  return expected
+}
+
+const SECOND_SITTING_COUNTER_DELTAS = {
+  evictions: 1,
+  bytesReclaimed: MIN_EVICTABLE_BYTES + REHYDRA_FENCE_BYTES,
+  stashHits: 1,
+  stashMisses: 1,
+  deduped: 1,
+  dedupedBytes: THREE_ENTRY_OUTPUT_BYTES,
+  reasoningExpired: 1,
+  reasoningBytesExpired: REHYDRA_REASONING_TEXT.length,
+  fenceEvicted: 1,
+}
+
+const runFirstSitting = async (hooks: HookMap): Promise<void> => {
+  await runEvictionTransform(hooks, SESSION_ID, REHYDRA_EVICTION_SUBJECT_A)
+  assert.equal(await readEvicted(hooks, REHYDRA_EVICTION_SUBJECT_A, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(await readEvicted(hooks, REHYDRA_MISS_SUBJECT, SESSION_ID), stashMissFor(REHYDRA_MISS_SUBJECT))
+  await runQuietProbeTransform(hooks, SESSION_ID)
+  await runDedupTransform(hooks, SESSION_ID)
+  await runReasoningTransform(hooks, SESSION_ID)
+  await runFenceTransform(hooks)
+}
+
+const runSecondSitting = async (hooks: HookMap): Promise<void> => {
+  await runEvictionTransform(hooks, SESSION_ID, REHYDRA_EVICTION_SUBJECT_B)
+  assert.equal(await readEvicted(hooks, REHYDRA_EVICTION_SUBJECT_B, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+  await runDedupTransform(hooks, SESSION_ID)
+  await runReasoningTransform(hooks, SESSION_ID)
+  await runFenceTransform(hooks)
+  assert.equal(await readEvicted(hooks, REHYDRA_MISS_SUBJECT, SESSION_ID), stashMissFor(REHYDRA_MISS_SUBJECT))
+  await runQuietProbeTransform(hooks, SESSION_ID)
+}
+
+test("resumed session continues its lifetime counters across a restart in the metrics log and the live snapshot", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const firstSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir, { userFenceEviction: { enabled: true } })
+    await runFirstSitting(firstSittingHooks)
+    const baseline = snapshotBodyOf(stateDir, SESSION_ID).snapshot.totals as Record<string, number>
+    const lineCountAfterFirstSitting = metricsLinesForSession(metricsPath, SESSION_ID).length
+
+    const secondSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir, { userFenceEviction: { enabled: true } })
+    await runSecondSitting(secondSittingHooks)
+
+    const expected = withCounterDeltas(baseline, SECOND_SITTING_COUNTER_DELTAS)
+    assert.deepEqual(snapshotBodyOf(stateDir, SESSION_ID).snapshot.totals, expected)
+    const lines = metricsLinesForSession(metricsPath, SESSION_ID)
+    assert.equal(lines.length, lineCountAfterFirstSitting + REHYDRA_LINES_FROM_SECOND_SITTING)
+    assert.deepEqual(lines[lines.length - 1].totals, expected)
+    assert.equal(lines[lines.length - 1].stashReadsSinceLastLine, 1)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("a session without persisted records starts at zeroed counters in a fresh process", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const firstSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await runFirstSitting(firstSittingHooks)
+
+    const secondSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    assert.deepEqual(countersOf(await lruStats(secondSittingHooks, REHYDRA_FRESH_SESSION)), STATS_ZEROED_COUNTERS)
+    await runQuietProbeTransform(secondSittingHooks, REHYDRA_FRESH_SESSION)
+    assert.deepEqual(countersOf(await lruStats(secondSittingHooks, REHYDRA_FRESH_SESSION)), STATS_ZEROED_COUNTERS)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("resumed session falls back to the metrics log tail when its snapshot is missing", async () => {
+  const metricsDir = makeMetricsDir()
+  const firstSittingStateDir = makeLiveStateDir()
+  const emptyStateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const firstSittingHooks = await loadPluginHooksWithLiveState(firstSittingStateDir, { metricsLog: true, metricsPath })
+    await runEvictionTransform(firstSittingHooks, SESSION_ID, REHYDRA_EVICTION_SUBJECT_A)
+    const baseline = metricsLinesForSession(metricsPath, SESSION_ID)[0].totals as Record<string, number>
+
+    const secondSittingHooks = await loadPluginHooksWithLiveState(emptyStateDir, { metricsLog: true, metricsPath })
+    await runEvictionTransform(secondSittingHooks, SESSION_ID, REHYDRA_EVICTION_SUBJECT_B)
+
+    const expected = withCounterDeltas(baseline, { evictions: 1, bytesReclaimed: MIN_EVICTABLE_BYTES })
+    const lines = metricsLinesForSession(metricsPath, SESSION_ID)
+    assert.deepEqual(lines[lines.length - 1].totals, expected)
+    assert.deepEqual(snapshotBodyOf(emptyStateDir, SESSION_ID).snapshot.totals, expected)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(firstSittingStateDir)
+    cleanupMetricsDir(emptyStateDir)
+  }
+})
+
+test("resumed session with neither snapshot nor metrics log seeds zeroed counters", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const hooks = await loadPluginHooksWithPersistence(metricsLogPathIn(metricsDir), stateDir)
+    await runEvictionTransform(hooks, SESSION_ID, REHYDRA_EVICTION_SUBJECT_A)
+
+    const lines = metricsLinesForSession(metricsLogPathIn(metricsDir), SESSION_ID)
+    assert.deepEqual(lines[0].totals, {
+      ...STATS_ZEROED_COUNTERS,
+      evictions: 1,
+      bytesReclaimed: MIN_EVICTABLE_BYTES,
+      evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
+    })
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("a quiet post restart run writes no metrics line because seeded stash reads are logged through", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const firstSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await runEvictionTransform(firstSittingHooks, SESSION_ID, REHYDRA_EVICTION_SUBJECT_A)
+    assert.equal(await readEvicted(firstSittingHooks, REHYDRA_EVICTION_SUBJECT_A, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+    assert.equal(await readEvicted(firstSittingHooks, REHYDRA_MISS_SUBJECT, SESSION_ID), stashMissFor(REHYDRA_MISS_SUBJECT))
+    await runQuietProbeTransform(firstSittingHooks, SESSION_ID)
+    const lineCountAfterFirstSitting = metricsLinesForSession(metricsPath, SESSION_ID).length
+
+    const secondSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await runQuietProbeTransform(secondSittingHooks, SESSION_ID)
+
+    assert.equal(metricsLinesForSession(metricsPath, SESSION_ID).length, lineCountAfterFirstSitting)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("resumed session seeds from the newer of the metrics log and the snapshot whichever is fresher", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    writeFileSync(
+      metricsPath,
+      `${JSON.stringify(rehydrateSeedLine(SESSION_ID, REHYDRA_LATER_TS, REHYDRA_NEWER_RECORD_EVICTIONS))}\n` +
+        `${JSON.stringify(rehydrateSeedLine(REHYDRA_SECOND_SESSION, REHYDRA_EARLIER_TS, REHYDRA_STALE_RECORD_EVICTIONS))}\n`,
+    )
+    writeFileSync(liveStatePathIn(stateDir, SESSION_ID), rehydrateSeedSnapshot(SESSION_ID, REHYDRA_EARLIER_TS, REHYDRA_STALE_RECORD_EVICTIONS))
+    writeFileSync(liveStatePathIn(stateDir, REHYDRA_SECOND_SESSION), rehydrateSeedSnapshot(REHYDRA_SECOND_SESSION, REHYDRA_LATER_TS, REHYDRA_NEWER_RECORD_EVICTIONS))
+
+    const hooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await runQuietProbeTransform(hooks, SESSION_ID)
+    await runQuietProbeTransform(hooks, REHYDRA_SECOND_SESSION)
+
+    assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).evictions, REHYDRA_NEWER_RECORD_EVICTIONS)
+    assert.equal(countersOf(await lruStats(hooks, REHYDRA_SECOND_SESSION)).evictions, REHYDRA_NEWER_RECORD_EVICTIONS)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("recreated metrics entry re-seeds lifetime counters after the metricsSessions bound evicted it", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const firstSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await runEvictionTransform(firstSittingHooks, SESSION_ID, REHYDRA_EVICTION_SUBJECT_A)
+
+    const secondSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir, { metricsSessions: 1 })
+    await runEvictionTransform(secondSittingHooks, REHYDRA_SECOND_SESSION, REHYDRA_EVICTION_SUBJECT_A)
+    await runEvictionTransform(secondSittingHooks, SESSION_ID, REHYDRA_EVICTION_SUBJECT_B)
+    // The interleaving evicts SESSION_ID's entry again, this time after its
+    // first-touch hydration has settled: the re-created entry must seed from
+    // a fresh disk read carrying this sitting's own newest record.
+    await runEvictionTransform(secondSittingHooks, REHYDRA_SECOND_SESSION, "/data/rehydrate-eviction-c.txt")
+    await runEvictionTransform(secondSittingHooks, SESSION_ID, "/data/rehydrate-eviction-d.txt")
+
+    const counters = countersOf(await lruStats(secondSittingHooks, SESSION_ID))
+    assert.equal(counters.evictions, 3)
+    assert.equal(counters.bytesReclaimed, 3 * MIN_EVICTABLE_BYTES)
+    const lines = metricsLinesForSession(metricsPath, SESSION_ID)
+    assert.equal((lines[lines.length - 1].totals as Record<string, number>).evictions, 3)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("a stash miss issued while the session's first hydration is in flight counts against the seeded entry", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const firstSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await runEvictionTransform(firstSittingHooks, SESSION_ID, REHYDRA_EVICTION_SUBJECT_A)
+    assert.equal(await readEvicted(firstSittingHooks, REHYDRA_MISS_SUBJECT, SESSION_ID), stashMissFor(REHYDRA_MISS_SUBJECT))
+    await runQuietProbeTransform(firstSittingHooks, SESSION_ID)
+
+    const secondSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await setContextLimit(secondSittingHooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+    const resumeTransform = runTransform(secondSittingHooks, buildStandardBundle(SESSION_ID, REHYDRA_EVICTION_SUBJECT_B))
+    assert.equal(await readEvicted(secondSittingHooks, REHYDRA_MISS_SUBJECT, SESSION_ID), stashMissFor(REHYDRA_MISS_SUBJECT))
+    await resumeTransform
+
+    assert.equal(countersOf(await lruStats(secondSittingHooks, SESSION_ID)).stashMisses, 2)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("a newest metrics line whose totals carry a non finite named counter is rejected in favor of the previous record", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    writeFileSync(
+      metricsPath,
+      `${JSON.stringify(rehydrateSeedLine(SESSION_ID, REHYDRA_EARLIER_TS, REHYDRA_STALE_RECORD_EVICTIONS))}\n` +
+        `${JSON.stringify({ ...rehydrateSeedLine(SESSION_ID, REHYDRA_LATER_TS, REHYDRA_NEWER_RECORD_EVICTIONS), totals: { ...STATS_ZEROED_COUNTERS, evictions: null } })}\n`,
+    )
+
+    const hooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await runQuietProbeTransform(hooks, SESSION_ID)
+
+    assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).evictions, REHYDRA_STALE_RECORD_EVICTIONS)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("a metrics line predating dedupedBytes still seeds the resumed session with zero for it", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const legacyTotals: Record<string, unknown> = { ...STATS_ZEROED_COUNTERS, evictions: REHYDRA_NEWER_RECORD_EVICTIONS }
+    delete legacyTotals.dedupedBytes
+    writeFileSync(
+      metricsPath,
+      `${JSON.stringify({ ...rehydrateSeedLine(SESSION_ID, REHYDRA_LATER_TS, REHYDRA_NEWER_RECORD_EVICTIONS), totals: legacyTotals })}\n`,
+    )
+
+    const hooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await runQuietProbeTransform(hooks, SESSION_ID)
+
+    const counters = countersOf(await lruStats(hooks, SESSION_ID))
+    assert.equal(counters.evictions, REHYDRA_NEWER_RECORD_EVICTIONS)
+    assert.equal(counters.dedupedBytes, 0)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
 })
