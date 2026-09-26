@@ -246,7 +246,7 @@ type ContextTokensSource =
 
 type SessionBudgetEntry = { tokens: number; source: ContextTokensSource; modelKey: string | undefined }
 
-type SessionBudget = { tokens: number | null; source: ContextTokensSource }
+type SessionBudget = { tokens: number | null; source: ContextTokensSource; modelKey: string | undefined }
 
 type PruneThrottle = { lastScanMs: number }
 
@@ -280,6 +280,10 @@ type SessionMetrics = {
   // Never persisted; a restart simply writes on its next eventful run.
   lastLineAtMs?: number
   lastLineBudgetSource?: ContextTokensSource
+  // The budget resolved at this session's previous sitting, rehydrated
+  // with the counters so a restart does not flicker the budget to
+  // unknown; a live chat.params capture always wins over it.
+  persistedBudget?: PersistedBudget
   lastRun?: LastRunMetrics
   logWriteError?: string
   stateWriteError?: string
@@ -315,10 +319,12 @@ type RawCounterKey = (typeof RAW_COUNTER_KEYS)[number]
 // Cursor inventory beyond the two number cursors in MetricsCursorKey: the
 // optional coalesce-gate fields lastLineAtMs and lastLineBudgetSource escape
 // this check through optionality and are seeded implicitly (undefined means
-// never written, so a restart writes on its next eventful run), and the
-// reasoningSeenKeys and dedupedPairKeys lists are seeded empty. A new
-// REQUIRED numeric field must land in RAW_COUNTER_KEYS or MetricsCursorKey
-// to compile; a new OPTIONAL one must be justified the same way.
+// never written, so a restart writes on its next eventful run), the
+// persistedBudget fallback is seeded from the record's budget fields
+// (undefined when the record carries none), and the reasoningSeenKeys and
+// dedupedPairKeys lists are seeded empty. A new REQUIRED numeric field must
+// land in RAW_COUNTER_KEYS or MetricsCursorKey to compile; a new OPTIONAL
+// one must be justified the same way.
 type NumberValuedSessionMetricKey = {
   [K in keyof SessionMetrics]-?: SessionMetrics[K] extends number ? K : never
 }[keyof SessionMetrics]
@@ -361,6 +367,7 @@ type LiveStateSnapshot = {
 type StatsSource = {
   options: ResolvedOptions
   limits: Map<string, SessionBudgetEntry>
+  modelKeys: Map<string, string | undefined>
   stashes: StashStore
   metrics: MetricsStore
 }
@@ -1162,7 +1169,41 @@ const persistedCounterOf = (totals: Record<string, unknown>, key: RawCounterKey)
 
 type PersistedCounters = Pick<SessionMetrics, RawCounterKey>
 
-type PersistedTotals = { tsMs: number; counters: PersistedCounters }
+type PersistedBudget = { tokens: number; source: ContextTokensSource; modelKey: string | undefined }
+
+type PersistedBudgetSeed = { budget: PersistedBudget | undefined }
+
+type PersistedTotals = { tsMs: number; counters: PersistedCounters; budget: PersistedBudget | undefined }
+
+const CONTEXT_TOKENS_SOURCES: readonly ContextTokensSource[] = [
+  CONTEXT_TOKENS_SOURCE_OVERRIDE,
+  CONTEXT_TOKENS_SOURCE_MODEL,
+  CONTEXT_TOKENS_SOURCE_DEFAULT,
+  CONTEXT_TOKENS_SOURCE_UNKNOWN,
+]
+
+const isContextTokensSource = (value: unknown): value is ContextTokensSource =>
+  (CONTEXT_TOKENS_SOURCES as readonly unknown[]).includes(value)
+
+// Absent or null budget fields mean the record predates budget
+// persistence or the session genuinely had no budget (both rehydrate to
+// unknown, exactly the pre-persistence behavior), while a
+// present-but-invalid pair rejects the whole record under the same
+// discipline as a corrupt raw counter: the record cannot be trusted.
+// The persisted model key is optional metadata: absent or null
+// rehydrates to no model identity (an untracked or option-sourced
+// budget), while a blank or non-string value rejects the record. Undefined return
+// rejects the seed; a defined one carries the budget or unknown.
+const persistedBudgetSeedOf = (parsed: Record<string, unknown>): PersistedBudgetSeed | undefined => {
+  const tokens = parsed["modelContextTokens"]
+  if (tokens === undefined || tokens === null) return { budget: undefined }
+  if (typeof tokens !== "number" || Number.isFinite(tokens) === false || tokens <= 0) return undefined
+  const source = parsed["modelContextTokensSource"]
+  if (isContextTokensSource(source) === false) return undefined
+  const rawModelKey = parsed["modelContextTokensModelKey"]
+  if (rawModelKey !== undefined && rawModelKey !== null && (typeof rawModelKey !== "string" || rawModelKey.length === 0)) return undefined
+  return { budget: { tokens, source, modelKey: typeof rawModelKey === "string" ? rawModelKey : undefined } }
+}
 
 const persistedCountersOf = (value: unknown): PersistedCounters | undefined => {
   if (!isRecord(value)) return undefined
@@ -1193,8 +1234,9 @@ const snapshotTotalsSeedOf = async (options: ResolvedOptions, sessionKey: string
   if (!isRecord(parsed) || parsed["session"] !== sessionKey) return undefined
   const tsMs = persistedMsOf(parsed["ts"])
   const counters = persistedCountersOf(parsed["totals"])
-  if (tsMs === undefined || counters === undefined) return undefined
-  return { tsMs, counters }
+  const budgetSeed = persistedBudgetSeedOf(parsed)
+  if (tsMs === undefined || counters === undefined || budgetSeed === undefined) return undefined
+  return { tsMs, counters, budget: budgetSeed.budget }
 }
 
 const logTotalsSeedOf = async (options: ResolvedOptions, sessionKey: string): Promise<PersistedTotals | undefined> => {
@@ -1220,8 +1262,9 @@ const logTotalsSeedOf = async (options: ResolvedOptions, sessionKey: string): Pr
     if (!isRecord(parsed) || parsed["session"] !== sessionKey) continue
     const tsMs = persistedMsOf(parsed["ts"])
     const counters = persistedCountersOf(parsed["totals"])
-    if (tsMs === undefined || counters === undefined) continue
-    return { tsMs, counters }
+    const budgetSeed = persistedBudgetSeedOf(parsed)
+    if (tsMs === undefined || counters === undefined || budgetSeed === undefined) continue
+    return { tsMs, counters, budget: budgetSeed.budget }
   }
   return undefined
 }
@@ -1238,6 +1281,7 @@ const newestPersistedTotalsOf = async (options: ResolvedOptions, sessionKey: str
 
 const seedSessionCounters = (metrics: SessionMetrics, persisted: PersistedTotals): void => {
   Object.assign(metrics, persisted.counters)
+  metrics.persistedBudget = persisted.budget
   // Raised with the seeded reads: without it the first post-restart run
   // would count every pre-restart stash read as read-since-last-line and
   // write a spurious eventful line.
@@ -1395,6 +1439,7 @@ const recordMetricsLine = async (
     session: sessionKey,
     modelContextTokens: budget.tokens,
     modelContextTokensSource: budget.source,
+    modelContextTokensModelKey: budget.modelKey ?? null,
     estimatedTokens: eviction.estimatedTokens,
     watermarkTokens: eviction.watermarkTokens,
     deficitTokens: eviction.deficitTokens,
@@ -1459,6 +1504,7 @@ const liveStateSnapshotOf = (
   manualMode: options.manualMode,
   modelContextTokens: budget.tokens,
   modelContextTokensSource: budget.source,
+  modelContextTokensModelKey: budget.modelKey ?? null,
   lastRun,
   totals: totalsOf(metrics, options.charsPerToken),
   stash: { entries: stash.size, capacity: options.stashLimit },
@@ -1571,17 +1617,55 @@ const captureBudgetOf = (model: ChatParamsModel | undefined, overrides: Record<s
 }
 
 const resolveSessionBudget = (sessionEntry: SessionBudgetEntry | undefined, explicitDefault: number | undefined): SessionBudget => {
-  if (sessionEntry !== undefined) return sessionEntry
-  if (explicitDefault !== undefined) return { tokens: explicitDefault, source: CONTEXT_TOKENS_SOURCE_DEFAULT }
-  return { tokens: null, source: CONTEXT_TOKENS_SOURCE_UNKNOWN }
+  if (sessionEntry !== undefined) return { tokens: sessionEntry.tokens, source: sessionEntry.source, modelKey: sessionEntry.modelKey }
+  if (explicitDefault !== undefined) return { tokens: explicitDefault, source: CONTEXT_TOKENS_SOURCE_DEFAULT, modelKey: undefined }
+  return { tokens: null, source: CONTEXT_TOKENS_SOURCE_UNKNOWN, modelKey: undefined }
+}
+
+type SessionBudgetResolution = { budget: SessionBudget; fallbackSuppressed: boolean }
+
+// Shared by the transform hook and lru_stats so the two surfaces resolve
+// identically. Precedence: a live chat.params capture, the explicit
+// defaultContextTokens option, then the budget persisted for the session;
+// the persisted value fills only the unknown state. The fallback is
+// suppressed when the persisted budget carries a model identity and this
+// sitting's chat.params events name a different model: the session
+// changed models (mid sitting or across a restart), so the old model's
+// budget must not refill and eviction stands down instead. A fallback
+// without a model identity (option-sourced, or a snapshot predating the
+// model key) is never suppressed, matching the tolerant legacy shape.
+const sessionBudgetForRun = (
+  sessionEntry: SessionBudgetEntry | undefined,
+  persistedBudget: PersistedBudget | undefined,
+  sittingModelKey: string | undefined,
+  resolvedOptions: Pick<ResolvedOptions, "modelContextTokens" | "defaultContextTokens">,
+): SessionBudgetResolution => {
+  const resolved = resolveSessionBudget(sessionEntry, resolvedOptions.defaultContextTokens)
+  if (resolved.tokens !== null) return { budget: resolved, fallbackSuppressed: false }
+  if (persistedBudget === undefined) return { budget: resolved, fallbackSuppressed: false }
+  // A budget sourced from config that config no longer carries must not
+  // refill: an override survives only while its model key stays in
+  // modelContextTokens, a default only while defaultContextTokens is set.
+  const configRemoved =
+    (persistedBudget.source === CONTEXT_TOKENS_SOURCE_OVERRIDE &&
+      (persistedBudget.modelKey === undefined || resolvedOptions.modelContextTokens[persistedBudget.modelKey] === undefined)) ||
+    (persistedBudget.source === CONTEXT_TOKENS_SOURCE_DEFAULT && resolvedOptions.defaultContextTokens === undefined)
+  if (configRemoved) return { budget: resolved, fallbackSuppressed: true }
+  if (persistedBudget.modelKey !== undefined && sittingModelKey !== undefined && persistedBudget.modelKey !== sittingModelKey) {
+    return { budget: resolved, fallbackSuppressed: true }
+  }
+  return {
+    budget: { tokens: persistedBudget.tokens, source: persistedBudget.source, modelKey: persistedBudget.modelKey },
+    fallbackSuppressed: false,
+  }
 }
 
 const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
   const sessionID = sessionIDFromContext(toolContext)
   const sessionKey = sessionID ?? FALLBACK_SESSION_KEY
   const sessionLimit = sessionID === undefined ? undefined : touchMapEntry(source.limits, sessionID)
-  const budget = resolveSessionBudget(sessionLimit, source.options.defaultContextTokens)
   const metrics = touchMapEntry(source.metrics, sessionKey) ?? createSessionMetrics()
+  const { budget } = sessionBudgetForRun(sessionLimit, metrics.persistedBudget, sessionID === undefined ? undefined : source.modelKeys.get(sessionID), source.options)
   const stash = source.stashes.get(sessionKey)
   const report = {
     session: sessionKey,
@@ -1784,6 +1868,7 @@ const deliverHint = (hintBySession: Map<string, string>, input: unknown, output:
 export default (async (_input, rawOptions) => {
   const options = resolveOptions(rawOptions as LruContextOptions)
   const contextTokensBySession = new Map<string, SessionBudgetEntry>()
+  const modelKeyBySession = new Map<string, string | undefined>()
   const stashBySession = new Map<string, SessionStash>()
   const hintBySession = new Map<string, string>()
   const metricsBySession: MetricsStore = new Map()
@@ -1808,19 +1893,28 @@ export default (async (_input, rawOptions) => {
     executeReadEvicted(stashBySession, metricsBySession, metricsHydrationBySession, persistedTotalsForSession, options.metricsSessions, args, toolContext)
 
   const lruStats = async (_args: unknown, toolContext: unknown): Promise<string> =>
-    executeLruStats({ options, limits: contextTokensBySession, stashes: stashBySession, metrics: metricsBySession }, toolContext)
+    executeLruStats({ options, limits: contextTokensBySession, modelKeys: modelKeyBySession, stashes: stashBySession, metrics: metricsBySession }, toolContext)
 
   return {
     "chat.params": async (input: { sessionID: string; model?: ChatParamsModel }) => {
+      const modelKey = modelKeyOf(input.model)
+      // The sitting's newest model identity rides the transform side: the
+      // persisted-budget fallback suppresses itself against it when the
+      // session changed models, mid sitting or across a restart.
+      rememberSessionValue(modelKeyBySession, input.sessionID, modelKey, options.limitSessions)
       const captured = captureBudgetOf(input.model, options.modelContextTokens)
       if (captured !== undefined) {
         rememberSessionValue(contextTokensBySession, input.sessionID, captured, options.limitSessions)
         return
       }
-      const modelKey = modelKeyOf(input.model)
       const stored = contextTokensBySession.get(input.sessionID)
       if (!storedBudgetBelongsToAnotherModel(stored, modelKey)) return
       contextTokensBySession.delete(input.sessionID)
+      // A model change also invalidates the persisted-budget fallback:
+      // without this, the deleted live capture would refill from the
+      // previous model's rehydrated budget on the next run.
+      const metrics = metricsBySession.get(input.sessionID)
+      if (metrics !== undefined) metrics.persistedBudget = undefined
     },
     "experimental.chat.messages.transform": async (_input: unknown, output: { messages: MessageBundle[] }) => {
       const messages = output.messages
@@ -1828,9 +1922,16 @@ export default (async (_input, rawOptions) => {
       const info = messages[0]?.info
       const sessionKey = sessionKeyFromContext(info)
       const sessionID = info?.sessionID
-      const sessionLimit = sessionID !== undefined ? touchMapEntry(contextTokensBySession, sessionID) : undefined
-      const budget = resolveSessionBudget(sessionLimit, options.defaultContextTokens)
+      // The budget fallback rides the session metrics, so hydration must
+      // land before resolution: a restart resolves the persisted budget
+      // instead of flickering to unknown, and a live chat.params capture
+      // still wins because the fallback fills only the unknown state.
       const sessionMetrics = await metricsForSession(metricsBySession, metricsHydrationBySession, persistedTotalsForSession, sessionKey, options.metricsSessions)
+      const sessionLimit = sessionID !== undefined ? touchMapEntry(contextTokensBySession, sessionID) : undefined
+      const sittingModelKey = sessionID === undefined ? undefined : modelKeyBySession.get(sessionID)
+      const { budget, fallbackSuppressed } = sessionBudgetForRun(sessionLimit, sessionMetrics.persistedBudget, sittingModelKey, options)
+      if (fallbackSuppressed) sessionMetrics.persistedBudget = undefined
+      else if (budget.source !== CONTEXT_TOKENS_SOURCE_UNKNOWN) sessionMetrics.persistedBudget = { tokens: budget.tokens, source: budget.source, modelKey: budget.modelKey }
       const sessionStash = stashForSession(stashBySession, sessionKey, options.stashSessions)
       stripLegacyHintParts(messages)
       const toolDedup = deduplicateToolOutputs(messages, options)

@@ -3966,6 +3966,7 @@ test("live state snapshot is written on a quiet run with the exact schema budget
       manualMode: false,
       modelContextTokens: null,
       modelContextTokensSource: CONTEXT_TOKENS_SOURCE_UNKNOWN,
+      modelContextTokensModelKey: null,
       lastRun: { estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS), watermarkTokens: null, deficitTokens: null },
       totals: { ...STATS_ZEROED_COUNTERS },
       stash: { entries: 0, capacity: STASH_LIMIT },
@@ -3978,6 +3979,7 @@ test("live state snapshot is written on a quiet run with the exact schema budget
       manualMode: false,
       modelContextTokens: null,
       modelContextTokensSource: CONTEXT_TOKENS_SOURCE_UNKNOWN,
+      modelContextTokensModelKey: null,
       lastRun: { estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS), watermarkTokens: null, deficitTokens: null },
       totals: { ...STATS_ZEROED_COUNTERS },
       stash: { entries: 0, capacity: STASH_LIMIT },
@@ -5163,6 +5165,36 @@ test("metrics log keeps stash read accounting correct across a suppressed then f
   }
 })
 
+test("metrics log flushes a coalesced session when the budget source changes mid sitting", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const hooks = await loadPluginHooksWithCoalesce(metricsPath)
+    await setChatParamsForModel(hooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID, LARGE_DEFAULT_CONTEXT_TOKENS)
+
+    await runTransform(hooks, reasoningOnlyBundle())
+    assert.equal(metricsLinesIn(metricsPath).length, STATS_LOG_FILE_LINES)
+    assert.equal(metricsLinesIn(metricsPath)[0].modelContextTokens, LARGE_DEFAULT_CONTEXT_TOKENS)
+    assert.equal(metricsLinesIn(metricsPath)[0].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+
+    await runTransform(hooks, reasoningOnlyBundle())
+    assert.equal(metricsLinesIn(metricsPath).length, STATS_LOG_FILE_LINES)
+
+    // A chat.params event from another model without a limit invalidates
+    // the stored capture, so the budget source changes model to unknown.
+    await setChatParamsForModel(hooks, SESSION_ID, OTHER_MODEL_PROVIDER, OTHER_MODEL_ID, undefined)
+    await runTransform(hooks, reasoningOnlyBundle())
+
+    const lines = metricsLinesIn(metricsPath)
+    assert.equal(lines.length, METRICS_COALESCE_LINES_AFTER_FLUSH)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].modelContextTokens, null)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].reasoningExpiredThisRun, EXPIRED_REASONING_SINGLE_COUNT)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
 test("transform renders only the first word of the fence info string as the language tag in the tombstone", async () => {
   const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
   const block = fenceBlockText(FENCE_INFO_STRING_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG))
@@ -5704,11 +5736,21 @@ const REHYDRA_DEDUP_POST_CHARS =
 const REHYDRA_LINES_FROM_SECOND_SITTING = 4
 const REHYDRA_STALE_RECORD_EVICTIONS = 10
 const REHYDRA_NEWER_RECORD_EVICTIONS = 20
+const BUDGET_PERSISTENCE_CONTEXT_LIMIT = 300000
 const REHYDRA_EARLIER_TS = "2026-09-17T00:00:00.000Z"
 const REHYDRA_LATER_TS = "2026-09-17T00:05:00.000Z"
 
 const loadPluginHooksWithPersistence = async (metricsPath: string, stateDir: string, extra: Record<string, unknown> = {}): Promise<HookMap> =>
   loadPluginHooksWithLiveState(stateDir, { metricsLog: true, metricsPath, ...extra })
+
+// Runs the over-watermark standard bundle and returns the message's tool
+// part: eviction engaged when its output starts with the tombstone marker,
+// and the budget resolved to unknown when the output survived verbatim.
+const runStandDownProbe = async (hooks: HookMap): Promise<CompletedToolPart> => {
+  const bundle = buildStandardBundle(SESSION_ID, REHYDRA_EVICTION_SUBJECT_A)
+  await runTransform(hooks, bundle)
+  return toolPartAt(bundle.messages[0], 0)
+}
 
 const runEvictionTransform = async (hooks: HookMap, sessionID: string, path: string): Promise<void> => {
   await setContextLimit(hooks, sessionID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
@@ -5755,6 +5797,7 @@ const rehydrateSeedLine = (session: string, ts: string, evictions: number): Reco
   session,
   modelContextTokens: null,
   modelContextTokensSource: CONTEXT_TOKENS_SOURCE_UNKNOWN,
+  modelContextTokensModelKey: null,
   estimatedTokens: 0,
   watermarkTokens: null,
   deficitTokens: null,
@@ -5775,6 +5818,7 @@ const rehydrateSeedSnapshot = (session: string, ts: string, evictions: number): 
     manualMode: false,
     modelContextTokens: null,
     modelContextTokensSource: CONTEXT_TOKENS_SOURCE_UNKNOWN,
+    modelContextTokensModelKey: null,
     lastRun: { estimatedTokens: 0, watermarkTokens: null, deficitTokens: null },
     totals: { ...STATS_ZEROED_COUNTERS, evictions },
     stash: { entries: 0, capacity: STASH_LIMIT },
@@ -5955,6 +5999,347 @@ test("resumed session seeds from the newer of the metrics log and the snapshot w
 
     assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).evictions, REHYDRA_NEWER_RECORD_EVICTIONS)
     assert.equal(countersOf(await lruStats(hooks, REHYDRA_SECOND_SESSION)).evictions, REHYDRA_NEWER_RECORD_EVICTIONS)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("resumed session resolves the budget persisted in its snapshot and logs it instead of null unknown", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const firstSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await setContextLimit(firstSittingHooks, SESSION_ID, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
+    await runQuietProbeTransform(firstSittingHooks, SESSION_ID)
+    assert.equal(existsSync(metricsPath), false)
+
+    const secondSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await runTransform(secondSittingHooks, reasoningOnlyBundle())
+
+    const lines = metricsLinesForSession(metricsPath, SESSION_ID)
+    assert.equal(lines.length, STATS_LOG_FILE_LINES)
+    assert.equal(lines[0].modelContextTokens, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
+    assert.equal(lines[0].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+    assert.equal(lines[0].watermarkTokens, BUDGET_PERSISTENCE_CONTEXT_LIMIT * WATERMARK_RATIO)
+    assert.ok((lines[0].deficitTokens as number) < 0)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("a live chat.params capture overrides the budget rehydrated from the snapshot", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const firstSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await setContextLimit(firstSittingHooks, SESSION_ID, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
+    await runQuietProbeTransform(firstSittingHooks, SESSION_ID)
+
+    const secondSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await setContextLimit(secondSittingHooks, SESSION_ID, SMALL_CONTEXT_LIMIT)
+    await runTransform(secondSittingHooks, reasoningOnlyBundle())
+
+    const lines = metricsLinesForSession(metricsPath, SESSION_ID)
+    assert.equal(lines.length, STATS_LOG_FILE_LINES)
+    assert.equal(lines[0].modelContextTokens, SMALL_CONTEXT_LIMIT)
+    assert.equal(lines[0].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("a mid sitting model change without a limit invalidates the rehydrated budget and stands eviction down", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const firstSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await setChatParamsForModel(firstSittingHooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
+    await runQuietProbeTransform(firstSittingHooks, SESSION_ID)
+
+    const secondSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    // Rehydration lands first: the reasoning-only run resolves the
+    // persisted budget before the invalidating chat.params event arrives.
+    await runTransform(secondSittingHooks, reasoningOnlyBundle())
+    assert.equal(metricsLinesForSession(metricsPath, SESSION_ID)[0].modelContextTokens, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
+
+    await setChatParamsForModel(secondSittingHooks, SESSION_ID, OTHER_MODEL_PROVIDER, OTHER_MODEL_ID, undefined)
+    assert.equal((await runStandDownProbe(secondSittingHooks)).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+    const stats = await lruStats(secondSittingHooks, SESSION_ID)
+    assert.equal(stats.modelContextTokens, null)
+    assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+
+    await runTransform(secondSittingHooks, reasoningOnlyBundle())
+    const lines = metricsLinesForSession(metricsPath, SESSION_ID)
+    assert.equal(lines.length, METRICS_COALESCE_LINES_AFTER_FLUSH)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].modelContextTokens, null)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("a model change across a restart suppresses the persisted budget instead of refilling it", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const firstSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await setChatParamsForModel(firstSittingHooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
+    await runQuietProbeTransform(firstSittingHooks, SESSION_ID)
+
+    const secondSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await setChatParamsForModel(secondSittingHooks, SESSION_ID, OTHER_MODEL_PROVIDER, OTHER_MODEL_ID, undefined)
+    await runTransform(secondSittingHooks, reasoningOnlyBundle())
+
+    const lines = metricsLinesForSession(metricsPath, SESSION_ID)
+    assert.equal(lines.length, STATS_LOG_FILE_LINES)
+    assert.equal(lines[0].modelContextTokens, null)
+    assert.equal(lines[0].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+
+    assert.equal((await runStandDownProbe(secondSittingHooks)).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+    assert.equal(countersOf(await lruStats(secondSittingHooks, SESSION_ID)).evictions, 0)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("a same model no limit chat params event keeps the rehydrated budget resolved", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const firstSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await setChatParamsForModel(firstSittingHooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
+    await runQuietProbeTransform(firstSittingHooks, SESSION_ID)
+
+    const secondSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await setChatParamsForModel(secondSittingHooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID, undefined)
+    await runTransform(secondSittingHooks, reasoningOnlyBundle())
+
+    const lines = metricsLinesForSession(metricsPath, SESSION_ID)
+    assert.equal(lines.length, STATS_LOG_FILE_LINES)
+    assert.equal(lines[0].modelContextTokens, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
+    assert.equal(lines[0].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("a model change across a restart suppresses a budget seeded from the metrics log tail", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const firstSittingHooks = await loadPluginHooksWith({ metricsLog: true, metricsPath, liveStateLog: false })
+    await setChatParamsForModel(firstSittingHooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
+    await runTransform(firstSittingHooks, reasoningOnlyBundle())
+    const seedLine = metricsLinesForSession(metricsPath, SESSION_ID)[0]
+    assert.equal(seedLine.modelContextTokens, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
+    assert.equal(seedLine.modelContextTokensModelKey, OVERRIDE_MODEL_KEY)
+
+    const secondSittingHooks = await loadPluginHooksWith({ metricsLog: true, metricsPath, liveStateLog: false })
+    await setChatParamsForModel(secondSittingHooks, SESSION_ID, OTHER_MODEL_PROVIDER, OTHER_MODEL_ID, undefined)
+    await runTransform(secondSittingHooks, reasoningOnlyBundle())
+
+    const lines = metricsLinesForSession(metricsPath, SESSION_ID)
+    assert.equal(lines.length, METRICS_COALESCE_LINES_AFTER_FLUSH)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].modelContextTokens, null)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+
+    assert.equal((await runStandDownProbe(secondSittingHooks)).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+    assert.equal(countersOf(await lruStats(secondSittingHooks, SESSION_ID)).evictions, 0)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("a removed model override suppresses the persisted override budget across a restart", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const overrideOptions = { modelContextTokens: { [OVERRIDE_MODEL_KEY]: BUDGET_PERSISTENCE_CONTEXT_LIMIT } }
+    const firstSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir, overrideOptions)
+    await setChatParamsForModel(firstSittingHooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID, LARGE_DEFAULT_CONTEXT_TOKENS)
+    await runQuietProbeTransform(firstSittingHooks, SESSION_ID)
+
+    const secondSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir, overrideOptions)
+    await runTransform(secondSittingHooks, reasoningOnlyBundle())
+    const rehydratedLines = metricsLinesForSession(metricsPath, SESSION_ID)
+    assert.equal(rehydratedLines[0].modelContextTokens, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
+    assert.equal(rehydratedLines[0].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_OVERRIDE)
+    assert.equal(rehydratedLines.length, STATS_LOG_FILE_LINES)
+
+    // The override leaves the config only now: the third sitting rehydrates
+    // a budget whose source is an override the options no longer carry.
+    const thirdSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await runTransform(thirdSittingHooks, reasoningOnlyBundle())
+
+    const lines = metricsLinesForSession(metricsPath, SESSION_ID)
+    assert.equal(lines.length, METRICS_COALESCE_LINES_AFTER_FLUSH)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].modelContextTokens, null)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+
+    assert.equal((await runStandDownProbe(thirdSittingHooks)).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+    assert.equal(countersOf(await lruStats(thirdSittingHooks, SESSION_ID)).evictions, 0)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("a removed defaultContextTokens option suppresses the persisted default budget across a restart", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const firstSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir, { defaultContextTokens: EXPLICIT_DEFAULT_CONTEXT_TOKENS })
+    await runQuietProbeTransform(firstSittingHooks, SESSION_ID)
+
+    const secondSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir, { defaultContextTokens: EXPLICIT_DEFAULT_CONTEXT_TOKENS })
+    await runTransform(secondSittingHooks, reasoningOnlyBundle())
+    const rehydratedLines = metricsLinesForSession(metricsPath, SESSION_ID)
+    assert.equal(rehydratedLines[0].modelContextTokens, EXPLICIT_DEFAULT_CONTEXT_TOKENS)
+    assert.equal(rehydratedLines[0].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_DEFAULT)
+    assert.equal(rehydratedLines.length, STATS_LOG_FILE_LINES)
+
+    // The option leaves the config only now: the third sitting rehydrates
+    // a budget whose source is a default the options no longer carry.
+    const thirdSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await runTransform(thirdSittingHooks, reasoningOnlyBundle())
+
+    const lines = metricsLinesForSession(metricsPath, SESSION_ID)
+    assert.equal(lines.length, METRICS_COALESCE_LINES_AFTER_FLUSH)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].modelContextTokens, null)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+
+    assert.equal((await runStandDownProbe(thirdSittingHooks)).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+    assert.equal(countersOf(await lruStats(thirdSittingHooks, SESSION_ID)).evictions, 0)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("a hostile model key in the persisted record rejects the whole seed", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const hostileSnapshot = JSON.parse(rehydrateSeedSnapshot(SESSION_ID, REHYDRA_LATER_TS, REHYDRA_NEWER_RECORD_EVICTIONS)) as Record<string, unknown>
+    hostileSnapshot.modelContextTokens = BUDGET_PERSISTENCE_CONTEXT_LIMIT
+    hostileSnapshot.modelContextTokensSource = CONTEXT_TOKENS_SOURCE_MODEL
+    hostileSnapshot.modelContextTokensModelKey = 47
+    writeFileSync(liveStatePathIn(stateDir, SESSION_ID), `${JSON.stringify(hostileSnapshot)}\n`)
+
+    const hooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await runTransform(hooks, reasoningOnlyBundle())
+
+    const lines = metricsLinesForSession(metricsPath, SESSION_ID)
+    assert.equal(lines.length, STATS_LOG_FILE_LINES)
+    assert.equal((lines[0].totals as Record<string, number>).evictions, 0)
+    assert.equal(lines[0].modelContextTokens, null)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("lru_stats resolves the rehydrated budget once the session entry is hydrated", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const firstSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await setContextLimit(firstSittingHooks, SESSION_ID, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
+    await runQuietProbeTransform(firstSittingHooks, SESSION_ID)
+    assert.equal(existsSync(metricsPath), false)
+
+    const secondSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await runTransform(secondSittingHooks, reasoningOnlyBundle())
+    const stats = await lruStats(secondSittingHooks, SESSION_ID)
+    assert.equal(stats.modelContextTokens, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
+    assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("eviction engages on a resumed session whose budget rehydrated where a fresh process stood down", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  const freshMetricsDir = makeMetricsDir()
+  const freshStateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const firstSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await setContextLimit(firstSittingHooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+    await runQuietProbeTransform(firstSittingHooks, SESSION_ID)
+    assert.equal(existsSync(metricsPath), false)
+
+    const resumedHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    assert.ok((await runStandDownProbe(resumedHooks)).state.output.startsWith(TOMBSTONE_MARKER))
+    assert.equal(countersOf(await lruStats(resumedHooks, SESSION_ID)).evictions, 1)
+
+    const freshHooks = await loadPluginHooksWithPersistence(metricsLogPathIn(freshMetricsDir), freshStateDir)
+    assert.equal((await runStandDownProbe(freshHooks)).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+    cleanupMetricsDir(freshMetricsDir)
+    cleanupMetricsDir(freshStateDir)
+  }
+})
+
+test("a snapshot predating budget persistence seeds counters and leaves the budget unknown", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const legacySnapshot = JSON.parse(rehydrateSeedSnapshot(SESSION_ID, REHYDRA_LATER_TS, REHYDRA_NEWER_RECORD_EVICTIONS)) as Record<string, unknown>
+    delete legacySnapshot.modelContextTokens
+    delete legacySnapshot.modelContextTokensSource
+    writeFileSync(liveStatePathIn(stateDir, SESSION_ID), `${JSON.stringify(legacySnapshot)}\n`)
+
+    const hooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await runTransform(hooks, reasoningOnlyBundle())
+
+    const lines = metricsLinesForSession(metricsPath, SESSION_ID)
+    assert.equal(lines.length, STATS_LOG_FILE_LINES)
+    assert.equal((lines[0].totals as Record<string, number>).evictions, REHYDRA_NEWER_RECORD_EVICTIONS)
+    assert.equal(lines[0].modelContextTokens, null)
+    assert.equal(lines[0].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("a snapshot whose budget fields are invalid rejects the whole record and the session starts zeroed", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const hostileSnapshot = JSON.parse(rehydrateSeedSnapshot(SESSION_ID, REHYDRA_LATER_TS, REHYDRA_NEWER_RECORD_EVICTIONS)) as Record<string, unknown>
+    hostileSnapshot.modelContextTokens = "most of it"
+    writeFileSync(liveStatePathIn(stateDir, SESSION_ID), `${JSON.stringify(hostileSnapshot)}\n`)
+
+    const hooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await runTransform(hooks, reasoningOnlyBundle())
+
+    const lines = metricsLinesForSession(metricsPath, SESSION_ID)
+    assert.equal(lines.length, STATS_LOG_FILE_LINES)
+    assert.equal((lines[0].totals as Record<string, number>).evictions, 0)
+    assert.equal(lines[0].modelContextTokens, null)
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)
