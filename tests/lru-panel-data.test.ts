@@ -22,6 +22,7 @@ import {
   sessionPanelData,
   type PanelMetricsLine,
 } from "../plugin/lru-panel-data.ts"
+import { TOTALS_KEYS } from "../plugin/lru-schema.ts"
 import lruContextFactory from "../plugin/lru-context.ts"
 import {
   BUDGET_TOKENS_MODEL,
@@ -59,6 +60,7 @@ import {
   makeLine,
   makeSnapshot,
   makeTotals,
+  makePreSchemaTotals,
   serialize,
   withTempDir,
   writeSnapshot,
@@ -66,6 +68,7 @@ import {
 
 const RECENT_LIMIT = 2
 const EVICTION_COUNT_PER_LINE = 3
+const LINE_COUNT_TWO = 2
 const LINE_COUNT_THREE = 3
 const PARSED_LINE_COUNT = 2
 const KILO_BOUNDARY_TOKENS = 1000
@@ -149,19 +152,105 @@ test("parseMetricsLine rejects a line whose totals carry a non-numeric counter",
 })
 
 test("parseMetricsLine and parseStateSnapshot drop pre-upgrade records whose totals predate the token-savings keys", () => {
-  const {
-    evictionTokensSaved: _evictionTokensSaved,
-    dedupTokensSaved: _dedupTokensSaved,
-    reasoningTokensSaved: _reasoningTokensSaved,
-    dedupedUnique: _dedupedUnique,
-    reasoningExpiredUnique: _reasoningExpiredUnique,
-    ...legacyTotals
-  } = makeTotals()
+  const legacyTotals = makePreSchemaTotals()
   const legacyLine = JSON.stringify(makeLine({ totals: legacyTotals }))
   const legacySnapshot = JSON.stringify(makeSnapshot({ totals: legacyTotals }))
 
   assert.equal(parseMetricsLine(legacyLine), undefined)
   assert.equal(parseStateSnapshot(legacySnapshot), undefined)
+})
+
+test("readMetricsLog keeps the newest parseable line per session and skips pre-upgrade and malformed lines in a mixed log", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "metrics.jsonl")
+    const legacyTotals = makePreSchemaTotals()
+    const legacyLine = JSON.stringify(makeLine({ totals: legacyTotals }))
+    const currentLine = JSON.stringify(makeLine())
+    const malformedLine = "{not json"
+    writeFileSync(path, [legacyLine, currentLine, malformedLine].join("\n") + "\n")
+
+    const lines = await readMetricsLog(path)
+
+    assert.deepEqual(lines, [makeLine()])
+  })
+})
+
+test("readMetricsLog keeps every line of a log whose all lines parse strict", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "metrics.jsonl")
+    writeFileSync(path, serialize([makeLine(), makeLine({ session: SESSION_B }), makeLine()]))
+
+    const lines = await readMetricsLog(path)
+
+    assert.equal(lines.length, LINE_COUNT_THREE)
+    assert.deepEqual(lines, [makeLine(), makeLine({ session: SESSION_B }), makeLine()])
+  })
+})
+
+test("readMetricsLog preserves the eviction footer and runs count of strict sessions while tolerating a stale session", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "metrics.jsonl")
+    const evictionLine = makeLine()
+    const evictionFreeLine = makeLine({ evictedThisRun: [] })
+    const staleLine = JSON.stringify(makeLine({ session: SESSION_B, totals: makePreSchemaTotals() }))
+    writeFileSync(path, serialize([evictionLine, evictionFreeLine]) + staleLine + "\n")
+
+    const lines = await readMetricsLog(path)
+    const panel = sessionPanelData(lines, SESSION_A)
+
+    assert.ok(panel !== undefined)
+    assert.equal(panel.runs, LINE_COUNT_TWO)
+    assert.deepEqual(panel.recentEvictions, [evictionLine.evictedThisRun[0]])
+  })
+})
+
+test("parseTotals defaults an absent dedupedBytes to zero while still rejecting other missing keys", () => {
+  const { dedupedBytes: _dedupedBytes, ...preDedupedBytesTotals } = makeTotals()
+  const raw = JSON.stringify(makeLine({ totals: preDedupedBytesTotals }))
+
+  const line = parseMetricsLine(raw)
+
+  assert.ok(line !== undefined)
+  assert.equal(line.totals.dedupedBytes, 0)
+  const { fenceEvicted: _fenceEvicted, ...missingFenceTotals } = makeTotals()
+  assert.equal(parseMetricsLine(JSON.stringify(makeLine({ totals: missingFenceTotals }))), undefined)
+})
+
+test("the fixture totals carry exactly the shared schema keys at runtime", () => {
+  assert.deepEqual(Object.keys(makeTotals()).sort(), [...TOTALS_KEYS].sort())
+})
+
+test("a log mixing one pre-upgrade line with current lines yields the current newest totals and a global count that skips the stale line", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "metrics.jsonl")
+    const legacyTotals = makePreSchemaTotals()
+    const legacySessionLine = JSON.stringify(makeLine({ session: SESSION_B, totals: legacyTotals }))
+    writeFileSync(path, serialize([makeLine()]) + legacySessionLine + "\n")
+
+    const data = await loadPanelData({ path, sessionID: SESSION_A })
+
+    assert.equal(data.error, undefined)
+    assert.deepEqual(data.current?.totals, makeTotals())
+    assert.equal(data.global.sessions, 1)
+    assert.equal(data.global.runs, 1)
+    assert.equal(data.global.evictions, TOTALS_EVICTIONS)
+  })
+})
+
+test("a session whose only lines are pre-upgrade falls back cleanly for the global block and the log-only session block", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "metrics.jsonl")
+    const legacyTotals = makePreSchemaTotals()
+    writeFileSync(path, serialize([makeLine({ session: SESSION_B, totals: legacyTotals })]))
+
+    const data = await loadPanelData({ path, sessionID: SESSION_B })
+
+    assert.equal(data.error, undefined)
+    assert.equal(data.current, undefined)
+    assert.equal(data.global.sessions, 0)
+    assert.equal(data.global.runs, 0)
+    assert.equal(data.global.evictions, 0)
+  })
 })
 
 test("parseMetricsLine rejects a line whose evicted entries are malformed", () => {

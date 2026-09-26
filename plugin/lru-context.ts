@@ -2,6 +2,16 @@ import { appendFile, mkdir, readdir, readFile, rename, stat, unlink, writeFile }
 import { homedir } from "node:os"
 import { join } from "node:path"
 import type { Plugin } from "@opencode-ai/plugin"
+import {
+  DEFAULT_LIVE_STATE_DIR_BASENAME,
+  DEFAULT_METRICS_DIR_SEGMENTS,
+  DEFAULT_METRICS_FILE_BASENAME,
+  RAW_COUNTER_KEYS as SCHEMA_RAW_COUNTER_KEYS,
+  TOTALS_KEYS,
+  type DerivedCounterKey as TotalsDerivedKey,
+  type RawCounterKey as SchemaRawCounterKey,
+  type TotalsKey,
+} from "./lru-schema.ts"
 
 const EVICTION_MARKER = "[lru-evicted]"
 const HINT_MARKER = "[lru-hot]"
@@ -83,12 +93,9 @@ const TOUCH_SCAN_INITIAL_WATERMARK = -1
 const DEFAULT_REMEMBERED_REASONING_PARTS = 4096
 const DEFAULT_REMEMBERED_DEDUP_PAIRS = 4096
 const DEFAULT_METRICS_LOG_ENABLED = true
-const METRICS_DIR_SEGMENTS = [".local", "share", "opencode"]
-const METRICS_FILE_BASENAME = "lru-metrics.jsonl"
-const DEFAULT_METRICS_PATH = join(homedir(), ...METRICS_DIR_SEGMENTS, METRICS_FILE_BASENAME)
+const DEFAULT_METRICS_PATH = join(homedir(), ...DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_METRICS_FILE_BASENAME)
 const DEFAULT_LIVE_STATE_LOG_ENABLED = true
-const LIVE_STATE_DIR_BASENAME = "lru-state"
-const DEFAULT_LIVE_STATE_DIR = join(homedir(), ...METRICS_DIR_SEGMENTS, LIVE_STATE_DIR_BASENAME)
+const DEFAULT_LIVE_STATE_DIR = join(homedir(), ...DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_LIVE_STATE_DIR_BASENAME)
 const LIVE_STATE_FILE_SUFFIX = ".json"
 const MS_PER_SECOND = 1000
 const SECONDS_PER_MINUTE = 60
@@ -296,27 +303,13 @@ type SessionMetrics = {
 
 type MetricsStore = Map<string, SessionMetrics>
 
-// The raw counters a session's persisted totals can seed, anchored to
-// SessionMetrics by the exhaustiveness assertion below so a renamed or
-// removed counter fails to compile here instead of silently missing its
-// seed. The runtime seeder iterates this same list.
-const RAW_COUNTER_KEYS = [
-  "evictions",
-  "bytesReclaimed",
-  "stashHits",
-  "stashMisses",
-  "stashDropped",
-  "deduped",
-  "dedupedBytes",
-  "dedupedUnique",
-  "reasoningExpired",
-  "reasoningBytesExpired",
-  "reasoningExpiredUnique",
-  "postEvictionTouches",
-  "fenceEvicted",
-] as const
-
-type RawCounterKey = (typeof RAW_COUNTER_KEYS)[number]
+// The raw counters a session's persisted totals can seed, declared once in
+// lru-schema.ts and anchored to SessionMetrics by the exhaustiveness
+// assertion below so a renamed or removed counter fails to compile here
+// instead of silently missing its seed. The runtime seeder iterates this
+// same list.
+const RAW_COUNTER_KEYS = SCHEMA_RAW_COUNTER_KEYS
+type RawCounterKey = SchemaRawCounterKey
 
 // Two-directional exhaustiveness: every number-valued SessionMetrics key
 // other than the per-process cursors must appear in RawCounterKey, so a
@@ -338,24 +331,10 @@ type UnseededMetricKeys = Exclude<Exclude<NumberValuedSessionMetricKey, MetricsC
 type AssertEveryMetricSeeded = UnseededMetricKeys extends never ? true : never
 const everyMetricIsSeeded: AssertEveryMetricSeeded = true
 
-type CumulativeCounters = {
-  evictions: number
-  bytesReclaimed: number
-  evictionTokensSaved: number
-  stashHits: number
-  stashMisses: number
-  stashDropped: number
-  deduped: number
-  dedupedBytes: number
-  dedupedUnique: number
-  dedupTokensSaved: number
-  reasoningExpired: number
-  reasoningBytesExpired: number
-  reasoningExpiredUnique: number
-  reasoningTokensSaved: number
-  postEvictionTouches: number
-  fenceEvicted: number
-}
+// The persisted totals shape, derived from the shared schema key list so a
+// key added in lru-schema.ts appears here and in the panel parser without a
+// second edit.
+type CumulativeCounters = { [K in TotalsKey]: number }
 
 type LiveStateSnapshot = {
   ts: string
@@ -1476,24 +1455,25 @@ const recordMetricsLine = async (
   }
 }
 
-const totalsOf = (metrics: SessionMetrics, charsPerToken: number): CumulativeCounters => ({
-  evictions: metrics.evictions,
-  bytesReclaimed: metrics.bytesReclaimed,
-  evictionTokensSaved: estimateTokensFromBytes(metrics.bytesReclaimed, charsPerToken),
-  stashHits: metrics.stashHits,
-  stashMisses: metrics.stashMisses,
-  stashDropped: metrics.stashDropped,
-  deduped: metrics.deduped,
-  dedupedBytes: metrics.dedupedBytes,
-  dedupedUnique: metrics.dedupedUnique,
-  dedupTokensSaved: estimateTokensFromBytes(metrics.dedupedBytes, charsPerToken),
-  reasoningExpired: metrics.reasoningExpired,
-  reasoningBytesExpired: metrics.reasoningBytesExpired,
-  reasoningExpiredUnique: metrics.reasoningExpiredUnique,
-  reasoningTokensSaved: estimateTokensFromBytes(metrics.reasoningBytesExpired, charsPerToken),
-  postEvictionTouches: metrics.postEvictionTouches,
-  fenceEvicted: metrics.fenceEvicted,
-})
+// Derived counters are computed from the raw counters over the
+// charsPerToken factor (the byte keys they divide are named per entry);
+// everything else copies the same-named SessionMetrics field. Keyed by the
+// schema's derived-counter list, so a new estimate lands here once.
+const DERIVED_TOTAL_SOURCES: { [K in TotalsDerivedKey]: RawCounterKey } = {
+  evictionTokensSaved: "bytesReclaimed",
+  dedupTokensSaved: "dedupedBytes",
+  reasoningTokensSaved: "reasoningBytesExpired",
+}
+
+const totalsOf = (metrics: SessionMetrics, charsPerToken: number): CumulativeCounters => {
+  const metricsAsCounters = metrics as unknown as Record<TotalsKey, number>
+  const totals = {} as CumulativeCounters
+  for (const key of TOTALS_KEYS) {
+    const bytesKey = DERIVED_TOTAL_SOURCES[key as TotalsDerivedKey]
+    totals[key] = bytesKey === undefined ? metricsAsCounters[key] : estimateTokensFromBytes(metricsAsCounters[bytesKey], charsPerToken)
+  }
+  return totals
+}
 
 const liveStateSnapshotOf = (
   sessionKey: string,

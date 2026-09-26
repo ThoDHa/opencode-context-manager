@@ -1,13 +1,11 @@
 import { readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
+import { DEFAULT_LIVE_STATE_DIR_BASENAME, DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_METRICS_FILE_BASENAME, TOTALS_KEYS, type TotalsKey } from "./lru-schema.ts"
 
-const METRICS_DIR_SEGMENTS = [".local", "share", "opencode"]
-const METRICS_FILE_BASENAME = "lru-metrics.jsonl"
-export const DEFAULT_METRICS_PATH = join(homedir(), ...METRICS_DIR_SEGMENTS, METRICS_FILE_BASENAME)
+export const DEFAULT_METRICS_PATH = join(homedir(), ...DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_METRICS_FILE_BASENAME)
 
-const LIVE_STATE_DIR_BASENAME = "lru-state"
-export const DEFAULT_LIVE_STATE_DIR = join(homedir(), ...METRICS_DIR_SEGMENTS, LIVE_STATE_DIR_BASENAME)
+export const DEFAULT_LIVE_STATE_DIR = join(homedir(), ...DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_LIVE_STATE_DIR_BASENAME)
 const SNAPSHOT_FILE_SUFFIX = ".json"
 
 export const DEFAULT_RECENT_EVICTIONS = 8
@@ -110,23 +108,9 @@ export type PanelEvictedEntry = {
   messagesAgo: number
 }
 
-export type PanelTotals = {
-  evictions: number
-  bytesReclaimed: number
-  evictionTokensSaved: number
-  stashHits: number
-  stashMisses: number
-  stashDropped: number
-  deduped: number
-  dedupedUnique: number
-  dedupTokensSaved: number
-  reasoningExpired: number
-  reasoningBytesExpired: number
-  reasoningExpiredUnique: number
-  reasoningTokensSaved: number
-  fenceEvicted: number
-  postEvictionTouches: number
-}
+// Derived from the shared schema key list, so a key added in lru-schema.ts
+// appears here and in the producer's totals without a second edit.
+export type PanelTotals = { [K in TotalsKey]: number }
 
 export type PanelMetricsLine = {
   session: string
@@ -229,40 +213,27 @@ const parseEvictedEntries = (value: unknown): PanelEvictedEntry[] | undefined =>
   return entries
 }
 
+// Every totals key is required and must be a finite number, with one
+// transitional exception: `dedupedBytes` postdates the other raw counters,
+// and rotation now holds weeks of records written before it existed, so an
+// absent `dedupedBytes` defaults to 0 (mirroring the producer's
+// `persistedCounterOf` tolerance for the same gap) while a present
+// non-finite value still rejects the record.
+const TRANSITIONAL_ABSENT_ZERO_KEYS: readonly TotalsKey[] = ["dedupedBytes"]
+
 const parseTotals = (value: unknown): PanelTotals | undefined => {
   if (!isRecord(value)) return undefined
-  if (!isFiniteNumber(value["evictions"])) return undefined
-  if (!isFiniteNumber(value["bytesReclaimed"])) return undefined
-  if (!isFiniteNumber(value["evictionTokensSaved"])) return undefined
-  if (!isFiniteNumber(value["stashHits"])) return undefined
-  if (!isFiniteNumber(value["stashMisses"])) return undefined
-  if (!isFiniteNumber(value["stashDropped"])) return undefined
-  if (!isFiniteNumber(value["deduped"])) return undefined
-  if (!isFiniteNumber(value["dedupedUnique"])) return undefined
-  if (!isFiniteNumber(value["dedupTokensSaved"])) return undefined
-  if (!isFiniteNumber(value["reasoningExpired"])) return undefined
-  if (!isFiniteNumber(value["reasoningBytesExpired"])) return undefined
-  if (!isFiniteNumber(value["reasoningExpiredUnique"])) return undefined
-  if (!isFiniteNumber(value["reasoningTokensSaved"])) return undefined
-  if (!isFiniteNumber(value["fenceEvicted"])) return undefined
-  if (!isFiniteNumber(value["postEvictionTouches"])) return undefined
-  return {
-    evictions: value["evictions"],
-    bytesReclaimed: value["bytesReclaimed"],
-    evictionTokensSaved: value["evictionTokensSaved"],
-    stashHits: value["stashHits"],
-    stashMisses: value["stashMisses"],
-    stashDropped: value["stashDropped"],
-    deduped: value["deduped"],
-    dedupedUnique: value["dedupedUnique"],
-    dedupTokensSaved: value["dedupTokensSaved"],
-    reasoningExpired: value["reasoningExpired"],
-    reasoningBytesExpired: value["reasoningBytesExpired"],
-    reasoningExpiredUnique: value["reasoningExpiredUnique"],
-    reasoningTokensSaved: value["reasoningTokensSaved"],
-    fenceEvicted: value["fenceEvicted"],
-    postEvictionTouches: value["postEvictionTouches"],
+  const totals = {} as PanelTotals
+  for (const key of TOTALS_KEYS) {
+    const raw = value[key]
+    if (raw === undefined && TRANSITIONAL_ABSENT_ZERO_KEYS.includes(key)) {
+      totals[key] = 0
+      continue
+    }
+    if (!isFiniteNumber(raw)) return undefined
+    totals[key] = raw
   }
+  return totals
 }
 
 export const parseMetricsLine = (raw: string): PanelMetricsLine | undefined => {
@@ -308,6 +279,36 @@ export const parseMetricsLog = (content: string): PanelMetricsLine[] => {
   return lines
 }
 
+// The strict parser rejects records whose totals predate a schema key, so
+// a counter addition would otherwise blank the panel's global block until
+// every pre-upgrade line rotates out. Tolerance is scoped per session: a
+// session carrying at least one schema-stale line contributes only its
+// newest parseable line (file order preserves the log's recency, so a
+// malformed line for a session with no parseable lines contributes
+// nothing), while a session whose every line parses strict keeps all of
+// them, so its runs count and the eviction history recentEvictions walks
+// backward through stay intact. The strict parser itself stays strict;
+// tolerance lives only here.
+const tolerantMetricsLines = (content: string): PanelMetricsLine[] => {
+  const lines = parseMetricsLog(content)
+  const newestIndexBySession = new Map<string, number>()
+  for (let index = 0; index < lines.length; index += 1) newestIndexBySession.set(lines[index].session, index)
+  const staleSessions = new Set<string>()
+  for (const raw of content.split("\n")) {
+    const trimmed = raw.trim()
+    if (trimmed.length === 0) continue
+    if (parseMetricsLine(trimmed) !== undefined) continue
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(trimmed)
+    } catch {
+      continue
+    }
+    if (isRecord(parsed) && typeof parsed["session"] === "string") staleSessions.add(parsed["session"])
+  }
+  return lines.filter((line, index) => staleSessions.has(line.session) === false || newestIndexBySession.get(line.session) === index)
+}
+
 export const readMetricsLog = async (path: string): Promise<PanelMetricsLine[]> => {
   let content: string
   try {
@@ -317,7 +318,7 @@ export const readMetricsLog = async (path: string): Promise<PanelMetricsLine[]> 
     if (code === "ENOENT") return []
     throw error
   }
-  return parseMetricsLog(content)
+  return tolerantMetricsLines(content)
 }
 
 const parseSnapshotStash = (value: unknown): PanelSnapshotStash | undefined => {

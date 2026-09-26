@@ -3,6 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { type PanelMetricsLine } from "../plugin/lru-panel-data.ts"
+import { type TotalsKey } from "../plugin/lru-schema.ts"
 
 const SESSION_A = "sess-panel-a"
 const SESSION_B = "sess-panel-b"
@@ -43,8 +44,12 @@ const SNAPSHOT_TS = "2026-09-18T09:00:00.000Z"
 const LOG_LINE_TS_STALE = "2026-09-18T08:00:00.000Z"
 
 const LOG_LINE_ONLY_EVICTIONS = TOTALS_EVICTIONS + 1
+const TOTALS_DEDUPED_BYTES = 9000
 
-const makeTotals = (): PanelMetricsLine["totals"] => ({
+// One value per shared schema totals key: the mapped type forces a fixture
+// value for every key in plugin/lru-schema.ts, so a counter added there
+// fails to compile here until it is given a value.
+const TOTALS_VALUES: Record<TotalsKey, number> = {
   evictions: TOTALS_EVICTIONS,
   bytesReclaimed: TOTALS_BYTES,
   evictionTokensSaved: TOTALS_EVICTION_TOKENS_SAVED,
@@ -52,6 +57,7 @@ const makeTotals = (): PanelMetricsLine["totals"] => ({
   stashMisses: TOTALS_STASH_MISSES,
   stashDropped: TOTALS_STASH_DROPPED,
   deduped: TOTALS_DEDUPED,
+  dedupedBytes: TOTALS_DEDUPED_BYTES,
   dedupedUnique: TOTALS_DEDUPED_UNIQUE,
   dedupTokensSaved: TOTALS_DEDUP_TOKENS_SAVED,
   reasoningExpired: TOTALS_REASONING_EXPIRED,
@@ -60,7 +66,24 @@ const makeTotals = (): PanelMetricsLine["totals"] => ({
   reasoningTokensSaved: TOTALS_REASONING_TOKENS_SAVED,
   fenceEvicted: TOTALS_FENCE_EVICTED,
   postEvictionTouches: TOTALS_TOUCHES,
-})
+}
+
+const makeTotals = (): PanelMetricsLine["totals"] => ({ ...TOTALS_VALUES })
+
+// A totals record written before the unique-event and token-savings keys
+// existed: the exact shape the strict parser must reject and the tolerant
+// reader must skip.
+const makePreSchemaTotals = (): Record<string, number> => {
+  const {
+    evictionTokensSaved: _evictionTokensSaved,
+    dedupTokensSaved: _dedupTokensSaved,
+    reasoningTokensSaved: _reasoningTokensSaved,
+    dedupedUnique: _dedupedUnique,
+    reasoningExpiredUnique: _reasoningExpiredUnique,
+    ...preSchema
+  } = TOTALS_VALUES
+  return preSchema
+}
 
 const makeLine = (overrides: Partial<PanelMetricsLine> = {}): PanelMetricsLine => ({
   session: SESSION_A,
@@ -149,6 +172,7 @@ export {
   LOG_LINE_ONLY_EVICTIONS,
   SECOND_LINE_ESTIMATED,
   makeTotals,
+  makePreSchemaTotals,
   makeLine,
   serialize,
   withTempDir,
