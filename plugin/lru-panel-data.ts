@@ -279,32 +279,35 @@ export const parseMetricsLog = (content: string): PanelMetricsLine[] => {
   return lines
 }
 
-// The strict parser rejects records whose totals predate a schema key, so
-// a counter addition would otherwise blank the panel's global block until
-// every pre-upgrade line rotates out. Tolerance is scoped per session: a
-// session carrying at least one schema-stale line contributes only its
-// newest parseable line (file order preserves the log's recency, so a
-// malformed line for a session with no parseable lines contributes
-// nothing), while a session whose every line parses strict keeps all of
-// them, so its runs count and the eviction history recentEvictions walks
-// backward through stay intact. The strict parser itself stays strict;
-// tolerance lives only here.
+// A session carrying a line the strict parser rejects (totals missing a
+// schema key, malformed evicted entries, a missing or mistyped field:
+// anything strict parsing fails on) contributes only its newest parseable
+// line, while a session whose every line parses strict keeps all of them,
+// so its runs count and the eviction history recentEvictions walks
+// backward through stay intact. A rejected line that JSON-parses far
+// enough to name its session scopes the tolerance to that session; a line
+// that does not parse at all contributes nothing. The strict parser
+// itself stays strict; tolerance lives only here.
 const tolerantMetricsLines = (content: string): PanelMetricsLine[] => {
-  const lines = parseMetricsLog(content)
+  const lines: PanelMetricsLine[] = []
   const newestIndexBySession = new Map<string, number>()
-  for (let index = 0; index < lines.length; index += 1) newestIndexBySession.set(lines[index].session, index)
   const staleSessions = new Set<string>()
   for (const raw of content.split("\n")) {
     const trimmed = raw.trim()
     if (trimmed.length === 0) continue
-    if (parseMetricsLine(trimmed) !== undefined) continue
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(trimmed)
-    } catch {
+    const line = parseMetricsLine(trimmed)
+    if (line === undefined) {
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(trimmed)
+      } catch {
+        continue
+      }
+      if (isRecord(parsed) && typeof parsed["session"] === "string") staleSessions.add(parsed["session"])
       continue
     }
-    if (isRecord(parsed) && typeof parsed["session"] === "string") staleSessions.add(parsed["session"])
+    newestIndexBySession.set(line.session, lines.length)
+    lines.push(line)
   }
   return lines.filter((line, index) => staleSessions.has(line.session) === false || newestIndexBySession.get(line.session) === index)
 }

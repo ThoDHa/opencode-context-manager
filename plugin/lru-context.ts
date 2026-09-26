@@ -1111,20 +1111,12 @@ const executeReadEvicted = async (
   return newest.attachments === undefined ? output : `${output}\n${stashedAttachmentsLineFor(newest.attachments)}`
 }
 
+// Raw counters start at zero, derived from the shared schema key list so a
+// counter added there is initialized here too instead of reading undefined.
+const zeroedRawCounters = Object.fromEntries(RAW_COUNTER_KEYS.map((key) => [key, 0])) as Record<RawCounterKey, number>
+
 const createSessionMetrics = (): SessionMetrics => ({
-  evictions: 0,
-  bytesReclaimed: 0,
-  stashHits: 0,
-  stashMisses: 0,
-  stashDropped: 0,
-  deduped: 0,
-  dedupedBytes: 0,
-  dedupedUnique: 0,
-  reasoningExpired: 0,
-  reasoningBytesExpired: 0,
-  reasoningExpiredUnique: 0,
-  postEvictionTouches: 0,
-  fenceEvicted: 0,
+  ...zeroedRawCounters,
   evictedSubjects: [],
   touchScanThrough: TOUCH_SCAN_INITIAL_WATERMARK,
   reasoningSeenKeys: [],
