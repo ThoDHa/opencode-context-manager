@@ -2960,6 +2960,24 @@ const METRICS_LINES_AFTER_RELOAD = 2
 const METRICS_LINES_AFTER_RECOVERY = 1
 const METRICS_ROTATION_SUFFIX = ".1"
 const DEFAULT_METRICS_ROTATION_MAX_BYTES = 5 * 1024 * 1024
+const DEFAULT_METRICS_MIN_LINE_INTERVAL_MS = 60 * 1000
+const METRICS_MIN_LINE_INTERVAL_INVALID_VALUES = [-1, Number.NaN, Number.POSITIVE_INFINITY, "soon"]
+const METRICS_COALESCING_DISABLED_MS = 0
+const METRICS_COALESCE_TEST_INTERVAL_MS = 250
+const METRICS_COALESCE_ELAPSED_WAIT_MS = 400
+const METRICS_COALESCE_WRITE_ANCHOR_INTERVAL_MS = 400
+const METRICS_COALESCE_WRITE_ANCHOR_FIRST_DELAY_MS = 150
+const METRICS_COALESCE_WRITE_ANCHOR_SECOND_DELAY_MS = 150
+const METRICS_COALESCE_WRITE_ANCHOR_FINAL_DELAY_MS = 200
+const METRICS_COALESCE_RUN_COUNT = 3
+const METRICS_COALESCE_LINES_AFTER_ELAPSED = 2
+const METRICS_COALESCE_LINES_AFTER_FLUSH = 2
+const METRICS_COALESCE_LINES_AFTER_SPAN = 3
+const METRICS_COALESCE_STASH_HIT_COUNT = 2
+const METRICS_COALESCE_EVICTION_SUBJECT = "/data/coalesce-evicted.txt"
+const METRICS_COALESCE_DEDUP_PATH = "/data/coalesce-dedup.txt"
+const METRICS_COALESCE_RELOAD_SUBJECT = "/data/coalesce-reload.txt"
+const METRICS_COALESCE_QUIET_SUBJECT = "/data/coalesce-quiet.txt"
 const METRICS_ROTATION_DISABLED_MAX_BYTES = 0
 const METRICS_ROTATION_CUSTOM_CAP = 4096
 const METRICS_ROTATION_TINY_CAP = 1
@@ -3081,6 +3099,7 @@ test("lru_stats reports zeroed counters unknown budget and empty stash for a ses
     metricsLog: false,
     metricsPath: DEFAULT_METRICS_PATH,
     metricsRotationMaxBytes: DEFAULT_METRICS_ROTATION_MAX_BYTES,
+    metricsMinLineIntervalMs: DEFAULT_METRICS_MIN_LINE_INTERVAL_MS,
     liveStateLog: false,
     liveStatePath: DEFAULT_LIVE_STATE_DIR,
     liveStatePruneMaxAgeMs: DEFAULT_LIVE_STATE_PRUNE_MAX_AGE_MS,
@@ -3724,6 +3743,27 @@ test("lru_stats reports the metrics rotation cap in options defaulting to five M
     assert.equal(
       ((await lruStats(hooks, SESSION_ID)).options as Record<string, unknown>).metricsRotationMaxBytes,
       DEFAULT_METRICS_ROTATION_MAX_BYTES,
+    )
+  }
+})
+
+test("lru_stats reports metricsMinLineIntervalMs defaulting to sixty seconds and falling back on invalid values", async () => {
+  assert.equal(
+    ((await lruStats(await loadPluginHooks(), SESSION_ID)).options as Record<string, unknown>).metricsMinLineIntervalMs,
+    DEFAULT_METRICS_MIN_LINE_INTERVAL_MS,
+  )
+
+  const customHooks = await loadPluginHooksWith({ metricsMinLineIntervalMs: METRICS_COALESCE_TEST_INTERVAL_MS })
+  assert.equal(
+    ((await lruStats(customHooks, SESSION_ID)).options as Record<string, unknown>).metricsMinLineIntervalMs,
+    METRICS_COALESCE_TEST_INTERVAL_MS,
+  )
+
+  for (const invalidInterval of METRICS_MIN_LINE_INTERVAL_INVALID_VALUES) {
+    const hooks = await loadPluginHooksWith({ metricsMinLineIntervalMs: invalidInterval })
+    assert.equal(
+      ((await lruStats(hooks, SESSION_ID)).options as Record<string, unknown>).metricsMinLineIntervalMs,
+      DEFAULT_METRICS_MIN_LINE_INTERVAL_MS,
     )
   }
 })
@@ -4966,6 +5006,163 @@ test("metrics log records a fence only run as eventful with the fenceEvictedThis
   }
 })
 
+const loadPluginHooksWithCoalesce = async (metricsPath: string, intervalMs: number = METRICS_COALESCE_TEST_INTERVAL_MS): Promise<HookMap> =>
+  loadPluginHooksWith({ metricsLog: true, metricsPath, metricsMinLineIntervalMs: intervalMs })
+
+const reasoningOnlyBundle = (): StrictBundle =>
+  buildBundle([[reasoningPart(REASONING_COLD_TEXT), pathToolPart(METRICS_COALESCE_QUIET_SUBJECT, APPEARANCE_ONLY_OUTPUT_BYTES)], ...fillerMessages()])
+
+test("metrics log measures the coalesce interval from the previous flushed line not the last suppressed run", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const hooks = await loadPluginHooksWithCoalesce(metricsPath, METRICS_COALESCE_WRITE_ANCHOR_INTERVAL_MS)
+
+    // Runs at roughly 0, 150, 300, 500 ms against the 400 ms window. Under
+    // write anchoring the fourth run sits past the interval measured from
+    // the first flush and writes; under attempt anchoring it would sit
+    // within 200 ms of the third run's suppressed attempt and stay silent.
+    // Each transform adds a few milliseconds, leaving the 100 ms margins
+    // safe.
+    await runTransform(hooks, reasoningOnlyBundle())
+    assert.equal(metricsLinesIn(metricsPath).length, STATS_LOG_FILE_LINES)
+
+    await sleepMs(METRICS_COALESCE_WRITE_ANCHOR_FIRST_DELAY_MS)
+    await runTransform(hooks, reasoningOnlyBundle())
+    await sleepMs(METRICS_COALESCE_WRITE_ANCHOR_SECOND_DELAY_MS)
+    await runTransform(hooks, reasoningOnlyBundle())
+    assert.equal(metricsLinesIn(metricsPath).length, STATS_LOG_FILE_LINES)
+
+    await sleepMs(METRICS_COALESCE_WRITE_ANCHOR_FINAL_DELAY_MS)
+    await runTransform(hooks, reasoningOnlyBundle())
+
+    assert.equal(metricsLinesIn(metricsPath).length, METRICS_COALESCE_LINES_AFTER_ELAPSED)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("metrics log coalesces a reasoning only run inside the interval and flushes one line after it", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const hooks = await loadPluginHooksWithCoalesce(metricsPath)
+
+    await runTransform(hooks, reasoningOnlyBundle())
+    assert.equal(metricsLinesIn(metricsPath).length, STATS_LOG_FILE_LINES)
+
+    await runTransform(hooks, reasoningOnlyBundle())
+    assert.equal(metricsLinesIn(metricsPath).length, STATS_LOG_FILE_LINES)
+
+    await sleepMs(METRICS_COALESCE_ELAPSED_WAIT_MS)
+    await runTransform(hooks, reasoningOnlyBundle())
+
+    const lines = metricsLinesIn(metricsPath)
+    assert.equal(lines.length, METRICS_COALESCE_LINES_AFTER_ELAPSED)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_ELAPSED - 1].reasoningExpiredThisRun, EXPIRED_REASONING_SINGLE_COUNT)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_ELAPSED - 1].reasoningBytesExpiredThisRun, REASONING_COLD_TEXT.length)
+    assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).reasoningExpired, EXPIRED_REASONING_SINGLE_COUNT * METRICS_COALESCE_RUN_COUNT)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("metrics log flushes immediately on an eviction inside the coalesce interval", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const hooks = await loadPluginHooksWithCoalesce(metricsPath)
+    await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+    await runTransform(hooks, reasoningOnlyBundle())
+    assert.equal(metricsLinesIn(metricsPath).length, STATS_LOG_FILE_LINES)
+
+    const bundle = buildStandardBundle(SESSION_ID, METRICS_COALESCE_EVICTION_SUBJECT)
+    await runTransform(hooks, bundle)
+
+    const lines = metricsLinesIn(metricsPath)
+    assert.equal(lines.length, METRICS_COALESCE_LINES_AFTER_FLUSH)
+    assert.deepEqual(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].evictedThisRun, [
+      { tool: READ_TOOL, subject: METRICS_COALESCE_EVICTION_SUBJECT, bytes: MIN_EVICTABLE_BYTES, attachmentBytes: 0, messagesAgo: 5 },
+    ])
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("metrics log flushes immediately on a dedup inside the coalesce interval", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const hooks = await loadPluginHooksWithCoalesce(metricsPath)
+    await runTransform(hooks, reasoningOnlyBundle())
+    assert.equal(metricsLinesIn(metricsPath).length, STATS_LOG_FILE_LINES)
+
+    await runTransform(
+      hooks,
+      buildBundle([
+        [pathToolPart(METRICS_COALESCE_DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
+        ...fillerMessages(2),
+        [pathToolPart(METRICS_COALESCE_DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
+        ...fillerMessages(2),
+      ]),
+    )
+
+    const lines = metricsLinesIn(metricsPath)
+    assert.equal(lines.length, METRICS_COALESCE_LINES_AFTER_FLUSH)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].dedupedThisRun, 1)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("metrics log with metricsMinLineIntervalMs zero keeps writing one line per eventful run", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const hooks = await loadPluginHooksWithCoalesce(metricsPath, METRICS_COALESCING_DISABLED_MS)
+
+    await runTransform(hooks, reasoningOnlyBundle())
+    await runTransform(hooks, reasoningOnlyBundle())
+    await runTransform(hooks, reasoningOnlyBundle())
+
+    const lines = metricsLinesIn(metricsPath)
+    assert.equal(lines.length, METRICS_COALESCE_RUN_COUNT)
+    assert.equal(lines[METRICS_COALESCE_RUN_COUNT - 1].reasoningExpiredThisRun, EXPIRED_REASONING_SINGLE_COUNT)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("metrics log keeps stash read accounting correct across a suppressed then flushed sequence", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const hooks = await loadPluginHooksWithCoalesce(metricsPath)
+    await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+    await runTransform(hooks, buildStandardBundle(SESSION_ID, METRICS_COALESCE_RELOAD_SUBJECT))
+    assert.equal(await readEvicted(hooks, METRICS_COALESCE_RELOAD_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+    await runTransform(hooks, reasoningOnlyBundle())
+    await runTransform(hooks, reasoningOnlyBundle())
+
+    const lines = metricsLinesIn(metricsPath)
+    assert.equal(lines.length, METRICS_COALESCE_LINES_AFTER_FLUSH)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].stashReadsSinceLastLine, 1)
+
+    assert.equal(await readEvicted(hooks, METRICS_COALESCE_RELOAD_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+    await runTransform(hooks, buildBundle([[textPart(textOfChars(FILLER_TEXT_CHARS))], ...fillerMessages(2)]))
+
+    const flushedLines = metricsLinesIn(metricsPath)
+    assert.equal(flushedLines.length, METRICS_COALESCE_LINES_AFTER_SPAN)
+    assert.equal(flushedLines[METRICS_COALESCE_LINES_AFTER_SPAN - 1].stashReadsSinceLastLine, 1)
+    assert.deepEqual(flushedLines[METRICS_COALESCE_LINES_AFTER_SPAN - 1].evictedThisRun, [])
+    assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).stashHits, METRICS_COALESCE_STASH_HIT_COUNT)
+    assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).stashMisses, 0)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
 test("transform renders only the first word of the fence info string as the language tag in the tombstone", async () => {
   const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
   const block = fenceBlockText(FENCE_INFO_STRING_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG))
@@ -5504,7 +5701,7 @@ const REHYDRA_REASONING_TEXT = "rehydrated cold reasoning block"
 const REHYDRA_PROBE_TEXT_CHARS = 60
 const REHYDRA_DEDUP_POST_CHARS =
   dedupTombstoneFor(READ_TOOL, 1).length + THREE_ENTRY_OUTPUT_BYTES + 2 * FILLER_TEXT_CHARS
-const REHYDRA_LINES_FROM_SECOND_SITTING = 5
+const REHYDRA_LINES_FROM_SECOND_SITTING = 4
 const REHYDRA_STALE_RECORD_EVICTIONS = 10
 const REHYDRA_NEWER_RECORD_EVICTIONS = 20
 const REHYDRA_EARLIER_TS = "2026-09-17T00:00:00.000Z"

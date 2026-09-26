@@ -104,6 +104,8 @@ const PRUNE_SCAN_THROTTLE_DISABLED = 0
 const DEFAULT_METRICS_ROTATION_MAX_BYTES = 5 * 1024 * 1024
 const METRICS_ROTATION_DISABLED_MAX_BYTES = 0
 const METRICS_ROTATION_SUFFIX = ".1"
+const DEFAULT_METRICS_MIN_LINE_INTERVAL_MS = SECONDS_PER_MINUTE * MS_PER_SECOND
+const METRICS_COALESCING_DISABLED_MS = 0
 const STATS_TOOL_NAME = "lru_stats"
 const STATS_TOOL_DESCRIPTION =
   "Return live metrics for the LRU Context Manager in this session: eviction counters, expired reasoning counts, post-eviction touches, stash occupancy, the effective context budget, and the most recent transform run's token estimate."
@@ -159,6 +161,7 @@ type LruContextOptions = {
   metricsLog?: boolean
   metricsPath?: string
   metricsRotationMaxBytes?: number
+  metricsMinLineIntervalMs?: number
   liveStateLog?: boolean
   liveStatePath?: string
   liveStatePruneMaxAgeMs?: number
@@ -272,6 +275,11 @@ type SessionMetrics = {
   reasoningSeenKeys: string[]
   dedupedPairKeys: string[]
   stashReadsLoggedThrough: number
+  // Per-process bookkeeping for the metrics line coalesce gate: the moment
+  // of the session's last flushed line and the budget source it carried.
+  // Never persisted; a restart simply writes on its next eventful run.
+  lastLineAtMs?: number
+  lastLineBudgetSource?: ContextTokensSource
   lastRun?: LastRunMetrics
   logWriteError?: string
   stateWriteError?: string
@@ -304,6 +312,13 @@ type RawCounterKey = (typeof RAW_COUNTER_KEYS)[number]
 // Two-directional exhaustiveness: every number-valued SessionMetrics key
 // other than the per-process cursors must appear in RawCounterKey, so a
 // newly added counter fails to compile until it is added to the seeded set.
+// Cursor inventory beyond the two number cursors in MetricsCursorKey: the
+// optional coalesce-gate fields lastLineAtMs and lastLineBudgetSource escape
+// this check through optionality and are seeded implicitly (undefined means
+// never written, so a restart writes on its next eventful run), and the
+// reasoningSeenKeys and dedupedPairKeys lists are seeded empty. A new
+// REQUIRED numeric field must land in RAW_COUNTER_KEYS or MetricsCursorKey
+// to compile; a new OPTIONAL one must be justified the same way.
 type NumberValuedSessionMetricKey = {
   [K in keyof SessionMetrics]-?: SessionMetrics[K] extends number ? K : never
 }[keyof SessionMetrics]
@@ -445,6 +460,10 @@ const resolveOptions = (raw: LruContextOptions = {}): ResolvedOptions => {
       typeof raw.metricsRotationMaxBytes === "number" && Number.isFinite(raw.metricsRotationMaxBytes) && raw.metricsRotationMaxBytes >= 0
         ? raw.metricsRotationMaxBytes
         : DEFAULT_METRICS_ROTATION_MAX_BYTES,
+    metricsMinLineIntervalMs:
+      typeof raw.metricsMinLineIntervalMs === "number" && Number.isFinite(raw.metricsMinLineIntervalMs) && raw.metricsMinLineIntervalMs >= 0
+        ? raw.metricsMinLineIntervalMs
+        : DEFAULT_METRICS_MIN_LINE_INTERVAL_MS,
     liveStateLog: typeof raw.liveStateLog === "boolean" ? raw.liveStateLog : DEFAULT_LIVE_STATE_LOG_ENABLED,
     liveStatePath: typeof raw.liveStatePath === "string" && raw.liveStatePath.length > 0 ? raw.liveStatePath : DEFAULT_LIVE_STATE_DIR,
     liveStatePruneMaxAgeMs:
@@ -1347,11 +1366,32 @@ const recordMetricsLine = async (
 ): Promise<void> => {
   const { eviction, deduped: dedupedThisRun, touches: touchesThisRun, reasoningExpired: reasoningExpiredThisRun, fenceEvicted: fenceEvictedThisRun } = run
   const stashReadsSinceLastLine = metrics.stashHits + metrics.stashMisses - metrics.stashReadsLoggedThrough
-  const isEventful =
-    eviction.evicted.length > 0 || dedupedThisRun > 0 || touchesThisRun > 0 || reasoningExpiredThisRun.parts > 0 || fenceEvictedThisRun.blocks > 0 || stashReadsSinceLastLine > 0
+  const nowMs = Date.now()
+  // The five recorded-event disjuncts feed both gates so the lists cannot
+  // drift. Eventful runs are the candidates for a line: an eviction, dedup
+  // tombstone, touch, fence event, or stash read, plus reasoning expiry; a
+  // budget-source change alone stays quiet. Among eventful runs, the
+  // significant ones always flush: any recorded event, plus a budget-source
+  // change against the last flushed line (a change the panel renders per
+  // line, and the first line of a session counts as one). Reasoning expiry
+  // re-reports the session's standing aged set on every run, so a
+  // reasoning-only run inside the coalesce window writes nothing; the
+  // window is measured from the session's previous flushed line and a
+  // suppressed run does not move it, so sustained reasoning-only traffic
+  // settles at one line per interval.
+  const hasRecordedEvent =
+    eviction.evicted.length > 0 ||
+    dedupedThisRun > 0 ||
+    touchesThisRun > 0 ||
+    fenceEvictedThisRun.blocks > 0 ||
+    stashReadsSinceLastLine > 0
+  const isEventful = hasRecordedEvent || reasoningExpiredThisRun.parts > 0
   if (options.metricsLog === false || isEventful === false) return
+  const hasSignificantEvent = hasRecordedEvent || budget.source !== metrics.lastLineBudgetSource
+  const withinCoalesceWindow = metrics.lastLineAtMs !== undefined && nowMs - metrics.lastLineAtMs < options.metricsMinLineIntervalMs
+  if (options.metricsMinLineIntervalMs > METRICS_COALESCING_DISABLED_MS && hasSignificantEvent === false && withinCoalesceWindow) return
   const line = {
-    ts: new Date().toISOString(),
+    ts: new Date(nowMs).toISOString(),
     session: sessionKey,
     modelContextTokens: budget.tokens,
     modelContextTokensSource: budget.source,
@@ -1378,6 +1418,8 @@ const recordMetricsLine = async (
     await rotateMetricsLogPastCap(options.metricsPath, Buffer.byteLength(metricsJsonLine), options.metricsRotationMaxBytes)
     await appendFile(options.metricsPath, metricsJsonLine)
     metrics.stashReadsLoggedThrough = metrics.stashHits + metrics.stashMisses
+    metrics.lastLineAtMs = nowMs
+    metrics.lastLineBudgetSource = budget.source
     delete metrics.logWriteError
   } catch (error) {
     metrics.logWriteError = error instanceof Error ? error.message : String(error)
@@ -1552,6 +1594,7 @@ const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
       metricsLog: source.options.metricsLog,
       metricsPath: source.options.metricsPath,
       metricsRotationMaxBytes: source.options.metricsRotationMaxBytes,
+      metricsMinLineIntervalMs: source.options.metricsMinLineIntervalMs,
       liveStateLog: source.options.liveStateLog,
       liveStatePath: source.options.liveStatePath,
       liveStatePruneMaxAgeMs: source.options.liveStatePruneMaxAgeMs,
