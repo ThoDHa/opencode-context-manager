@@ -17,7 +17,7 @@ import {
   type SessionPanel,
   type SubagentChild,
 } from "../plugin/lru-panel-data.ts"
-import { makeLine, makeTotals } from "./lru-panel-fixtures.ts"
+import { makeLine, makeTotals, TOTALS_REASONING_EXPIRED, TOTALS_REASONING_TOKENS_SAVED } from "./lru-panel-fixtures.ts"
 
 const MINUTE_MS = 60 * 1000
 const HOUR_MS = 60 * MINUTE_MS
@@ -47,6 +47,8 @@ const dataWithChildren = (panels: Array<{ id: string; panel: SessionPanel | unde
   error: undefined,
   subagentPanels: panels,
 })
+
+const EXPECTED_REASONING_STAT = `  Reasoning expired: ${TOTALS_REASONING_EXPIRED}, ~${TOTALS_REASONING_TOKENS_SAVED} tokens`
 
 const rowsWithinWidth = (rows: PanelRow[]): PanelRow[] => {
   for (const row of rows) assert.ok(row.text.length <= SIDEBAR_COLUMN_LIMIT, `row exceeds the sidebar width: ${row.text}`)
@@ -87,7 +89,7 @@ test("filterSubagentChildren preserves the input order", () => {
   assert.deepEqual(filterSubagentChildren([first, second]), [first, second])
 })
 
-test("sidebarSubagentsGroup renders the type's agent count on its row and three indented stat rows beneath", () => {
+test("sidebarSubagentsGroup renders the type's agent count on its row and four indented stat rows beneath", () => {
   const childOne = makeChild({ id: "sess-child-1", type: "scout" })
   const childTwo = makeChild({ id: "sess-child-2", type: "scout", updatedAtMs: NOW_MS - MINUTE_MS })
   const data = dataWithChildren([
@@ -102,6 +104,7 @@ test("sidebarSubagentsGroup renders the type's agent count on its row and three 
     { text: "scout: 2 agents", tone: "muted" },
     { text: "  Evictions: 2, ~900 tokens", tone: "muted" },
     { text: "  Deduped: 18, ~4.5k tokens", tone: "muted" },
+    { text: "  Reasoning expired: 14, ~1.3k tokens", tone: "muted" },
     { text: "  Stash reads: 20, 8 hits", tone: "muted" },
   ])
 })
@@ -117,6 +120,7 @@ test("sidebarSubagentsGroup uses the singular agent unit for a single-child type
     { text: "scout: 1 agent", tone: "muted" },
     { text: "  Evictions: 1, ~900 tokens", tone: "muted" },
     { text: "  Deduped: 9, ~2.3k tokens", tone: "muted" },
+    { text: EXPECTED_REASONING_STAT, tone: "muted" },
     { text: "  Stash reads: 10, 4 hits", tone: "muted" },
   ])
 })
@@ -144,6 +148,7 @@ test("sidebarSubagentsGroup sums the landed panels of a type and keeps the agent
     { text: "scout: 2 agents", tone: "muted" },
     { text: "  Evictions: 2, ~900 tokens", tone: "muted" },
     { text: "  Deduped: 9, ~2.3k tokens", tone: "muted" },
+    { text: EXPECTED_REASONING_STAT, tone: "muted" },
     { text: "  Stash reads: 10, 4 hits", tone: "muted" },
   ])
 })
@@ -161,6 +166,7 @@ test("sidebarSubagentsGroup sorts type rows by the type's most recent child upda
     { text: "probe: 2 agents", tone: "muted" },
     { text: "  Evictions: 2, ~900 tokens", tone: "muted" },
     { text: "  Deduped: 9, ~2.3k tokens", tone: "muted" },
+    { text: EXPECTED_REASONING_STAT, tone: "muted" },
     { text: "  Stash reads: 10, 4 hits", tone: "muted" },
     { text: "scan: no data yet", tone: "muted" },
   ])
@@ -189,6 +195,7 @@ test("sidebarSubagentsGroup excludes an archived child from the count and the ty
     { text: "probe: 1 agent", tone: "muted" },
     { text: "  Evictions: 5, ~3.1k tokens", tone: "muted" },
     { text: "  Deduped: 9, ~2.3k tokens", tone: "muted" },
+    { text: EXPECTED_REASONING_STAT, tone: "muted" },
     { text: "  Stash reads: 10, 4 hits", tone: "muted" },
   ])
 })
@@ -199,11 +206,12 @@ test("sidebarSubagentsGroup caps an over-long type label's row at the sidebar co
 
   const rows = rowsWithinWidth(sidebarSubagentsGroup([child], data))
 
-  assert.equal(rows.length, 5)
+  assert.equal(rows.length, 6)
   assert.equal(rows[1].text, `${"a".repeat(SIDEBAR_COLUMN_LIMIT - 1)}…`)
   assert.equal(rows[2].text, "  Evictions: 5, ~3.1k tokens")
   assert.equal(rows[3].text, "  Deduped: 9, ~2.3k tokens")
-  assert.equal(rows[4].text, "  Stash reads: 10, 4 hits")
+  assert.equal(rows[4].text, EXPECTED_REASONING_STAT)
+  assert.equal(rows[5].text, "  Stash reads: 10, 4 hits")
 })
 
 test("sidebarSubagentsGroup returns no rows for an empty child list", () => {

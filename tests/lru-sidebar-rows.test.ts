@@ -25,6 +25,8 @@ import {
   SESSION_B,
   TOTALS_DEDUPED,
   TOTALS_EVICTIONS,
+  TOTALS_REASONING_EXPIRED,
+  TOTALS_REASONING_TOKENS_SAVED,
   TOTALS_STASH_HITS,
   TOTALS_STASH_MISSES,
   UNKNOWN_BUDGET_SOURCE,
@@ -40,6 +42,7 @@ const OVER_LONG_SUBJECT = `/data/${"b".repeat(60)}.txt`
 const LONG_READ_ERROR = "EACCES: permission denied, open '/sessions/deep/path/metrics.jsonl' for reading"
 const ZERO_DEFICIT = 0
 const NEGATIVE_DEFICIT = -5
+const EXPECTED_REASONING_STAT = `Reasoning expired: ${TOTALS_REASONING_EXPIRED}, ~${TOTALS_REASONING_TOKENS_SAVED} tokens`
 
 const sidebarRowsWithinWidth = (data: PanelData): PanelRow[] => {
   const rows = sidebarRows(data)
@@ -73,6 +76,7 @@ test("sidebarRows renders the approved layout's header, stat block, and eviction
     { text: "Over by: 23.5k", tone: "normal" },
     { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
     { text: `Deduped: ${TOTALS_DEDUPED}, ~2.3k tokens`, tone: "normal" },
+    { text: EXPECTED_REASONING_STAT, tone: "normal" },
     { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
     { text: " ", tone: "normal" },
     { text: "Last evicted: read /data/a.txt", tone: "muted" },
@@ -178,6 +182,7 @@ test("sidebarRows keeps the snapshot-fed session block under the warning group w
       { text: "Over by: 23.5k", tone: "normal" },
       { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
       { text: `Deduped: ${TOTALS_DEDUPED}, ~2.3k tokens`, tone: "normal" },
+      { text: EXPECTED_REASONING_STAT, tone: "normal" },
       { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
     ])
   })
@@ -202,6 +207,7 @@ test("sidebarRows renders the log-fed fallback session in the spaced groups", as
       { text: "Over by: 23.5k", tone: "normal" },
       { text: `Evictions: ${LOG_LINE_ONLY_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
       { text: `Deduped: ${TOTALS_DEDUPED}, ~2.3k tokens`, tone: "normal" },
+      { text: EXPECTED_REASONING_STAT, tone: "normal" },
       { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
       { text: " ", tone: "normal" },
       { text: "Last evicted: read /data/a.txt", tone: "muted" },
@@ -280,6 +286,7 @@ test("sidebarRows restyles a null budget and a missing watermark into the colon 
     { text: "Watermark: none", tone: "normal" },
     { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
     { text: `Deduped: ${TOTALS_DEDUPED}, ~2.3k tokens`, tone: "normal" },
+    { text: EXPECTED_REASONING_STAT, tone: "normal" },
     { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
   ])
 })
@@ -300,6 +307,7 @@ test("sidebarRows shows Watermark none for a present budget when only the waterm
     { text: "Watermark: none", tone: "normal" },
     { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
     { text: `Deduped: ${TOTALS_DEDUPED}, ~2.3k tokens`, tone: "normal" },
+    { text: EXPECTED_REASONING_STAT, tone: "normal" },
     { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
   ])
 })
@@ -320,6 +328,7 @@ test("sidebarRows omits the over-by line when the deficit is zero or negative", 
       { text: "Watermark: 100k", tone: "normal" },
       { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
       { text: `Deduped: ${TOTALS_DEDUPED}, ~2.3k tokens`, tone: "normal" },
+      { text: EXPECTED_REASONING_STAT, tone: "normal" },
       { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
     ])
   }

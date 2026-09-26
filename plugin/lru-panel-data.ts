@@ -121,6 +121,7 @@ export type PanelTotals = {
   dedupTokensSaved: number
   reasoningExpired: number
   reasoningBytesExpired: number
+  reasoningTokensSaved: number
   fenceEvicted: number
   postEvictionTouches: number
 }
@@ -238,6 +239,7 @@ const parseTotals = (value: unknown): PanelTotals | undefined => {
   if (!isFiniteNumber(value["dedupTokensSaved"])) return undefined
   if (!isFiniteNumber(value["reasoningExpired"])) return undefined
   if (!isFiniteNumber(value["reasoningBytesExpired"])) return undefined
+  if (!isFiniteNumber(value["reasoningTokensSaved"])) return undefined
   if (!isFiniteNumber(value["fenceEvicted"])) return undefined
   if (!isFiniteNumber(value["postEvictionTouches"])) return undefined
   return {
@@ -251,6 +253,7 @@ const parseTotals = (value: unknown): PanelTotals | undefined => {
     dedupTokensSaved: value["dedupTokensSaved"],
     reasoningExpired: value["reasoningExpired"],
     reasoningBytesExpired: value["reasoningBytesExpired"],
+    reasoningTokensSaved: value["reasoningTokensSaved"],
     fenceEvicted: value["fenceEvicted"],
     postEvictionTouches: value["postEvictionTouches"],
   }
@@ -634,6 +637,7 @@ const SIDEBAR_WATERMARK_LABEL = "Watermark"
 const SIDEBAR_OVER_BY_LABEL = "Over by"
 const SIDEBAR_EVICTIONS_LABEL = "Evictions"
 const SIDEBAR_DEDUPED_LABEL = "Deduped"
+const SIDEBAR_REASONING_LABEL = "Reasoning expired"
 const SIDEBAR_STASH_READS_LABEL = "Stash reads"
 const SIDEBAR_TOKENS_UNIT = "tokens"
 const SIDEBAR_HITS_UNIT = "hits"
@@ -658,18 +662,16 @@ const sidebarOverByRow = (current: SessionPanel): PanelRow | undefined => {
   return { text: `${SIDEBAR_OVER_BY_LABEL}: ${formatTokenCount(current.lastRun.deficitTokens)}`, tone: "normal" }
 }
 
-const evictionsStatText = (evictions: number, evictionTokensSaved: number): string =>
-  `${SIDEBAR_EVICTIONS_LABEL}: ${evictions}, ~${formatTokenCount(evictionTokensSaved)} ${SIDEBAR_TOKENS_UNIT}`
-
-const dedupedStatText = (deduped: number, dedupTokensSaved: number): string =>
-  `${SIDEBAR_DEDUPED_LABEL}: ${deduped}, ~${formatTokenCount(dedupTokensSaved)} ${SIDEBAR_TOKENS_UNIT}`
+const savingsStatText = (label: string, count: number, tokensSaved: number): string =>
+  `${label}: ${count}, ~${formatTokenCount(tokensSaved)} ${SIDEBAR_TOKENS_UNIT}`
 
 const stashReadsStatText = (stashReads: number, stashHits: number): string =>
   `${SIDEBAR_STASH_READS_LABEL}: ${stashReads}, ${stashHits} ${SIDEBAR_HITS_UNIT}`
 
 const sidebarCountersGroup = (current: SessionPanel): PanelRow[] => [
-  { text: evictionsStatText(current.totals.evictions, current.totals.evictionTokensSaved), tone: "normal" },
-  { text: dedupedStatText(current.totals.deduped, current.totals.dedupTokensSaved), tone: "normal" },
+  { text: savingsStatText(SIDEBAR_EVICTIONS_LABEL, current.totals.evictions, current.totals.evictionTokensSaved), tone: "normal" },
+  { text: savingsStatText(SIDEBAR_DEDUPED_LABEL, current.totals.deduped, current.totals.dedupTokensSaved), tone: "normal" },
+  { text: savingsStatText(SIDEBAR_REASONING_LABEL, current.totals.reasoningExpired, current.totals.reasoningTokensSaved), tone: "normal" },
   { text: stashReadsStatText(current.stashReads, current.totals.stashHits), tone: "normal" },
 ]
 
@@ -694,6 +696,8 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
     evictionTokensSaved: number
     deduped: number
     dedupTokensSaved: number
+    reasoningExpired: number
+    reasoningTokensSaved: number
     stashReads: number
     stashHits: number
     hasPanel: boolean
@@ -707,6 +711,8 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
       evictionTokensSaved: 0,
       deduped: 0,
       dedupTokensSaved: 0,
+      reasoningExpired: 0,
+      reasoningTokensSaved: 0,
       stashReads: 0,
       stashHits: 0,
       hasPanel: false,
@@ -721,6 +727,8 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
       aggregate.evictionTokensSaved += panel.totals.evictionTokensSaved
       aggregate.deduped += panel.totals.deduped
       aggregate.dedupTokensSaved += panel.totals.dedupTokensSaved
+      aggregate.reasoningExpired += panel.totals.reasoningExpired
+      aggregate.reasoningTokensSaved += panel.totals.reasoningTokensSaved
       aggregate.stashReads += panel.stashReads
       aggregate.stashHits += panel.totals.stashHits
     }
@@ -728,14 +736,19 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
   }
   const sortedTypes = [...aggregates.entries()].sort(([, first], [, second]) => second.newestUpdatedAtMs - first.newestUpdatedAtMs)
   const rows: PanelRow[] = [{ text: truncateToWidth(`${SIDEBAR_SUBAGENTS_LEAD_LABEL}: ${kept.length}`, SIDEBAR_COLUMN_LIMIT), tone: "muted" }]
+  const statRow = (statText: string): PanelRow => ({
+    text: truncateToWidth(`${SUBAGENT_STAT_INDENT}${statText}`, SIDEBAR_COLUMN_LIMIT),
+    tone: "muted",
+  })
   for (const [type, aggregate] of sortedTypes) {
     const agentsText = `${aggregate.count} ${aggregate.count === 1 ? SUBAGENT_AGENT_SINGULAR : SUBAGENT_AGENTS_UNIT}`
     const body = aggregate.hasPanel ? agentsText : SUBAGENT_NO_DATA_TEXT
     rows.push({ text: truncateToWidth(`${type}: ${body}`, SIDEBAR_COLUMN_LIMIT), tone: "muted" })
     if (!aggregate.hasPanel) continue
-    rows.push({ text: truncateToWidth(`${SUBAGENT_STAT_INDENT}${evictionsStatText(aggregate.evictions, aggregate.evictionTokensSaved)}`, SIDEBAR_COLUMN_LIMIT), tone: "muted" })
-    rows.push({ text: truncateToWidth(`${SUBAGENT_STAT_INDENT}${dedupedStatText(aggregate.deduped, aggregate.dedupTokensSaved)}`, SIDEBAR_COLUMN_LIMIT), tone: "muted" })
-    rows.push({ text: truncateToWidth(`${SUBAGENT_STAT_INDENT}${stashReadsStatText(aggregate.stashReads, aggregate.stashHits)}`, SIDEBAR_COLUMN_LIMIT), tone: "muted" })
+    rows.push(statRow(savingsStatText(SIDEBAR_EVICTIONS_LABEL, aggregate.evictions, aggregate.evictionTokensSaved)))
+    rows.push(statRow(savingsStatText(SIDEBAR_DEDUPED_LABEL, aggregate.deduped, aggregate.dedupTokensSaved)))
+    rows.push(statRow(savingsStatText(SIDEBAR_REASONING_LABEL, aggregate.reasoningExpired, aggregate.reasoningTokensSaved)))
+    rows.push(statRow(stashReadsStatText(aggregate.stashReads, aggregate.stashHits)))
   }
   return rows
 }

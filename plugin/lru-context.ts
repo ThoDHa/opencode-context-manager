@@ -310,6 +310,7 @@ type CumulativeCounters = {
   dedupTokensSaved: number
   reasoningExpired: number
   reasoningBytesExpired: number
+  reasoningTokensSaved: number
   postEvictionTouches: number
   fenceEvicted: number
 }
@@ -1317,6 +1318,7 @@ const totalsOf = (metrics: SessionMetrics, charsPerToken: number): CumulativeCou
   dedupTokensSaved: estimateTokensFromBytes(metrics.dedupedBytes, charsPerToken),
   reasoningExpired: metrics.reasoningExpired,
   reasoningBytesExpired: metrics.reasoningBytesExpired,
+  reasoningTokensSaved: estimateTokensFromBytes(metrics.reasoningBytesExpired, charsPerToken),
   postEvictionTouches: metrics.postEvictionTouches,
   fenceEvicted: metrics.fenceEvicted,
 })

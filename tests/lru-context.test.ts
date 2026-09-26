@@ -2989,6 +2989,7 @@ const STATS_ZEROED_COUNTERS = {
   postEvictionTouches: 0,
   reasoningExpired: 0,
   reasoningBytesExpired: 0,
+  reasoningTokensSaved: 0,
   fenceEvicted: 0,
 }
 const STATS_LOG_FILE_LINES = 1
@@ -4264,6 +4265,7 @@ test("lru_stats counts expired reasoning parts and bytes without counting them a
     ...STATS_ZEROED_COUNTERS,
     reasoningExpired: EXPIRED_REASONING_PAIR_COUNT,
     reasoningBytesExpired: EXPIRED_REASONING_PAIR_BYTES,
+    reasoningTokensSaved: tokensForChars(EXPIRED_REASONING_PAIR_BYTES),
   })
 })
 
@@ -4304,6 +4306,7 @@ test("metrics log counts expired reasoning bytes separately from evictions on a 
       ...STATS_ZEROED_COUNTERS,
       reasoningExpired: EXPIRED_REASONING_SINGLE_COUNT,
       reasoningBytesExpired: REASONING_COLD_TEXT.length,
+      reasoningTokensSaved: tokensForChars(REASONING_COLD_TEXT.length),
     })
   } finally {
     cleanupMetricsDir(metricsDir)
@@ -5548,6 +5551,7 @@ const withCounterDeltas = (baseline: Record<string, number>, deltas: Record<stri
   for (const [key, delta] of Object.entries(deltas)) expected[key] = (expected[key] ?? 0) + delta
   expected.evictionTokensSaved = tokensForChars(expected.bytesReclaimed)
   expected.dedupTokensSaved = tokensForChars(expected.dedupedBytes)
+  expected.reasoningTokensSaved = tokensForChars(expected.reasoningBytesExpired)
   return expected
 }
 

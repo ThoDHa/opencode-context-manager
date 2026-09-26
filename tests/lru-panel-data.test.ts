@@ -130,15 +130,24 @@ test("parseMetricsLine rejects a line whose totals carry a non-numeric counter",
     makeLine({ totals: { ...makeTotals(), evictionTokensSaved: "plenty" } }),
   )
   const rawNonNumericDedupTokensSaved = JSON.stringify(makeLine({ totals: { ...makeTotals(), dedupTokensSaved: "some" } }))
+  const rawNonNumericReasoningTokensSaved = JSON.stringify(
+    makeLine({ totals: { ...makeTotals(), reasoningTokensSaved: "gobs" } }),
+  )
 
   assert.equal(parseMetricsLine(rawNonNumericEvictions), undefined)
   assert.equal(parseMetricsLine(rawNonNumericFenceEvictions), undefined)
   assert.equal(parseMetricsLine(rawNonNumericEvictionTokensSaved), undefined)
   assert.equal(parseMetricsLine(rawNonNumericDedupTokensSaved), undefined)
+  assert.equal(parseMetricsLine(rawNonNumericReasoningTokensSaved), undefined)
 })
 
 test("parseMetricsLine and parseStateSnapshot drop pre-upgrade records whose totals predate the token-savings keys", () => {
-  const { evictionTokensSaved: _evictionTokensSaved, dedupTokensSaved: _dedupTokensSaved, ...legacyTotals } = makeTotals()
+  const {
+    evictionTokensSaved: _evictionTokensSaved,
+    dedupTokensSaved: _dedupTokensSaved,
+    reasoningTokensSaved: _reasoningTokensSaved,
+    ...legacyTotals
+  } = makeTotals()
   const legacyLine = JSON.stringify(makeLine({ totals: legacyTotals }))
   const legacySnapshot = JSON.stringify(makeSnapshot({ totals: legacyTotals }))
 
