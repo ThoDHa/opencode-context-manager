@@ -2959,7 +2959,7 @@ const METRICS_PROBE_MISS_SUBJECT = "/data/metrics-probe-miss.txt"
 const METRICS_LINES_AFTER_RELOAD = 2
 const METRICS_LINES_AFTER_RECOVERY = 1
 const METRICS_ROTATION_SUFFIX = ".1"
-const DEFAULT_METRICS_ROTATION_MAX_BYTES = 5 * 1024 * 1024
+const DEFAULT_METRICS_ROTATION_MAX_BYTES = 20 * 1024 * 1024
 const DEFAULT_METRICS_MIN_LINE_INTERVAL_MS = 60 * 1000
 const METRICS_MIN_LINE_INTERVAL_INVALID_VALUES = [-1, Number.NaN, Number.POSITIVE_INFINITY, "soon"]
 const METRICS_COALESCING_DISABLED_MS = 0
@@ -3726,7 +3726,7 @@ test("metrics log clears a recorded write failure once a later write succeeds", 
   }
 })
 
-test("lru_stats reports the metrics rotation cap in options defaulting to five MiB and falling back on invalid caps", async () => {
+test("lru_stats reports the metrics rotation cap in options defaulting to twenty MiB and falling back on invalid caps", async () => {
   assert.equal(
     ((await lruStats(await loadPluginHooks(), SESSION_ID)).options as Record<string, unknown>).metricsRotationMaxBytes,
     DEFAULT_METRICS_ROTATION_MAX_BYTES,

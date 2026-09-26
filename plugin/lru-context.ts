@@ -101,7 +101,12 @@ const LIVE_STATE_TEMP_FILE_SUFFIX = ".tmp"
 const MIN_MS_BETWEEN_PRUNE_SCANS = 60 * MS_PER_SECOND
 const PRUNE_SCAN_NEVER = -1
 const PRUNE_SCAN_THROTTLE_DISABLED = 0
-const DEFAULT_METRICS_ROTATION_MAX_BYTES = 5 * 1024 * 1024
+// 20 MiB: at the observed pre-coalescing rate of about 1.45 MB/day the
+// previous 5 MiB cap kept only about 7 days across its two generations and
+// older lines rotated out permanently within days; coalescing cut that
+// rate by an estimated 70-85 percent, so two generations now hold roughly
+// three weeks at the old rate and several times that at the current one.
+const DEFAULT_METRICS_ROTATION_MAX_BYTES = 20 * 1024 * 1024
 const METRICS_ROTATION_DISABLED_MAX_BYTES = 0
 const METRICS_ROTATION_SUFFIX = ".1"
 const DEFAULT_METRICS_MIN_LINE_INTERVAL_MS = SECONDS_PER_MINUTE * MS_PER_SECOND
