@@ -446,8 +446,6 @@ const runTransform = async (hooks: HookMap, bundle: StrictBundle): Promise<void>
   await hooks[TRANSFORM_HOOK]({}, bundle)
 }
 
-const sleepMs = async (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
-
 const reloadPointerFor = (subject: string): string =>
   `${RELOAD_POINTER_LEAD} ${RELOAD_TOOL_NAME} (subject "${subject}").`
 
@@ -2964,7 +2962,6 @@ const DEFAULT_METRICS_MIN_LINE_INTERVAL_MS = 60 * 1000
 const METRICS_MIN_LINE_INTERVAL_INVALID_VALUES = [-1, Number.NaN, Number.POSITIVE_INFINITY, "soon"]
 const METRICS_COALESCING_DISABLED_MS = 0
 const METRICS_COALESCE_TEST_INTERVAL_MS = 250
-const METRICS_COALESCE_ELAPSED_WAIT_MS = 400
 const METRICS_COALESCE_WRITE_ANCHOR_INTERVAL_MS = 400
 const METRICS_COALESCE_WRITE_ANCHOR_FIRST_DELAY_MS = 150
 const METRICS_COALESCE_WRITE_ANCHOR_SECOND_DELAY_MS = 150
@@ -3907,10 +3904,30 @@ const DEFAULT_LIVE_STATE_PRUNE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 const LIVE_STATE_PRUNE_TEST_MAX_AGE_MS = 1000
 const LIVE_STATE_PRUNE_TEST_MIN_INTERVAL_MS = 0
 const LIVE_STATE_PRUNE_THROTTLED_INTERVAL_MS = 60 * 1000
-const LIVE_STATE_PRUNE_EXPIRY_INTERVAL_MS = 250
-const LIVE_STATE_PRUNE_EXPIRY_WAIT_MS = 400
-const DEFAULT_LIVE_STATE_PRUNE_MIN_INTERVAL_MS = 60 * 1000
 const LIVE_STATE_PRUNE_BACKDATED_MS = 10000
+const DEFAULT_LIVE_STATE_PRUNE_MIN_INTERVAL_MS = 60 * 1000
+// The fake-clock throttle pair: the advance step crosses the throttle but
+// stays under max age minus the backdate, so the session's own fresh
+// snapshot (mtime inside the window) survives the scan while the stale
+// file does not.
+const LIVE_STATE_PRUNE_FAKE_THROTTLE_INTERVAL_MS = 400
+const LIVE_STATE_PRUNE_FAKE_MAX_AGE_MS = 6000
+
+// Deterministic fake clock matching the plugin's now() option seam: tests
+// advance it in explicit steps instead of sleeping real milliseconds. The
+// default start is the real epoch so fs mtime comparisons (state-file
+// pruning) stay consistent with real file timestamps; deltas come only
+// from advanceMs.
+const fakeClock = (startMs: number = Date.now()): { now: () => number; advanceMs: (ms: number) => void } => {
+  let currentMs = startMs
+  return {
+    now: (): number => currentMs,
+    advanceMs: (ms: number): void => {
+      currentMs += ms
+    },
+  }
+}
+
 const LIVE_STATE_STALE_SESSION = "lru-state-stale-session"
 const LIVE_STATE_TMP_ORPHAN_SESSION = "lru-state-tmp-orphan"
 const LIVE_STATE_TMP_ORPHAN_CONTENT = '{"orphan": true}\n'
@@ -4186,11 +4203,17 @@ test("live state prune scan runs at most once per throttle interval per plugin i
 test("live state prune scan runs again once the injected throttle interval has elapsed", async () => {
   const stateDir = makeLiveStateDir()
   try {
+    const clock = fakeClock()
     const hooks = await loadPluginHooksWithLiveState(stateDir, {
-      liveStatePruneMaxAgeMs: LIVE_STATE_PRUNE_TEST_MAX_AGE_MS,
-      liveStatePruneMinIntervalMs: LIVE_STATE_PRUNE_EXPIRY_INTERVAL_MS,
+      liveStatePruneMaxAgeMs: LIVE_STATE_PRUNE_FAKE_MAX_AGE_MS,
+      liveStatePruneMinIntervalMs: LIVE_STATE_PRUNE_FAKE_THROTTLE_INTERVAL_MS,
+      now: clock.now,
     })
-    const staleMoment = new Date(Date.now() - LIVE_STATE_PRUNE_BACKDATED_MS)
+    // The stale file's mtime is pinned to the fake clock's start so the
+    // max-age check works against the injected clock instead of real fs
+    // time drift: mtime = clock start - backdate, then the clock advances
+    // one throttle interval, putting the file far past max age.
+    const staleMoment = new Date(clock.now() - LIVE_STATE_PRUNE_BACKDATED_MS)
     await runTransform(hooks, buildStandardBundle(SESSION_ID, LIVE_STATE_QUIET_SUBJECT))
 
     const lateStalePath = liveStatePathIn(stateDir, LIVE_STATE_THROTTLE_STALE_SESSION_A)
@@ -4199,7 +4222,7 @@ test("live state prune scan runs again once the injected throttle interval has e
     await runTransform(hooks, buildStandardBundle(SESSION_ID, LIVE_STATE_QUIET_SUBJECT))
     assert.equal(existsSync(lateStalePath), true)
 
-    await sleepMs(LIVE_STATE_PRUNE_EXPIRY_WAIT_MS)
+    clock.advanceMs(LIVE_STATE_PRUNE_FAKE_THROTTLE_INTERVAL_MS)
     await runTransform(hooks, buildStandardBundle(SESSION_ID, LIVE_STATE_QUIET_SUBJECT))
 
     assert.equal(existsSync(lateStalePath), false)
@@ -5008,8 +5031,8 @@ test("metrics log records a fence only run as eventful with the fenceEvictedThis
   }
 })
 
-const loadPluginHooksWithCoalesce = async (metricsPath: string, intervalMs: number = METRICS_COALESCE_TEST_INTERVAL_MS): Promise<HookMap> =>
-  loadPluginHooksWith({ metricsLog: true, metricsPath, metricsMinLineIntervalMs: intervalMs })
+const loadPluginHooksWithCoalesce = async (metricsPath: string, intervalMs: number = METRICS_COALESCE_TEST_INTERVAL_MS, clock?: { now: () => number }): Promise<HookMap> =>
+  loadPluginHooksWith({ metricsLog: true, metricsPath, metricsMinLineIntervalMs: intervalMs, ...(clock === undefined ? {} : { now: clock.now }) })
 
 const reasoningOnlyBundle = (): StrictBundle =>
   buildBundle([[reasoningPart(REASONING_COLD_TEXT), pathToolPart(METRICS_COALESCE_QUIET_SUBJECT, APPEARANCE_ONLY_OUTPUT_BYTES)], ...fillerMessages()])
@@ -5018,27 +5041,51 @@ test("metrics log measures the coalesce interval from the previous flushed line 
   const metricsDir = makeMetricsDir()
   try {
     const metricsPath = metricsLogPathIn(metricsDir)
-    const hooks = await loadPluginHooksWithCoalesce(metricsPath, METRICS_COALESCE_WRITE_ANCHOR_INTERVAL_MS)
+    const clock = fakeClock()
+    const hooks = await loadPluginHooksWithCoalesce(metricsPath, METRICS_COALESCE_WRITE_ANCHOR_INTERVAL_MS, clock)
 
-    // Runs at roughly 0, 150, 300, 500 ms against the 400 ms window. Under
-    // write anchoring the fourth run sits past the interval measured from
-    // the first flush and writes; under attempt anchoring it would sit
-    // within 200 ms of the third run's suppressed attempt and stay silent.
-    // Each transform adds a few milliseconds, leaving the 100 ms margins
-    // safe.
+    // Runs at exactly 0, 150, 300, 500 ms of injected time against the
+    // 400 ms window. Under write anchoring the fourth run sits past the
+    // interval measured from the first flush and writes; under attempt
+    // anchoring it would sit within 200 ms of the third run's suppressed
+    // attempt and stay silent.
     await runTransform(hooks, reasoningOnlyBundle())
     assert.equal(metricsLinesIn(metricsPath).length, STATS_LOG_FILE_LINES)
 
-    await sleepMs(METRICS_COALESCE_WRITE_ANCHOR_FIRST_DELAY_MS)
+    clock.advanceMs(METRICS_COALESCE_WRITE_ANCHOR_FIRST_DELAY_MS)
     await runTransform(hooks, reasoningOnlyBundle())
-    await sleepMs(METRICS_COALESCE_WRITE_ANCHOR_SECOND_DELAY_MS)
+    clock.advanceMs(METRICS_COALESCE_WRITE_ANCHOR_SECOND_DELAY_MS)
     await runTransform(hooks, reasoningOnlyBundle())
     assert.equal(metricsLinesIn(metricsPath).length, STATS_LOG_FILE_LINES)
 
-    await sleepMs(METRICS_COALESCE_WRITE_ANCHOR_FINAL_DELAY_MS)
+    clock.advanceMs(METRICS_COALESCE_WRITE_ANCHOR_FINAL_DELAY_MS)
     await runTransform(hooks, reasoningOnlyBundle())
 
     assert.equal(metricsLinesIn(metricsPath).length, METRICS_COALESCE_LINES_AFTER_ELAPSED)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("metrics log flushes when elapsed time equals the interval exactly", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const clock = fakeClock()
+    const hooks = await loadPluginHooksWithCoalesce(metricsPath, METRICS_COALESCE_TEST_INTERVAL_MS, clock)
+
+    await runTransform(hooks, reasoningOnlyBundle())
+    assert.equal(metricsLinesIn(metricsPath).length, STATS_LOG_FILE_LINES)
+
+    // The suppression check is strictly less-than: elapsed exactly equal
+    // to the interval is outside the window and flushes. Real sleeps could
+    // never pin this boundary; the injected clock lands on it exactly.
+    clock.advanceMs(METRICS_COALESCE_TEST_INTERVAL_MS)
+    await runTransform(hooks, reasoningOnlyBundle())
+
+    const lines = metricsLinesIn(metricsPath)
+    assert.equal(lines.length, METRICS_COALESCE_LINES_AFTER_ELAPSED)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_ELAPSED - 1].reasoningExpiredThisRun, EXPIRED_REASONING_SINGLE_COUNT)
   } finally {
     cleanupMetricsDir(metricsDir)
   }
@@ -5048,7 +5095,8 @@ test("metrics log coalesces a reasoning only run inside the interval and flushes
   const metricsDir = makeMetricsDir()
   try {
     const metricsPath = metricsLogPathIn(metricsDir)
-    const hooks = await loadPluginHooksWithCoalesce(metricsPath)
+    const clock = fakeClock()
+    const hooks = await loadPluginHooksWithCoalesce(metricsPath, METRICS_COALESCE_TEST_INTERVAL_MS, clock)
 
     await runTransform(hooks, reasoningOnlyBundle())
     assert.equal(metricsLinesIn(metricsPath).length, STATS_LOG_FILE_LINES)
@@ -5056,7 +5104,7 @@ test("metrics log coalesces a reasoning only run inside the interval and flushes
     await runTransform(hooks, reasoningOnlyBundle())
     assert.equal(metricsLinesIn(metricsPath).length, STATS_LOG_FILE_LINES)
 
-    await sleepMs(METRICS_COALESCE_ELAPSED_WAIT_MS)
+    clock.advanceMs(METRICS_COALESCE_TEST_INTERVAL_MS)
     await runTransform(hooks, reasoningOnlyBundle())
 
     const lines = metricsLinesIn(metricsPath)

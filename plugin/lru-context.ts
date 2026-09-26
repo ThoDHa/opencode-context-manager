@@ -137,6 +137,7 @@ const UNKNOWN_ATTACHMENT_MIME_LABEL = "unknown mime"
 const DEFAULT_FENCE_EVICTABLE_LINES = 40
 const DEFAULT_USER_FENCE_EVICTION_ENABLED = false
 const DEFAULT_MANUAL_MODE = false
+const DEFAULT_NOW = (): number => Date.now()
 const FENCE_EVICTION_MARKER = "[lru-evicted-fence]"
 const FENCE_BLOCK_NOUN = "code block"
 const FENCE_STASH_TOOL_LABEL = "fence"
@@ -180,6 +181,7 @@ type LruContextOptions = {
   liveStatePruneMinIntervalMs?: number
   manualMode?: boolean
   userFenceEviction?: { enabled?: boolean; minBlockLines?: number }
+  now?: () => number
 }
 
 type CompiledGlob = { regexp: RegExp; matchesSegments: boolean }
@@ -469,6 +471,11 @@ const resolveOptions = (raw: LruContextOptions = {}): ResolvedOptions => {
         : MIN_MS_BETWEEN_PRUNE_SCANS,
     manualMode: typeof raw.manualMode === "boolean" ? raw.manualMode : DEFAULT_MANUAL_MODE,
     userFenceEviction: userFenceEvictionOf(raw.userFenceEviction),
+    // Test-injection seam for wall-clock time: the coalesce window, the
+    // prune throttle, and the metrics-line timestamp all read this one
+    // source. The default is real time; only tests override it, so it is
+    // deliberately absent from the README's option surface and lru_stats.
+    now: typeof raw.now === "function" ? raw.now : DEFAULT_NOW,
   }
 }
 
@@ -1113,6 +1120,9 @@ const executeReadEvicted = async (
 
 // Raw counters start at zero, derived from the shared schema key list so a
 // counter added there is initialized here too instead of reading undefined.
+// The cast is a type escape: Object.fromEntries types as a string-indexed
+// record, so the schema tuple's key coverage is asserted with the cast
+// rather than carried by the type.
 const zeroedRawCounters = Object.fromEntries(RAW_COUNTER_KEYS.map((key) => [key, 0])) as Record<RawCounterKey, number>
 
 const createSessionMetrics = (): SessionMetrics => ({
@@ -1386,7 +1396,7 @@ const recordMetricsLine = async (
 ): Promise<void> => {
   const { eviction, deduped: dedupedThisRun, touches: touchesThisRun, reasoningExpired: reasoningExpiredThisRun, fenceEvicted: fenceEvictedThisRun } = run
   const stashReadsSinceLastLine = metrics.stashHits + metrics.stashMisses - metrics.stashReadsLoggedThrough
-  const nowMs = Date.now()
+  const nowMs = options.now()
   // The five recorded-event disjuncts feed both gates so the lists cannot
   // drift. Eventful runs are the candidates for a line: an eviction, dedup
   // tombstone, touch, fence event, or stash read, plus reasoning expiry; a
@@ -1476,7 +1486,7 @@ const liveStateSnapshotOf = (
   stash: SessionStash,
   hotSubjects: HotSubject[],
 ): LiveStateSnapshot => ({
-  ts: new Date().toISOString(),
+  ts: new Date(options.now()).toISOString(),
   session: sessionKey,
   manualMode: options.manualMode,
   modelContextTokens: budget.tokens,
@@ -1567,7 +1577,7 @@ const recordLiveStateSnapshot = async (
     await unlink(tempFile).catch(() => {})
     return
   }
-  await pruneLiveStateFiles(options.liveStatePath, options.liveStatePruneMaxAgeMs, pruneThrottle, options.liveStatePruneMinIntervalMs, Date.now())
+  await pruneLiveStateFiles(options.liveStatePath, options.liveStatePruneMaxAgeMs, pruneThrottle, options.liveStatePruneMinIntervalMs, options.now())
 }
 
 const modelKeyOf = (model: ChatParamsModel | undefined): string | undefined => {
