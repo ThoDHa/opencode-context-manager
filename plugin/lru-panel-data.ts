@@ -118,9 +118,11 @@ export type PanelTotals = {
   stashMisses: number
   stashDropped: number
   deduped: number
+  dedupedUnique: number
   dedupTokensSaved: number
   reasoningExpired: number
   reasoningBytesExpired: number
+  reasoningExpiredUnique: number
   reasoningTokensSaved: number
   fenceEvicted: number
   postEvictionTouches: number
@@ -236,9 +238,11 @@ const parseTotals = (value: unknown): PanelTotals | undefined => {
   if (!isFiniteNumber(value["stashMisses"])) return undefined
   if (!isFiniteNumber(value["stashDropped"])) return undefined
   if (!isFiniteNumber(value["deduped"])) return undefined
+  if (!isFiniteNumber(value["dedupedUnique"])) return undefined
   if (!isFiniteNumber(value["dedupTokensSaved"])) return undefined
   if (!isFiniteNumber(value["reasoningExpired"])) return undefined
   if (!isFiniteNumber(value["reasoningBytesExpired"])) return undefined
+  if (!isFiniteNumber(value["reasoningExpiredUnique"])) return undefined
   if (!isFiniteNumber(value["reasoningTokensSaved"])) return undefined
   if (!isFiniteNumber(value["fenceEvicted"])) return undefined
   if (!isFiniteNumber(value["postEvictionTouches"])) return undefined
@@ -250,9 +254,11 @@ const parseTotals = (value: unknown): PanelTotals | undefined => {
     stashMisses: value["stashMisses"],
     stashDropped: value["stashDropped"],
     deduped: value["deduped"],
+    dedupedUnique: value["dedupedUnique"],
     dedupTokensSaved: value["dedupTokensSaved"],
     reasoningExpired: value["reasoningExpired"],
     reasoningBytesExpired: value["reasoningBytesExpired"],
+    reasoningExpiredUnique: value["reasoningExpiredUnique"],
     reasoningTokensSaved: value["reasoningTokensSaved"],
     fenceEvicted: value["fenceEvicted"],
     postEvictionTouches: value["postEvictionTouches"],
@@ -589,7 +595,7 @@ const lastRunText = (current: SessionPanel): string => {
 }
 
 const countersText = (current: SessionPanel): string =>
-  `${COUNTERS_ROW_LABEL} ${current.totals.evictions} evictions (${formatBytes(current.totals.bytesReclaimed)} reclaimed, ~${formatTokenCount(current.totals.evictionTokensSaved)} tokens saved), ${current.totals.deduped} dedup (~${formatTokenCount(current.totals.dedupTokensSaved)} tokens saved), ${current.stashReads} stash reads (${current.totals.stashHits} hits)`
+  `${COUNTERS_ROW_LABEL} ${current.totals.evictions} evictions (${formatBytes(current.totals.bytesReclaimed)} reclaimed, ~${formatTokenCount(current.totals.evictionTokensSaved)} tokens saved), ${current.totals.dedupedUnique} dedup (~${formatTokenCount(current.totals.dedupTokensSaved)} tokens saved), ${current.stashReads} stash reads (${current.totals.stashHits} hits)`
 
 const evictionText = (entry: PanelEvictedEntry): string =>
   `${entry.tool} ${entry.subject} (${formatBytes(entry.bytes)}, ${entry.messagesAgo} msgs ago)`
@@ -668,10 +674,13 @@ const savingsStatText = (label: string, count: number, tokensSaved: number): str
 const stashReadsStatText = (stashReads: number, stashHits: number): string =>
   `${SIDEBAR_STASH_READS_LABEL}: ${stashReads}, ${stashHits} ${SIDEBAR_HITS_UNIT}`
 
+// The deduped and reasoning-expired counts are unique-event counts (first
+// tombstone per pair, first crossing per reasoning part); the token savings
+// stay the cumulative per-request estimate over the byte totals.
 const sidebarCountersGroup = (current: SessionPanel): PanelRow[] => [
   { text: savingsStatText(SIDEBAR_EVICTIONS_LABEL, current.totals.evictions, current.totals.evictionTokensSaved), tone: "normal" },
-  { text: savingsStatText(SIDEBAR_DEDUPED_LABEL, current.totals.deduped, current.totals.dedupTokensSaved), tone: "normal" },
-  { text: savingsStatText(SIDEBAR_REASONING_LABEL, current.totals.reasoningExpired, current.totals.reasoningTokensSaved), tone: "normal" },
+  { text: savingsStatText(SIDEBAR_DEDUPED_LABEL, current.totals.dedupedUnique, current.totals.dedupTokensSaved), tone: "normal" },
+  { text: savingsStatText(SIDEBAR_REASONING_LABEL, current.totals.reasoningExpiredUnique, current.totals.reasoningTokensSaved), tone: "normal" },
   { text: stashReadsStatText(current.stashReads, current.totals.stashHits), tone: "normal" },
 ]
 
@@ -694,9 +703,9 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
     count: number
     evictions: number
     evictionTokensSaved: number
-    deduped: number
+    dedupedUnique: number
     dedupTokensSaved: number
-    reasoningExpired: number
+    reasoningExpiredUnique: number
     reasoningTokensSaved: number
     stashReads: number
     stashHits: number
@@ -709,9 +718,9 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
       count: 0,
       evictions: 0,
       evictionTokensSaved: 0,
-      deduped: 0,
+      dedupedUnique: 0,
       dedupTokensSaved: 0,
-      reasoningExpired: 0,
+      reasoningExpiredUnique: 0,
       reasoningTokensSaved: 0,
       stashReads: 0,
       stashHits: 0,
@@ -725,9 +734,9 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
       aggregate.hasPanel = true
       aggregate.evictions += panel.totals.evictions
       aggregate.evictionTokensSaved += panel.totals.evictionTokensSaved
-      aggregate.deduped += panel.totals.deduped
+      aggregate.dedupedUnique += panel.totals.dedupedUnique
       aggregate.dedupTokensSaved += panel.totals.dedupTokensSaved
-      aggregate.reasoningExpired += panel.totals.reasoningExpired
+      aggregate.reasoningExpiredUnique += panel.totals.reasoningExpiredUnique
       aggregate.reasoningTokensSaved += panel.totals.reasoningTokensSaved
       aggregate.stashReads += panel.stashReads
       aggregate.stashHits += panel.totals.stashHits
@@ -746,8 +755,8 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
     rows.push({ text: truncateToWidth(`${type}: ${body}`, SIDEBAR_COLUMN_LIMIT), tone: "muted" })
     if (!aggregate.hasPanel) continue
     rows.push(statRow(savingsStatText(SIDEBAR_EVICTIONS_LABEL, aggregate.evictions, aggregate.evictionTokensSaved)))
-    rows.push(statRow(savingsStatText(SIDEBAR_DEDUPED_LABEL, aggregate.deduped, aggregate.dedupTokensSaved)))
-    rows.push(statRow(savingsStatText(SIDEBAR_REASONING_LABEL, aggregate.reasoningExpired, aggregate.reasoningTokensSaved)))
+    rows.push(statRow(savingsStatText(SIDEBAR_DEDUPED_LABEL, aggregate.dedupedUnique, aggregate.dedupTokensSaved)))
+    rows.push(statRow(savingsStatText(SIDEBAR_REASONING_LABEL, aggregate.reasoningExpiredUnique, aggregate.reasoningTokensSaved)))
     rows.push(statRow(stashReadsStatText(aggregate.stashReads, aggregate.stashHits)))
   }
   return rows

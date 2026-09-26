@@ -44,11 +44,12 @@ import {
   SNAPSHOT_SUFFIX,
   SNAPSHOT_TS,
   TOTALS_BYTES,
-  TOTALS_DEDUPED,
+  TOTALS_DEDUPED_UNIQUE,
   TOTALS_EVICTIONS,
   TOTALS_FENCE_EVICTED,
   TOTALS_REASONING_BYTES,
   TOTALS_REASONING_EXPIRED,
+  TOTALS_REASONING_EXPIRED_UNIQUE,
   TOTALS_STASH_HITS,
   TOTALS_STASH_MISSES,
   UNKNOWN_BUDGET_SOURCE,
@@ -133,12 +134,18 @@ test("parseMetricsLine rejects a line whose totals carry a non-numeric counter",
   const rawNonNumericReasoningTokensSaved = JSON.stringify(
     makeLine({ totals: { ...makeTotals(), reasoningTokensSaved: "gobs" } }),
   )
+  const rawNonNumericDedupedUnique = JSON.stringify(makeLine({ totals: { ...makeTotals(), dedupedUnique: "few" } }))
+  const rawNonNumericReasoningExpiredUnique = JSON.stringify(
+    makeLine({ totals: { ...makeTotals(), reasoningExpiredUnique: "hundreds" } }),
+  )
 
   assert.equal(parseMetricsLine(rawNonNumericEvictions), undefined)
   assert.equal(parseMetricsLine(rawNonNumericFenceEvictions), undefined)
   assert.equal(parseMetricsLine(rawNonNumericEvictionTokensSaved), undefined)
   assert.equal(parseMetricsLine(rawNonNumericDedupTokensSaved), undefined)
   assert.equal(parseMetricsLine(rawNonNumericReasoningTokensSaved), undefined)
+  assert.equal(parseMetricsLine(rawNonNumericDedupedUnique), undefined)
+  assert.equal(parseMetricsLine(rawNonNumericReasoningExpiredUnique), undefined)
 })
 
 test("parseMetricsLine and parseStateSnapshot drop pre-upgrade records whose totals predate the token-savings keys", () => {
@@ -146,6 +153,8 @@ test("parseMetricsLine and parseStateSnapshot drop pre-upgrade records whose tot
     evictionTokensSaved: _evictionTokensSaved,
     dedupTokensSaved: _dedupTokensSaved,
     reasoningTokensSaved: _reasoningTokensSaved,
+    dedupedUnique: _dedupedUnique,
+    reasoningExpiredUnique: _reasoningExpiredUnique,
     ...legacyTotals
   } = makeTotals()
   const legacyLine = JSON.stringify(makeLine({ totals: legacyTotals }))
@@ -185,6 +194,8 @@ test("parseMetricsLine consumes the line's ts and accepts the plugin's remaining
   assert.equal(line.estimatedTokens, ESTIMATED_TOKENS)
   assert.equal(line.totals.reasoningExpired, TOTALS_REASONING_EXPIRED)
   assert.equal(line.totals.reasoningBytesExpired, TOTALS_REASONING_BYTES)
+  assert.equal(line.totals.dedupedUnique, TOTALS_DEDUPED_UNIQUE)
+  assert.equal(line.totals.reasoningExpiredUnique, TOTALS_REASONING_EXPIRED_UNIQUE)
   assert.equal(line.totals.fenceEvicted, TOTALS_FENCE_EVICTED)
 })
 
@@ -490,7 +501,7 @@ test("loadPanelData prefers the live snapshot for the session block and keeps lo
       rows.some(
         (row) =>
           row.text ===
-          `counters: ${TOTALS_EVICTIONS} evictions (12 kB reclaimed, ~3.1k tokens saved), ${TOTALS_DEDUPED} dedup (~2.3k tokens saved), ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} stash reads (${TOTALS_STASH_HITS} hits)`,
+          `counters: ${TOTALS_EVICTIONS} evictions (12 kB reclaimed, ~3.1k tokens saved), ${TOTALS_DEDUPED_UNIQUE} dedup (~2.3k tokens saved), ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} stash reads (${TOTALS_STASH_HITS} hits)`,
       ),
     )
     assert.ok(!rows.some((row) => row.text.includes("occupancy:")))
@@ -604,7 +615,7 @@ test("loadPanelData falls back to the metrics log when no snapshot exists for th
       rows.some(
         (row) =>
           row.text ===
-          `counters: ${LOG_LINE_ONLY_EVICTIONS} evictions (12 kB reclaimed, ~3.1k tokens saved), ${TOTALS_DEDUPED} dedup (~2.3k tokens saved), ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} stash reads (${TOTALS_STASH_HITS} hits)`,
+          `counters: ${LOG_LINE_ONLY_EVICTIONS} evictions (12 kB reclaimed, ~3.1k tokens saved), ${TOTALS_DEDUPED_UNIQUE} dedup (~2.3k tokens saved), ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} stash reads (${TOTALS_STASH_HITS} hits)`,
       ),
     )
   })

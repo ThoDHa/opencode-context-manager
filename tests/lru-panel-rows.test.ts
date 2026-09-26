@@ -12,7 +12,7 @@ import {
   OVERRIDE_BUDGET_SOURCE,
   SESSION_A,
   SESSION_B,
-  TOTALS_DEDUPED,
+  TOTALS_DEDUPED_UNIQUE,
   TOTALS_EVICTIONS,
   TOTALS_FENCE_EVICTED,
   TOTALS_REASONING_EXPIRED,
@@ -50,7 +50,7 @@ test("panelRows renders the session's budget, last run, compact counters, and ne
     rows.some(
       (row) =>
         row.text ===
-        `counters: ${TOTALS_EVICTIONS} evictions (12 kB reclaimed, ~3.1k tokens saved), ${TOTALS_DEDUPED} dedup (~2.3k tokens saved), ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} stash reads (${TOTALS_STASH_HITS} hits)`,
+        `counters: ${TOTALS_EVICTIONS} evictions (12 kB reclaimed, ~3.1k tokens saved), ${TOTALS_DEDUPED_UNIQUE} dedup (~2.3k tokens saved), ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} stash reads (${TOTALS_STASH_HITS} hits)`,
     ),
   )
   assert.ok(rows.some((row) => row.text === `last evicted: read /data/a.txt (3 kB, ${EVICTED_MESSAGES_AGO} msgs ago)`))

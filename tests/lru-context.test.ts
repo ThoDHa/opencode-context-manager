@@ -37,6 +37,7 @@ const OVER_BY_ONE_TOKENS = 1
 const THREE_ENTRY_OUTPUT_BYTES = 3000
 const THREE_ENTRY_COUNT = 3
 const DEDUP_SAVINGS_PAIR_COUNT = 2
+const REPEATED_STANDING_RUNS = 2
 const PARTIAL_DEFICIT_TOKENS = 700
 const TWO_ENTRY_DEFICIT_TOKENS = 800
 const COLD_OUTPUT_BYTES = 2048
@@ -2985,10 +2986,12 @@ const STATS_ZEROED_COUNTERS = {
   stashDropped: 0,
   deduped: 0,
   dedupedBytes: 0,
+  dedupedUnique: 0,
   dedupTokensSaved: 0,
   postEvictionTouches: 0,
   reasoningExpired: 0,
   reasoningBytesExpired: 0,
+  reasoningExpiredUnique: 0,
   reasoningTokensSaved: 0,
   fenceEvicted: 0,
 }
@@ -3286,31 +3289,35 @@ test("lru_stats counts dedup tombstones without counting evictions and stays inc
 
 test("lru_stats accumulates the dedup token-savings estimate from each superseded duplicate's bytes", async () => {
   const hooks = await loadPluginHooks()
+  const dedupSavingsParts = (): MessagePart[][] => [
+    [pathToolPart(DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
+    ...fillerMessages(2),
+    [pathToolPart(DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
+    ...fillerMessages(2),
+    [pathToolPart(DEDUP_SECOND_PATH, THREE_ENTRY_OUTPUT_BYTES)],
+    ...fillerMessages(2),
+    [pathToolPart(DEDUP_SECOND_PATH, THREE_ENTRY_OUTPUT_BYTES)],
+    ...fillerMessages(2),
+  ]
 
-  const bundle = buildBundle([
-    [pathToolPart(DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
-    ...fillerMessages(2),
-    [pathToolPart(DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
-    ...fillerMessages(2),
-    [pathToolPart(DEDUP_SECOND_PATH, THREE_ENTRY_OUTPUT_BYTES)],
-    ...fillerMessages(2),
-    [pathToolPart(DEDUP_SECOND_PATH, THREE_ENTRY_OUTPUT_BYTES)],
-    ...fillerMessages(2),
-  ])
-  await runTransform(hooks, bundle)
+  await runTransform(hooks, buildBundle(dedupSavingsParts()))
 
   assert.deepEqual(countersOf(await lruStats(hooks, SESSION_ID)), {
     ...STATS_ZEROED_COUNTERS,
     deduped: DEDUP_SAVINGS_PAIR_COUNT,
     dedupedBytes: DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES,
+    dedupedUnique: DEDUP_SAVINGS_PAIR_COUNT,
     dedupTokensSaved: tokensForChars(DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES),
   })
 
-  await runTransform(hooks, bundle)
-  assert.equal(
-    countersOf(await lruStats(hooks, SESSION_ID)).dedupTokensSaved,
-    tokensForChars(DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES),
-  )
+  // The host re-materializes the stored messages on every run, so a standing
+  // pair re-tombstones every run: the repeat runs on a fresh identical copy.
+  await runTransform(hooks, buildBundle(dedupSavingsParts()))
+  const counters = countersOf(await lruStats(hooks, SESSION_ID))
+  assert.equal(counters.deduped, DEDUP_SAVINGS_PAIR_COUNT * REPEATED_STANDING_RUNS)
+  assert.equal(counters.dedupedUnique, DEDUP_SAVINGS_PAIR_COUNT)
+  assert.equal(counters.dedupedBytes, DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES * REPEATED_STANDING_RUNS)
+  assert.equal(counters.dedupTokensSaved, tokensForChars(DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES * REPEATED_STANDING_RUNS))
 })
 
 test("lru_stats counts stash drops when a single run evicts fifty one entries past the stash bound", async () => {
@@ -3451,6 +3458,7 @@ test("metrics log records an unknown budget skip state with null watermark on an
       ...STATS_ZEROED_COUNTERS,
       deduped: 1,
       dedupedBytes: THREE_ENTRY_OUTPUT_BYTES,
+      dedupedUnique: 1,
       dedupTokensSaved: tokensForChars(THREE_ENTRY_OUTPUT_BYTES),
     })
   } finally {
@@ -4254,19 +4262,47 @@ test("lru_stats reports the live state options defaulting beside the metrics log
 
 test("lru_stats counts expired reasoning parts and bytes without counting them as evictions", async () => {
   const hooks = await loadPluginHooks()
-
-  const bundle = buildBundle([
+  const agedReasoningParts = (): MessagePart[][] => [
     [reasoningPart(REASONING_COLD_TEXT), reasoningPart(REASONING_SECOND_COLD_TEXT)],
     ...fillerMessages(),
-  ])
-  await runTransform(hooks, bundle)
+  ]
+
+  await runTransform(hooks, buildBundle(agedReasoningParts()))
 
   assert.deepEqual(countersOf(await lruStats(hooks, SESSION_ID)), {
     ...STATS_ZEROED_COUNTERS,
     reasoningExpired: EXPIRED_REASONING_PAIR_COUNT,
     reasoningBytesExpired: EXPIRED_REASONING_PAIR_BYTES,
+    reasoningExpiredUnique: EXPIRED_REASONING_PAIR_COUNT,
     reasoningTokensSaved: tokensForChars(EXPIRED_REASONING_PAIR_BYTES),
   })
+
+  // The stored session retains its parts, so the same aged reasoning set is
+  // re-expired on every run: the repeat runs on a fresh identical copy.
+  await runTransform(hooks, buildBundle(agedReasoningParts()))
+  const counters = countersOf(await lruStats(hooks, SESSION_ID))
+  assert.equal(counters.reasoningExpired, EXPIRED_REASONING_PAIR_COUNT * REPEATED_STANDING_RUNS)
+  assert.equal(counters.reasoningExpiredUnique, EXPIRED_REASONING_PAIR_COUNT)
+  assert.equal(counters.reasoningBytesExpired, EXPIRED_REASONING_PAIR_BYTES * REPEATED_STANDING_RUNS)
+  assert.equal(counters.reasoningTokensSaved, tokensForChars(EXPIRED_REASONING_PAIR_BYTES * REPEATED_STANDING_RUNS))
+})
+
+test("lru_stats counts two identical-content reasoning parts in distinct messages once in the unique counter", async () => {
+  const hooks = await loadPluginHooks()
+
+  const bundle = buildBundle([
+    [reasoningPart(REASONING_COLD_TEXT)],
+    ...fillerMessages(),
+    [reasoningPart(REASONING_COLD_TEXT)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  const counters = countersOf(await lruStats(hooks, SESSION_ID))
+  assert.equal(counters.reasoningExpired, EXPIRED_REASONING_SINGLE_COUNT + EXPIRED_REASONING_SINGLE_COUNT)
+  assert.equal(counters.reasoningBytesExpired, REASONING_COLD_TEXT.length * REPEATED_STANDING_RUNS)
+  assert.equal(counters.reasoningExpiredUnique, EXPIRED_REASONING_SINGLE_COUNT)
+  assert.equal(counters.reasoningTokensSaved, tokensForChars(REASONING_COLD_TEXT.length * REPEATED_STANDING_RUNS))
 })
 
 test("lru_stats leaves reasoning counters at zero when a pressured session has no reasoning parts", async () => {
@@ -4306,6 +4342,7 @@ test("metrics log counts expired reasoning bytes separately from evictions on a 
       ...STATS_ZEROED_COUNTERS,
       reasoningExpired: EXPIRED_REASONING_SINGLE_COUNT,
       reasoningBytesExpired: REASONING_COLD_TEXT.length,
+      reasoningExpiredUnique: EXPIRED_REASONING_SINGLE_COUNT,
       reasoningTokensSaved: tokensForChars(REASONING_COLD_TEXT.length),
     })
   } finally {
@@ -4543,6 +4580,7 @@ test("lru_stats counts a superseded duplicate's attachment payload chars in the 
     ...STATS_ZEROED_COUNTERS,
     deduped: 1,
     dedupedBytes: MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS,
+    dedupedUnique: 1,
     dedupTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS),
   })
 })
@@ -5555,14 +5593,19 @@ const withCounterDeltas = (baseline: Record<string, number>, deltas: Record<stri
   return expected
 }
 
+// The unique counters rehydrate from persisted totals, but the seen-key
+// lists are process memory: a fresh process re-counts each standing pair
+// and part once on its first run, so the second sitting adds one to each.
 const SECOND_SITTING_COUNTER_DELTAS = {
   evictions: 1,
   bytesReclaimed: MIN_EVICTABLE_BYTES + REHYDRA_FENCE_BYTES,
   stashHits: 1,
   stashMisses: 1,
   deduped: 1,
+  dedupedUnique: 1,
   dedupedBytes: THREE_ENTRY_OUTPUT_BYTES,
   reasoningExpired: 1,
+  reasoningExpiredUnique: 1,
   reasoningBytesExpired: REHYDRA_REASONING_TEXT.length,
   fenceEvicted: 1,
 }
@@ -5743,6 +5786,31 @@ test("recreated metrics entry re-seeds lifetime counters after the metricsSessio
     assert.equal(counters.bytesReclaimed, 3 * MIN_EVICTABLE_BYTES)
     const lines = metricsLinesForSession(metricsPath, SESSION_ID)
     assert.equal((lines[lines.length - 1].totals as Record<string, number>).evictions, 3)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("lru_stats re-counts the standing reasoning set when the metrics LRU evicts and re-seeds the session entry within one process", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const hooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    const agedReasoningParts = (): MessagePart[][] => [
+      [reasoningPart(REASONING_COLD_TEXT), reasoningPart(REASONING_SECOND_COLD_TEXT)],
+      ...fillerMessages(),
+    ]
+    await runTransform(hooks, buildBundle(agedReasoningParts()))
+    for (let index = 0; index < METRICS_SESSION_BOUND; index += 1) await storeMetricsSession(hooks, index)
+    await runTransform(hooks, buildBundle(agedReasoningParts()))
+
+    const counters = countersOf(await lruStats(hooks, SESSION_ID))
+    assert.equal(counters.reasoningExpired, EXPIRED_REASONING_PAIR_COUNT * REPEATED_STANDING_RUNS)
+    assert.equal(counters.reasoningExpiredUnique, EXPIRED_REASONING_PAIR_COUNT * REPEATED_STANDING_RUNS)
+    assert.equal(counters.reasoningBytesExpired, EXPIRED_REASONING_PAIR_BYTES * REPEATED_STANDING_RUNS)
+    assert.ok(counters.reasoningExpiredUnique <= counters.reasoningExpired)
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)

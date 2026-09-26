@@ -23,9 +23,9 @@ import {
   OVERRIDE_BUDGET_SOURCE,
   SESSION_A,
   SESSION_B,
-  TOTALS_DEDUPED,
+  TOTALS_DEDUPED_UNIQUE,
   TOTALS_EVICTIONS,
-  TOTALS_REASONING_EXPIRED,
+  TOTALS_REASONING_EXPIRED_UNIQUE,
   TOTALS_REASONING_TOKENS_SAVED,
   TOTALS_STASH_HITS,
   TOTALS_STASH_MISSES,
@@ -42,7 +42,8 @@ const OVER_LONG_SUBJECT = `/data/${"b".repeat(60)}.txt`
 const LONG_READ_ERROR = "EACCES: permission denied, open '/sessions/deep/path/metrics.jsonl' for reading"
 const ZERO_DEFICIT = 0
 const NEGATIVE_DEFICIT = -5
-const EXPECTED_REASONING_STAT = `Reasoning expired: ${TOTALS_REASONING_EXPIRED}, ~${TOTALS_REASONING_TOKENS_SAVED} tokens`
+const EXPECTED_REASONING_STAT = `Reasoning expired: ${TOTALS_REASONING_EXPIRED_UNIQUE}, ~${TOTALS_REASONING_TOKENS_SAVED} tokens`
+const EXPECTED_DEDUPED_STAT = `Deduped: ${TOTALS_DEDUPED_UNIQUE}, ~2.3k tokens`
 
 const sidebarRowsWithinWidth = (data: PanelData): PanelRow[] => {
   const rows = sidebarRows(data)
@@ -75,7 +76,7 @@ test("sidebarRows renders the approved layout's header, stat block, and eviction
     { text: "Watermark: 100k", tone: "normal" },
     { text: "Over by: 23.5k", tone: "normal" },
     { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
-    { text: `Deduped: ${TOTALS_DEDUPED}, ~2.3k tokens`, tone: "normal" },
+    { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
     { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
     { text: " ", tone: "normal" },
@@ -181,7 +182,7 @@ test("sidebarRows keeps the snapshot-fed session block under the warning group w
       { text: "Watermark: 100k", tone: "normal" },
       { text: "Over by: 23.5k", tone: "normal" },
       { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
-      { text: `Deduped: ${TOTALS_DEDUPED}, ~2.3k tokens`, tone: "normal" },
+      { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
       { text: EXPECTED_REASONING_STAT, tone: "normal" },
       { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
     ])
@@ -206,7 +207,7 @@ test("sidebarRows renders the log-fed fallback session in the spaced groups", as
       { text: "Watermark: 100k", tone: "normal" },
       { text: "Over by: 23.5k", tone: "normal" },
       { text: `Evictions: ${LOG_LINE_ONLY_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
-      { text: `Deduped: ${TOTALS_DEDUPED}, ~2.3k tokens`, tone: "normal" },
+      { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
       { text: EXPECTED_REASONING_STAT, tone: "normal" },
       { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
       { text: " ", tone: "normal" },
@@ -285,7 +286,7 @@ test("sidebarRows restyles a null budget and a missing watermark into the colon 
     { text: "Budget: inactive (no budget)", tone: "normal" },
     { text: "Watermark: none", tone: "normal" },
     { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
-    { text: `Deduped: ${TOTALS_DEDUPED}, ~2.3k tokens`, tone: "normal" },
+    { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
     { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
   ])
@@ -306,7 +307,7 @@ test("sidebarRows shows Watermark none for a present budget when only the waterm
     { text: "Budget: 200k", tone: "normal" },
     { text: "Watermark: none", tone: "normal" },
     { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
-    { text: `Deduped: ${TOTALS_DEDUPED}, ~2.3k tokens`, tone: "normal" },
+    { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
     { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
   ])
@@ -327,7 +328,7 @@ test("sidebarRows omits the over-by line when the deficit is zero or negative", 
       { text: `Budget: 200k`, tone: "normal" },
       { text: "Watermark: 100k", tone: "normal" },
       { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
-      { text: `Deduped: ${TOTALS_DEDUPED}, ~2.3k tokens`, tone: "normal" },
+      { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
       { text: EXPECTED_REASONING_STAT, tone: "normal" },
       { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
     ])

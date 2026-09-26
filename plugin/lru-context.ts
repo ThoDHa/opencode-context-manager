@@ -76,9 +76,12 @@ const TEXT_PART_TYPE = "text"
 const PURGED_INPUT_MARKER = "[lru-purged-input]"
 const REASONING_PART_TYPE = "reasoning"
 const REASONING_TEXT_KEY = "text"
+const REASONING_METADATA_KEY = "metadata"
 const DEFAULT_METRICS_SESSIONS = 8
 const DEFAULT_REMEMBERED_EVICTED_SUBJECTS = 100
 const TOUCH_SCAN_INITIAL_WATERMARK = -1
+const DEFAULT_REMEMBERED_REASONING_PARTS = 4096
+const DEFAULT_REMEMBERED_DEDUP_PAIRS = 4096
 const DEFAULT_METRICS_LOG_ENABLED = true
 const METRICS_DIR_SEGMENTS = [".local", "share", "opencode"]
 const METRICS_FILE_BASENAME = "lru-metrics.jsonl"
@@ -224,12 +227,13 @@ type RunOutcome = {
   eviction: EvictionResult
   deduped: number
   dedupedBytes: number
+  dedupedUnique: number
   touches: number
   reasoningExpired: ReasoningExpiry
   fenceEvicted: FenceEviction
 }
 
-type ReasoningExpiry = { parts: number; bytes: number }
+type ReasoningExpiry = { parts: number; bytes: number; unique: number }
 
 type ContextTokensSource =
   | typeof CONTEXT_TOKENS_SOURCE_OVERRIDE
@@ -253,12 +257,20 @@ type SessionMetrics = {
   stashDropped: number
   deduped: number
   dedupedBytes: number
+  dedupedUnique: number
   reasoningExpired: number
   reasoningBytesExpired: number
+  reasoningExpiredUnique: number
   postEvictionTouches: number
   fenceEvicted: number
   evictedSubjects: Subject[]
   touchScanThrough: number
+  // Per-entry memory for the unique-event counters: content identities of
+  // reasoning parts and dedup pairs already counted. They reset when the
+  // metrics LRU evicts and reseeds the entry, so unique counts are
+  // per-entry-lifetime, not per-process; identical content counts once.
+  reasoningSeenKeys: string[]
+  dedupedPairKeys: string[]
   stashReadsLoggedThrough: number
   lastRun?: LastRunMetrics
   logWriteError?: string
@@ -279,8 +291,10 @@ const RAW_COUNTER_KEYS = [
   "stashDropped",
   "deduped",
   "dedupedBytes",
+  "dedupedUnique",
   "reasoningExpired",
   "reasoningBytesExpired",
+  "reasoningExpiredUnique",
   "postEvictionTouches",
   "fenceEvicted",
 ] as const
@@ -307,9 +321,11 @@ type CumulativeCounters = {
   stashDropped: number
   deduped: number
   dedupedBytes: number
+  dedupedUnique: number
   dedupTokensSaved: number
   reasoningExpired: number
   reasoningBytesExpired: number
+  reasoningExpiredUnique: number
   reasoningTokensSaved: number
   postEvictionTouches: number
   fenceEvicted: number
@@ -342,7 +358,7 @@ type RetainedFileDuplicate = { msgIndex: number; label: string }
 
 type DedupTarget = { stateRef: { output: string; attachments?: unknown }; tool: string; input: Record<string, unknown> }
 
-type DedupOutcome = { tombstones: number; supersededBytes: number }
+type DedupOutcome = { tombstones: number; supersededBytes: number; tombstonedKeys: string[] }
 
 type MessageBundle = {
   info: { sessionID?: string; role?: unknown }
@@ -586,6 +602,12 @@ const stableStringify = (value: unknown): string => {
 
 const dedupKeyOf = (tool: string, input: Record<string, unknown>): string => JSON.stringify([tool, stableStringify(input)])
 
+// A reasoning part's stable identity: its own text and metadata, keyed the
+// same way the dedup pass keys tool inputs, so identity survives the
+// transform's repeated passes over the stored message list.
+const reasoningIdentityOf = (text: unknown, metadata: unknown): string =>
+  JSON.stringify([stableStringify(text), stableStringify(metadata)])
+
 const buildDedupTombstone = (tool: string, msgIndex: number): string =>
   `${DEDUP_MARKER} ${tool} ${DEDUP_SUPERSEDED_LEAD} ${msgIndex}`
 
@@ -604,6 +626,7 @@ const deduplicateToolOutputs = (messages: MessageBundle[], options: ResolvedOpti
   const retainedByKey = new Map<string, RetainedDuplicate>()
   let tombstones = 0
   let supersededBytes = 0
+  const tombstonedKeys: string[] = []
   for (let msgIndex = messages.length - 1; msgIndex >= 0; msgIndex -= 1) {
     for (const part of messages[msgIndex].parts) {
       const target = dedupTargetOf(part)
@@ -623,10 +646,11 @@ const deduplicateToolOutputs = (messages: MessageBundle[], options: ResolvedOpti
         target.stateRef.output = buildDedupTombstone(retained.tool, retained.msgIndex)
         stripStateAttachments(target.stateRef)
         tombstones += 1
+        tombstonedKeys.push(key)
       }
     }
   }
-  return { tombstones, supersededBytes }
+  return { tombstones, supersededBytes, tombstonedKeys }
 }
 
 const filePartOf = (part: Record<string, unknown>): FilePartFields | undefined => {
@@ -649,6 +673,7 @@ const deduplicateFileAttachments = (messages: MessageBundle[], options: Resolved
   const retainedByKey = new Map<string, RetainedFileDuplicate>()
   const hotFromIndex = hotFromIndexOf(messages, options)
   let tombstones = 0
+  const tombstonedKeys: string[] = []
   for (let msgIndex = messages.length - 1; msgIndex >= 0; msgIndex -= 1) {
     const messageParts = messages[msgIndex].parts
     for (let partIndex = messageParts.length - 1; partIndex >= 0; partIndex -= 1) {
@@ -663,11 +688,42 @@ const deduplicateFileAttachments = (messages: MessageBundle[], options: Resolved
       if (msgIndex >= hotFromIndex) continue
       messageParts[partIndex] = { type: TEXT_PART_TYPE, text: buildFileDedupTombstone(retained.label, retained.msgIndex) }
       tombstones += 1
+      tombstonedKeys.push(key)
     }
   }
   // A file part's payload size is not observable from its url, so file dedup
   // contributes tombstones but no superseded bytes to the savings estimate.
-  return { tombstones, supersededBytes: 0 }
+  return { tombstones, supersededBytes: 0, tombstonedKeys }
+}
+
+// Membership test plus bounded remember shared by the unique-event counters:
+// returns true the first time a key is seen, false for repeats. The list
+// trims to the bound, so an event forgotten after a bound worth of newer
+// keys could count once more; the default bounds dwarf real standing sets.
+// The linear scan is O(events x bound) per run, capped by the bound at a
+// few million short-string compares worst case, which stays well under the
+// transform's existing per-run serialization cost; a Set would complicate
+// the FIFO trim for no measurable win at real session sizes.
+const rememberUniqueKey = (seenKeys: string[], key: string, rememberedBound: number): boolean => {
+  if (seenKeys.includes(key)) return false
+  seenKeys.push(key)
+  while (seenKeys.length > rememberedBound) seenKeys.shift()
+  return true
+}
+
+// A pair's key covers tool and input (or mime and url for file parts), the
+// same content identity the dedup pass itself keys retained duplicates by,
+// so identical-input occurrences count once: a standing duplicate
+// re-tombstones every run, but only its first creation counts as unique.
+// Like the reasoning seen-set, the key list lives on the session's metrics
+// entry and resets if that entry is evicted from the metrics LRU and
+// reseeded within one process.
+const countUniqueDedupedPairs = (metrics: SessionMetrics, keys: string[]): number => {
+  let unique = 0
+  for (const key of keys) {
+    if (rememberUniqueKey(metrics.dedupedPairKeys, key, DEFAULT_REMEMBERED_DEDUP_PAIRS)) unique += 1
+  }
+  return unique
 }
 
 const estimateTokensFromBytes = (bytes: number, charsPerToken: number): number => Math.ceil(bytes / charsPerToken)
@@ -702,10 +758,24 @@ const purgeErroredToolInputs = (messages: MessageBundle[], options: ResolvedOpti
   }
 }
 
-const expireAgedReasoning = (messages: MessageBundle[], options: ResolvedOptions): ReasoningExpiry => {
+// Message indices are unstable across runs: opencode trims stored messages,
+// and the recent window rides the tail, so a part is identified by its own
+// content (text plus metadata, stringified with the same stable stringify
+// the dedup pass keys inputs by) rather than by a msgIndex cursor like the
+// touch watermark. A part counts unique the first run its identity is seen
+// outside the recent window, and identical-content occurrences count once.
+// The seen-set lives on the session's metrics entry, whose lifetime bounds
+// the memory: the entry can be evicted from the metrics LRU and reseeded
+// within one process, re-counting that session's standing set once per
+// entry lifetime; unique can therefore exceed the entry's own cumulative
+// count after a reseed but never the session's true unique total. The
+// seen-set is also bounded, so only a same-content reappearance after a
+// full bound worth of newer parts could count once more.
+const expireAgedReasoning = (metrics: SessionMetrics, messages: MessageBundle[], options: ResolvedOptions): ReasoningExpiry => {
   const hotFromIndex = hotFromIndexOf(messages, options)
   let parts = 0
   let bytes = 0
+  let unique = 0
   for (let msgIndex = 0; msgIndex < hotFromIndex; msgIndex += 1) {
     const messageParts = messages[msgIndex].parts
     for (let partIndex = messageParts.length - 1; partIndex >= 0; partIndex -= 1) {
@@ -713,11 +783,13 @@ const expireAgedReasoning = (messages: MessageBundle[], options: ResolvedOptions
       if (part["type"] !== REASONING_PART_TYPE) continue
       const text = part[REASONING_TEXT_KEY]
       if (typeof text === "string") bytes += text.length
+      const identity = reasoningIdentityOf(text, part[REASONING_METADATA_KEY])
+      if (rememberUniqueKey(metrics.reasoningSeenKeys, identity, DEFAULT_REMEMBERED_REASONING_PARTS)) unique += 1
       messageParts.splice(partIndex, 1)
       parts += 1
     }
   }
-  return { parts, bytes }
+  return { parts, bytes, unique }
 }
 
 const stripLegacyHintParts = (messages: MessageBundle[]): void => {
@@ -1037,12 +1109,16 @@ const createSessionMetrics = (): SessionMetrics => ({
   stashDropped: 0,
   deduped: 0,
   dedupedBytes: 0,
+  dedupedUnique: 0,
   reasoningExpired: 0,
   reasoningBytesExpired: 0,
+  reasoningExpiredUnique: 0,
   postEvictionTouches: 0,
   fenceEvicted: 0,
   evictedSubjects: [],
   touchScanThrough: TOUCH_SCAN_INITIAL_WATERMARK,
+  reasoningSeenKeys: [],
+  dedupedPairKeys: [],
   stashReadsLoggedThrough: 0,
 })
 
@@ -1228,7 +1304,7 @@ const lastRunMetricsOf = (eviction: EvictionResult): LastRunMetrics => ({
 })
 
 const recordRunOutcome = (metrics: SessionMetrics, run: RunOutcome, rememberedSubjectsBound: number): void => {
-  const { eviction, deduped: dedupedThisRun, dedupedBytes: dedupedBytesThisRun, touches: touchesThisRun, reasoningExpired: reasoningExpiredThisRun, fenceEvicted: fenceEvictedThisRun } = run
+  const { eviction, deduped: dedupedThisRun, dedupedBytes: dedupedBytesThisRun, dedupedUnique: dedupedUniqueThisRun, touches: touchesThisRun, reasoningExpired: reasoningExpiredThisRun, fenceEvicted: fenceEvictedThisRun } = run
   metrics.lastRun = lastRunMetricsOf(eviction)
   metrics.evictions += eviction.evicted.length
   metrics.stashDropped += eviction.stashDropped
@@ -1239,8 +1315,10 @@ const recordRunOutcome = (metrics: SessionMetrics, run: RunOutcome, rememberedSu
   while (metrics.evictedSubjects.length > rememberedSubjectsBound) metrics.evictedSubjects.shift()
   metrics.deduped += dedupedThisRun
   metrics.dedupedBytes += dedupedBytesThisRun
+  metrics.dedupedUnique += dedupedUniqueThisRun
   metrics.reasoningExpired += reasoningExpiredThisRun.parts
   metrics.reasoningBytesExpired += reasoningExpiredThisRun.bytes
+  metrics.reasoningExpiredUnique += reasoningExpiredThisRun.unique
   metrics.postEvictionTouches += touchesThisRun
   metrics.fenceEvicted += fenceEvictedThisRun.blocks
   metrics.bytesReclaimed += fenceEvictedThisRun.bytes
@@ -1315,9 +1393,11 @@ const totalsOf = (metrics: SessionMetrics, charsPerToken: number): CumulativeCou
   stashDropped: metrics.stashDropped,
   deduped: metrics.deduped,
   dedupedBytes: metrics.dedupedBytes,
+  dedupedUnique: metrics.dedupedUnique,
   dedupTokensSaved: estimateTokensFromBytes(metrics.dedupedBytes, charsPerToken),
   reasoningExpired: metrics.reasoningExpired,
   reasoningBytesExpired: metrics.reasoningBytesExpired,
+  reasoningExpiredUnique: metrics.reasoningExpiredUnique,
   reasoningTokensSaved: estimateTokensFromBytes(metrics.reasoningBytesExpired, charsPerToken),
   postEvictionTouches: metrics.postEvictionTouches,
   fenceEvicted: metrics.fenceEvicted,
@@ -1713,8 +1793,12 @@ export default (async (_input, rawOptions) => {
       const toolDedup = deduplicateToolOutputs(messages, options)
       const fileDedup = deduplicateFileAttachments(messages, options)
       const dedupedThisRun = toolDedup.tombstones + fileDedup.tombstones
+      const dedupedUniqueThisRun = countUniqueDedupedPairs(sessionMetrics, [
+        ...toolDedup.tombstonedKeys,
+        ...fileDedup.tombstonedKeys,
+      ])
       purgeErroredToolInputs(messages, options)
-      const reasoningExpiredThisRun = expireAgedReasoning(messages, options)
+      const reasoningExpiredThisRun = expireAgedReasoning(sessionMetrics, messages, options)
       const fenceEvictedThisRun = evictLargeUserFences(messages, options, sessionStash)
       const eviction =
         options.manualMode || budget.tokens === null
@@ -1725,6 +1809,7 @@ export default (async (_input, rawOptions) => {
         eviction,
         deduped: dedupedThisRun,
         dedupedBytes: toolDedup.supersededBytes,
+        dedupedUnique: dedupedUniqueThisRun,
         touches: touchesThisRun,
         reasoningExpired: reasoningExpiredThisRun,
         fenceEvicted: fenceEvictedThisRun,
