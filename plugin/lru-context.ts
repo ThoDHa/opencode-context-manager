@@ -122,7 +122,7 @@ const DEFAULT_METRICS_MIN_LINE_INTERVAL_MS = SECONDS_PER_MINUTE * MS_PER_SECOND
 const METRICS_COALESCING_DISABLED_MS = 0
 const STATS_TOOL_NAME = "lru_stats"
 const STATS_TOOL_DESCRIPTION =
-  "Return live metrics for the LRU Context Manager in this session: eviction counters, expired reasoning counts, post-eviction touches, stash occupancy, the effective context budget, and the most recent transform run's token estimate."
+  "Return live metrics for the LRU Context Manager in this session: eviction counters, expired reasoning counts, post-eviction touches, stash occupancy, the effective context budget, and the most recent transform run's token estimate; also the newest run's post-transform composition (tool outputs, text, windowed reasoning), the manual-mode dry run when armed, and the last transform fault when one occurred."
 const JSON_INDENT_SPACES = 2
 const CONTEXT_TOKENS_SOURCE_OVERRIDE = "override"
 const CONTEXT_TOKENS_SOURCE_MODEL = "model"
@@ -876,9 +876,11 @@ type RunComposition = { toolPoolBytes: number; textChars: number; reasoningInWin
 // The post-transform composition of one run's message list: live tool
 // outputs, text parts, and the reasoning still inside the recent window.
 // Called after every pass has edited the list, so the three sums are the
-// view the model actually receives; estimateTokens over the same list
-// then decomposes as approximately toolPoolBytes + textChars +
-// reasoningInWindowBytes plus attachments and small markers.
+// view the model actually receives. The estimate relation is exact for
+// the two sums the estimate counts: estimatedTokens equals
+// ceil((toolPoolBytes + textChars) / charsPerToken) over this same list,
+// while reasoningInWindowBytes and attachment payloads are bill
+// components the estimate omits.
 const runCompositionOf = (messages: MessageBundle[], options: ResolvedOptions): RunComposition => {
   const hotFromIndex = hotFromIndexOf(messages, options)
   let toolPoolBytes = 0
@@ -1816,8 +1818,8 @@ const sessionBudgetForRun = (
 }
 
 const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
+  const sessionKey = sessionKeyFromContext(toolContext)
   const sessionID = sessionIDFromContext(toolContext)
-  const sessionKey = sessionID ?? FALLBACK_SESSION_KEY
   const sessionLimit = sessionID === undefined ? undefined : touchMapEntry(source.limits, sessionID)
   const metrics = touchMapEntry(source.metrics, sessionKey) ?? createSessionMetrics()
   const { budget } = sessionBudgetForRun(sessionLimit, metrics.persistedBudget, sessionID === undefined ? undefined : source.modelKeys.get(sessionID), source.options)
@@ -2178,14 +2180,13 @@ const guardTool = (tool: (args: unknown, toolContext: unknown) => Promise<string
   }
 }
 
-// The transform fault boundary stores the failure on the session's metrics
-// entry; when the entry itself does not exist yet (the fault may have hit
-// before hydration created it), a fresh entry is created so the fault is
-// still surfaced rather than dropped.
 // Records the transform fault on the session's metrics entry, creating a
 // fresh entry when none exists (an early fault can land before hydration
 // created one). An existing entry is updated in place and must not be
-// trimmed or refreshed, so its counters and LRU position survive.
+// trimmed or refreshed, so its counters and LRU position survive. Edge:
+// the fresh entry is keyed by the fault's session, not seeded from any
+// persisted record, so a reseed overwriting it later is accepted (the
+// fault is run-scoped diagnostics).
 const rememberFault = (metrics: MetricsStore, sessionKey: string, fault: LastFault, sessionBound: number): void => {
   const existing = metrics.get(sessionKey)
   if (existing !== undefined) {

@@ -70,6 +70,7 @@ mkdir -p ~/.config/opencode/plugin
 ln -sfn "$PWD/plugin/lru-context.ts" ~/.config/opencode/plugin/lru-context.ts
 ln -sfn "$PWD/plugin/lru-context.tui.tsx" ~/.config/opencode/plugin/lru-context.tui.tsx
 ln -sfn "$PWD/plugin/lru-panel-data.ts" ~/.config/opencode/plugin/lru-panel-data.ts
+ln -sfn "$PWD/plugin/lru-schema.ts" ~/.config/opencode/plugin/lru-schema.ts
 ```
 
 Copying the files instead of linking them works too. Unlike `make install`, these commands carry no non-symlink guard: `ln -sfn` silently replaces whatever regular file sits at a target path where the install target would abort with an error naming it.
