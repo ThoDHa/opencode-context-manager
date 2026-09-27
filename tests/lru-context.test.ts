@@ -3290,6 +3290,7 @@ test("lru_stats reports zeroed counters unknown budget and empty stash for a ses
   assert.equal(stats.session, SESSION_ID)
   assert.deepEqual(stats.options, {
     watermark: WATERMARK_RATIO,
+    watermarkTokens: null,
     recentWindow: RECENT_WINDOW_MESSAGES,
     minEvictableBytes: MIN_EVICTABLE_BYTES,
     defaultContextTokens: null,
@@ -5531,6 +5532,7 @@ const MANUAL_MODE_INVALID_VALUE = "yes"
 const MANUAL_FALSE_PIN_SUBJECT = "/data/manual-false-pin.txt"
 const MANUAL_PRESSURE_SUBJECT = "/data/manual-pressure.txt"
 const MANUAL_DEFAULT_BUDGET_SUBJECT = "/data/manual-default-budget.txt"
+const DRY_RUN_SECOND_PATH = "/data/dry-run-second.txt"
 const MANUAL_OVERRIDE_BUDGET_SUBJECT = "/data/manual-override-budget.txt"
 const MANUAL_CAPTURED_LIMIT_SUBJECT = "/data/manual-captured-limit.txt"
 const MANUAL_HINT_SUBJECT = "/data/manual-hint.txt"
@@ -5627,6 +5629,174 @@ test("transform keeps dedup active under pressure while manualMode is enabled", 
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, dedupTombstoneFor(READ_TOOL, 1))
   assert.equal(toolPartAt(bundle.messages[1], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
   assert.ok(!toolPartAt(bundle.messages[1], 0).state.output.startsWith(TOMBSTONE_MARKER))
+})
+
+const DRY_RUN_CANDIDATE_BYTES = 3000
+const DRY_RUN_CANDIDATES = 2
+const DRY_RUN_WATERMARK_TOKENS = 1000
+// The evictor's walk stops once reclaimed tokens cover the deficit: the
+// bundle estimates ~1515 tokens, deficit ~515, and the first 3000-byte
+// candidate reclaims 750 tokens, so the walk stops after one candidate.
+const DRY_RUN_EXPECTED_COUNT = 1
+const DRY_RUN_EXPECTED_BYTES = DRY_RUN_CANDIDATE_BYTES
+
+// A bundle whose two cold candidates sit outside the recent window:
+// estimate = candidates + fillers, well above the 1000-token dry-run
+// watermark. Different paths and no offset/limit, so dedup and range
+// collapse stay out of the way and the tests isolate the dry run. The
+// aged reasoning part makes the run eventful per the existing gate (a
+// dry run alone is not eventfulness), so metrics-log expectations hold.
+const buildDryRunBundle = (): StrictBundle =>
+  buildBundle([
+    [reasoningPart(REASONING_COLD_TEXT), pathToolPart(DRY_RUN_SECOND_PATH, DRY_RUN_CANDIDATE_BYTES)],
+    ...fillerMessages(2),
+    [pathToolPart(RANGE_COLLAPSE_PATH, DRY_RUN_CANDIDATE_BYTES)],
+    ...fillerMessages(),
+  ])
+
+test("watermarkTokens resolves as an absolute override over the fractional watermark", async () => {
+  const defaultOptions = ((await lruStats(await loadPluginHooks(), SESSION_ID)).options as Record<string, unknown>)
+  assert.equal(defaultOptions.watermarkTokens, null)
+
+  const customHooks = await loadPluginHooksWith({ watermarkTokens: DRY_RUN_WATERMARK_TOKENS })
+  const customOptions = (await lruStats(customHooks, SESSION_ID)).options as Record<string, unknown>
+  assert.equal(customOptions.watermarkTokens, DRY_RUN_WATERMARK_TOKENS)
+
+  for (const invalidWatermarkTokens of [-5, 0, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const invalidHooks = await loadPluginHooksWith({ watermarkTokens: invalidWatermarkTokens })
+    const invalidOptions = (await lruStats(invalidHooks, SESSION_ID)).options as Record<string, unknown>
+    assert.equal(invalidOptions.watermarkTokens, null)
+  }
+
+  // The absolute watermark wins even when the fractional watermark of a
+  // captured budget would be far higher: the fallback bundle's estimate
+  // (~100k tokens of text plus a candidate) sits under 0.5 x the legacy
+  // budget but far above the 1000-token absolute watermark, so eviction
+  // engages against watermarkTokens alone.
+  const overrideHooks = await loadPluginHooksWith({ watermarkTokens: DRY_RUN_WATERMARK_TOKENS })
+  const bundle = buildFallbackBudgetBundle(FALLBACK_BUNDLE_LARGE_TEXT_CHARS)
+  await runTransform(overrideHooks, bundle)
+  assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+})
+
+test("manual mode with watermarkTokens reports a dry run without tombstoning anything", async () => {
+  const hooks = await loadPluginHooksWith({ manualMode: true, watermarkTokens: DRY_RUN_WATERMARK_TOKENS })
+  await setContextLimit(hooks, SESSION_ID, LARGE_DEFAULT_CONTEXT_TOKENS)
+
+  const bundle = buildDryRunBundle()
+  await runTransform(hooks, bundle)
+  // Reasoning expiry legitimately mutates its own part (removing it from
+  // messages[0]); the dry run's promise is that no tool output is
+  // tombstoned or stashed.
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(DRY_RUN_CANDIDATE_BYTES))
+  assert.equal(toolPartAt(bundle.messages[3], 0).state.output, outputOfBytes(DRY_RUN_CANDIDATE_BYTES))
+
+  const stats = await lruStats(hooks, SESSION_ID)
+  const dryRun = stats.dryRun as Record<string, unknown>
+  assert.ok(dryRun !== undefined)
+  assert.ok((dryRun.deficitTokens as number) > 0)
+  assert.equal(dryRun.wouldEvictCount, DRY_RUN_EXPECTED_COUNT)
+  assert.equal(dryRun.wouldEvictBytes, DRY_RUN_EXPECTED_BYTES)
+  const subjects = dryRun.wouldEvictSubjects as string[]
+  assert.equal(subjects.length, DRY_RUN_EXPECTED_COUNT)
+})
+
+test("manual mode with watermarkTokens and no captured budget still reports the dry run", async () => {
+  const hooks = await loadPluginHooksWith({ manualMode: true, watermarkTokens: DRY_RUN_WATERMARK_TOKENS })
+
+  const bundle = buildDryRunBundle()
+  await runTransform(hooks, bundle)
+
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.equal(stats.modelContextTokens, null)
+  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+  const dryRun = stats.dryRun as Record<string, unknown>
+  assert.ok(dryRun !== undefined)
+  assert.ok((dryRun.deficitTokens as number) > 0)
+  assert.equal(dryRun.wouldEvictCount, DRY_RUN_EXPECTED_COUNT)
+  assert.equal(dryRun.wouldEvictBytes, DRY_RUN_EXPECTED_BYTES)
+})
+
+test("the same dry-run session evicts for real once manual mode is off", async () => {
+  const hooks = await loadPluginHooksWith({ watermarkTokens: DRY_RUN_WATERMARK_TOKENS })
+  await setContextLimit(hooks, SESSION_ID, LARGE_DEFAULT_CONTEXT_TOKENS)
+
+  const bundle = buildDryRunBundle()
+  await runTransform(hooks, bundle)
+
+  assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  const evictions = countersOf(await lruStats(hooks, SESSION_ID)).evictions
+  assert.ok(evictions >= DRY_RUN_EXPECTED_COUNT)
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.equal(Object.hasOwn(stats, "dryRun"), false)
+})
+
+test("metrics log carries wouldEvict fields whenever the manual-mode dry run is armed, zeroed under the watermark", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const overHooks = await loadPluginHooksWith({
+      manualMode: true,
+      watermarkTokens: DRY_RUN_WATERMARK_TOKENS,
+      metricsLog: true,
+      metricsPath,
+    })
+    await setContextLimit(overHooks, SESSION_ID, LARGE_DEFAULT_CONTEXT_TOKENS)
+    await runTransform(overHooks, buildDryRunBundle())
+
+    const overLines = metricsLinesIn(metricsPath)
+    assert.equal(overLines.length, STATS_LOG_FILE_LINES)
+    assert.equal(overLines[0].wouldEvictThisRun, DRY_RUN_EXPECTED_COUNT)
+    assert.equal(overLines[0].wouldEvictBytesThisRun, DRY_RUN_EXPECTED_BYTES)
+
+    const underPath = join(metricsDir, "under.jsonl")
+    const underHooks = await loadPluginHooksWith({
+      manualMode: true,
+      watermarkTokens: LARGE_DEFAULT_CONTEXT_TOKENS,
+      metricsLog: true,
+      metricsPath: underPath,
+    })
+    await setContextLimit(underHooks, SESSION_ID, LARGE_DEFAULT_CONTEXT_TOKENS)
+    await runTransform(underHooks, buildDryRunBundle())
+
+    // The under-watermark run is still eventful (the aged reasoning part
+    // expires), so a line lands; the dry run is active in manual mode, so
+    // the fields exist but report zeros (nothing above the watermark).
+    const underLines = metricsLinesIn(underPath)
+    assert.equal(underLines.length, STATS_LOG_FILE_LINES)
+    assert.equal(underLines[0].wouldEvictThisRun, 0)
+    assert.equal(underLines[0].wouldEvictBytesThisRun, 0)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("rehydration ignores run-scoped dry-run fields and seeds only the totals", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const firstSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir, {
+      manualMode: true,
+      watermarkTokens: DRY_RUN_WATERMARK_TOKENS,
+    })
+    await setContextLimit(firstSittingHooks, SESSION_ID, LARGE_DEFAULT_CONTEXT_TOKENS)
+    await runTransform(firstSittingHooks, buildDryRunBundle())
+    assert.ok(metricsLinesForSession(metricsPath, SESSION_ID)[0].wouldEvictThisRun !== undefined)
+
+    const secondSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await setContextLimit(secondSittingHooks, SESSION_ID, LARGE_DEFAULT_CONTEXT_TOKENS)
+    await runTransform(secondSittingHooks, reasoningOnlyBundle())
+
+    const stats = await lruStats(secondSittingHooks, SESSION_ID)
+    assert.equal(Object.hasOwn(stats, "dryRun"), false)
+    const lines = metricsLinesForSession(metricsPath, SESSION_ID)
+    assert.equal(lines.length, METRICS_COALESCE_LINES_AFTER_FLUSH)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].wouldEvictThisRun, undefined)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
 })
 
 test("transform keeps the errored-input purge active under pressure while manualMode is enabled", async () => {

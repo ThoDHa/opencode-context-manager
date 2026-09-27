@@ -157,6 +157,7 @@ type UserFenceEvictionOptions = { enabled: boolean; minBlockLines: number }
 
 type LruContextOptions = {
   watermark?: number
+  watermarkTokens?: number
   recentWindow?: number
   minEvictableBytes?: number
   defaultContextTokens?: number
@@ -187,8 +188,9 @@ type LruContextOptions = {
 
 type CompiledGlob = { regexp: RegExp; matchesSegments: boolean }
 
-type ResolvedOptions = Omit<Required<LruContextOptions>, "defaultContextTokens" | "modelContextTokens" | "protectedPatterns" | "userFenceEviction"> & {
+type ResolvedOptions = Omit<Required<LruContextOptions>, "defaultContextTokens" | "modelContextTokens" | "protectedPatterns" | "userFenceEviction" | "watermarkTokens"> & {
   defaultContextTokens?: number
+  watermarkTokens?: number
   modelContextTokens: Record<string, number>
   protectedPatterns: CompiledGlob[]
   userFenceEviction: UserFenceEvictionOptions
@@ -251,6 +253,7 @@ type RunOutcome = {
   touches: number
   reasoningExpired: ReasoningExpiry
   fenceEvicted: FenceEviction
+  dryRun: DryRunResult | undefined
 }
 
 type ReasoningExpiry = { parts: number; bytes: number; unique: number }
@@ -303,6 +306,9 @@ type SessionMetrics = {
   // with the counters so a restart does not flicker the budget to
   // unknown; a live chat.params capture always wins over it.
   persistedBudget?: PersistedBudget
+  // The manual-mode dry run from this session's newest run: run-scoped
+  // diagnostic state for lru_stats, never persisted, replaced every run.
+  lastDryRun?: DryRunResult
   lastRun?: LastRunMetrics
   logWriteError?: string
   stateWriteError?: string
@@ -422,6 +428,15 @@ const resolveOptions = (raw: LruContextOptions = {}): ResolvedOptions => {
       : DEFAULT_PROTECTED_PATTERNS
   return {
     watermark: typeof raw.watermark === "number" && raw.watermark > 0 && raw.watermark < 1 ? raw.watermark : DEFAULT_WATERMARK_RATIO,
+    // Absolute watermark, the staged-eviction lever: when set it wins over
+    // the fractional watermark (budget x watermark), so a user can engage
+    // only sessions above, say, 250k tokens without touching the fraction.
+    // Same numeric discipline as the rotation cap: finite, above 0,
+    // drop-on-invalid.
+    watermarkTokens:
+      typeof raw.watermarkTokens === "number" && Number.isFinite(raw.watermarkTokens) && raw.watermarkTokens > 0
+        ? raw.watermarkTokens
+        : undefined,
     recentWindow: typeof raw.recentWindow === "number" && raw.recentWindow >= 0 ? Math.floor(raw.recentWindow) : DEFAULT_RECENT_WINDOW_MESSAGES,
     minEvictableBytes: typeof raw.minEvictableBytes === "number" && raw.minEvictableBytes >= 0 ? raw.minEvictableBytes : DEFAULT_MIN_EVICTABLE_BYTES,
     defaultContextTokens:
@@ -1518,6 +1533,12 @@ const recordMetricsLine = async (
     dedupedThisRun,
     reasoningExpiredThisRun: reasoningExpiredThisRun.parts,
     reasoningBytesExpiredThisRun: reasoningExpiredThisRun.bytes,
+    ...(run.dryRun === undefined
+      ? {}
+      : {
+          wouldEvictThisRun: run.dryRun.wouldEvictCount,
+          wouldEvictBytesThisRun: run.dryRun.wouldEvictBytes,
+        }),
     fenceEvictedThisRun: fenceEvictedThisRun.blocks,
     postEvictionTouchesThisRun: touchesThisRun,
     stashReadsSinceLastLine,
@@ -1669,6 +1690,17 @@ const modelKeyOf = (model: ChatParamsModel | undefined): string | undefined => {
   return `${providerID}${MODEL_KEY_SEPARATOR}${modelID}`
 }
 
+// The effective eviction watermark in tokens: the absolute watermarkTokens
+// option wins when set; otherwise the budget times the fractional
+// watermark. The budget drives the fractional path only, so an absolute
+// watermark can engage even where no budget was captured (unknown-budget
+// runs otherwise stand eviction down entirely).
+const effectiveWatermarkTokensOf = (budgetTokens: number | null, options: ResolvedOptions): number | null => {
+  if (options.watermarkTokens !== undefined) return options.watermarkTokens
+  if (budgetTokens === null) return null
+  return budgetTokens * options.watermark
+}
+
 // An entry without an identity (a limit-only chat params event) is never
 // reset: nothing ties it to a model, so any later event retains it.
 const storedBudgetBelongsToAnotherModel = (stored: SessionBudgetEntry | undefined, modelKey: string | undefined): boolean =>
@@ -1739,6 +1771,7 @@ const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
     session: sessionKey,
     options: {
       watermark: source.options.watermark,
+      watermarkTokens: source.options.watermarkTokens ?? null,
       recentWindow: source.options.recentWindow,
       minEvictableBytes: source.options.minEvictableBytes,
       defaultContextTokens: source.options.defaultContextTokens ?? null,
@@ -1762,6 +1795,16 @@ const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
     stash: { entries: stash === undefined ? 0 : stash.size, capacity: source.options.stashLimit },
     counters: totalsOf(metrics, source.options.charsPerToken),
     lastRun: metrics.lastRun ?? null,
+    ...(metrics.lastDryRun === undefined
+      ? {}
+      : {
+          dryRun: {
+            deficitTokens: metrics.lastDryRun.deficitTokens,
+            wouldEvictCount: metrics.lastDryRun.wouldEvictCount,
+            wouldEvictBytes: metrics.lastDryRun.wouldEvictBytes,
+            wouldEvictSubjects: metrics.lastDryRun.wouldEvictSubjects.slice(0, source.options.rememberedEvictedSubjects),
+          },
+        }),
     ...(metrics.logWriteError === undefined ? {} : { logWriteError: metrics.logWriteError }),
     ...(metrics.stateWriteError === undefined ? {} : { stateWriteError: metrics.stateWriteError }),
   }
@@ -1822,12 +1865,28 @@ const scanToolOutputs = (
   return { appearances, entries }
 }
 
-const measureWithoutEvicting = (messages: MessageBundle[], options: ResolvedOptions): EvictionResult => {
+// One scan and one candidate computation shared by the real evictor, the
+// manual-mode dry run, and the no-eviction measurement, so the mirror is
+// structural: the dry run walks exactly the ordered, filtered candidate
+// list the evictor walks.
+type EvictionCandidates = { appearances: ToolAppearance[]; entries: EvictableEntry[]; evictable: EvictableEntry[]; estimatedTokens: number }
+
+const evictionCandidatesOf = (messages: MessageBundle[], options: ResolvedOptions): EvictionCandidates => {
   const { appearances, entries } = scanToolOutputs(messages, options)
+  const hotFromIndex = hotFromIndexOf(messages, options)
+  const evictable = entries
+    .filter((entry) => !isProtectedTool(entry.tool, options))
+    .filter((entry) => entry.lastTouch < hotFromIndex)
+    .filter((entry) => !isPatternProtected(entry.subjects, options))
+    .sort((a, b) => a.lastTouch - b.lastTouch || b.bytes - a.bytes)
+  return { appearances, entries, evictable, estimatedTokens: estimateTokens(messages, options.charsPerToken) }
+}
+
+const measureWithoutEvicting = (candidates: EvictionCandidates): EvictionResult => {
   return {
-    hotSubjects: liveSubjectsOf(entries),
-    appearances,
-    estimatedTokens: estimateTokens(messages, options.charsPerToken),
+    hotSubjects: liveSubjectsOf(candidates.entries),
+    appearances: candidates.appearances,
+    estimatedTokens: candidates.estimatedTokens,
     watermarkTokens: null,
     deficitTokens: null,
     evicted: [],
@@ -1835,23 +1894,39 @@ const measureWithoutEvicting = (messages: MessageBundle[], options: ResolvedOpti
   }
 }
 
+type DryRunResult = { deficitTokens: number; wouldEvictCount: number; wouldEvictBytes: number; wouldEvictSubjects: string[] }
+
+// Manual-mode dry run: with an effective watermark in hand, compute what
+// the evictor WOULD reclaim (the shared candidate list, the same
+// reclaim-until-deficit walk) without touching any output. Consumes the
+// already-computed candidates, so the message list is unchanged when it
+// returns and no second scan runs.
+const measureDryRun = (candidates: EvictionCandidates, options: ResolvedOptions, watermarkTokens: number): DryRunResult => {
+  const deficitTokens = candidates.estimatedTokens - watermarkTokens
+  const subjects: string[] = []
+  let wouldEvictBytes = 0
+  let reclaimedTokens = 0
+  if (deficitTokens > 0) {
+    for (const entry of candidates.evictable) {
+      if (reclaimedTokens >= deficitTokens) break
+      reclaimedTokens += entry.bytes / options.charsPerToken
+      wouldEvictBytes += entry.bytes
+      subjects.push(entry.subjects.length > 0 ? renderSubject(entry.subjects[0]) : UNKNOWN_TARGET_LABEL)
+    }
+  }
+  return { deficitTokens, wouldEvictCount: subjects.length, wouldEvictBytes, wouldEvictSubjects: subjects }
+}
+
 const evictLeastRecentlyUsed = (
   messages: MessageBundle[],
+  candidates: EvictionCandidates,
   options: ResolvedOptions,
   watermarkTokens: number,
   stash: SessionStash,
 ): EvictionResult => {
-  const { appearances, entries } = scanToolOutputs(messages, options)
+  const { evictable } = candidates
 
-  const hotFromIndex = hotFromIndexOf(messages, options)
-  const evictable = entries
-    .filter((entry) => !isProtectedTool(entry.tool, options))
-    .filter((entry) => entry.lastTouch < hotFromIndex)
-    .filter((entry) => !isPatternProtected(entry.subjects, options))
-    .sort((a, b) => a.lastTouch - b.lastTouch || b.bytes - a.bytes)
-
-  const estimatedTokens = estimateTokens(messages, options.charsPerToken)
-  const deficitTokens = estimatedTokens - watermarkTokens
+  const deficitTokens = candidates.estimatedTokens - watermarkTokens
   const evicted: EvictedEntryInfo[] = []
   let stashDropped = 0
   if (deficitTokens > 0 && evictable.length > 0) {
@@ -1886,9 +1961,9 @@ const evictLeastRecentlyUsed = (
     }
   }
   return {
-    hotSubjects: liveSubjectsOf(entries),
-    appearances,
-    estimatedTokens,
+    hotSubjects: liveSubjectsOf(candidates.entries),
+    appearances: candidates.appearances,
+    estimatedTokens: candidates.estimatedTokens,
     watermarkTokens,
     deficitTokens,
     evicted,
@@ -2013,10 +2088,27 @@ export default (async (_input, rawOptions) => {
       purgeErroredToolInputs(messages, options)
       const reasoningExpiredThisRun = expireAgedReasoning(sessionMetrics, messages, options)
       const fenceEvictedThisRun = evictLargeUserFences(messages, options, sessionStash)
+      const effectiveWatermarkTokens = effectiveWatermarkTokensOf(budget.tokens, options)
+      // One scan and one candidate walk feed whichever path runs: the
+      // manual-mode pair (stand-down measurement plus dry run) shares a
+      // single candidates computation, halving manual-mode diagnostic
+      // cost versus scanning twice.
+      const candidates =
+        options.manualMode || effectiveWatermarkTokens === null
+          ? evictionCandidatesOf(messages, options)
+          : undefined
       const eviction =
-        options.manualMode || budget.tokens === null
-          ? measureWithoutEvicting(messages, options)
-          : evictLeastRecentlyUsed(messages, options, budget.tokens * options.watermark, sessionStash)
+        candidates === undefined
+          ? evictLeastRecentlyUsed(messages, evictionCandidatesOf(messages, options), options, effectiveWatermarkTokens as number, sessionStash)
+          : measureWithoutEvicting(candidates)
+      // The manual-mode dry run: with an effective watermark set, report
+      // what the evictor would reclaim so a staged watermark can be
+      // evaluated before manual mode is ever turned off. Never mutates
+      // the message list.
+      const dryRun =
+        candidates !== undefined && effectiveWatermarkTokens !== null
+          ? measureDryRun(candidates, options, effectiveWatermarkTokens)
+          : undefined
       const touchesThisRun = countPostEvictionTouches(sessionMetrics, eviction.appearances, options.minSubstringMatchChars)
       const runOutcome: RunOutcome = {
         eviction,
@@ -2028,8 +2120,10 @@ export default (async (_input, rawOptions) => {
         touches: touchesThisRun,
         reasoningExpired: reasoningExpiredThisRun,
         fenceEvicted: fenceEvictedThisRun,
+        dryRun,
       }
       recordRunOutcome(sessionMetrics, runOutcome, options.rememberedEvictedSubjects)
+      sessionMetrics.lastDryRun = runOutcome.dryRun
       storeHint(hintBySession, sessionKey, eviction.hotSubjects, options.hintSubjects, options.hintSessions)
       await recordMetricsLine(options, sessionMetrics, sessionKey, budget, runOutcome)
       await recordLiveStateSnapshot(options, sessionKey, budget, sessionMetrics, sessionStash, eviction.hotSubjects, pruneThrottle)

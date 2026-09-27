@@ -276,6 +276,8 @@ test("parseMetricsLine consumes the line's ts and accepts the plugin's remaining
     fenceEvictedThisRun: 1,
     postEvictionTouchesThisRun: 1,
     stashReadsSinceLastLine: 3,
+    wouldEvictThisRun: 4,
+    wouldEvictBytesThisRun: 12288,
   })
 
   const line = parseMetricsLine(raw)
