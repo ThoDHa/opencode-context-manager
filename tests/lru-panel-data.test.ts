@@ -61,6 +61,9 @@ import {
   makeSnapshot,
   makeTotals,
   makePreSchemaTotals,
+  TOTALS_COLLAPSED_WINDOWS,
+  TOTALS_COLLAPSED_WINDOW_BYTES,
+  TOTALS_COLLAPSED_WINDOW_TOKENS_SAVED,
   serialize,
   withTempDir,
   writeSnapshot,
@@ -285,6 +288,9 @@ test("parseMetricsLine consumes the line's ts and accepts the plugin's remaining
   assert.equal(line.totals.reasoningBytesExpired, TOTALS_REASONING_BYTES)
   assert.equal(line.totals.dedupedUnique, TOTALS_DEDUPED_UNIQUE)
   assert.equal(line.totals.reasoningExpiredUnique, TOTALS_REASONING_EXPIRED_UNIQUE)
+  assert.equal(line.totals.collapsedWindows, TOTALS_COLLAPSED_WINDOWS)
+  assert.equal(line.totals.collapsedWindowBytes, TOTALS_COLLAPSED_WINDOW_BYTES)
+  assert.equal(line.totals.collapsedWindowTokensSaved, TOTALS_COLLAPSED_WINDOW_TOKENS_SAVED)
   assert.equal(line.totals.fenceEvicted, TOTALS_FENCE_EVICTED)
 })
 

@@ -28,6 +28,7 @@ const TOTALS_FENCE_EVICTED = 2
 const TOTALS_TOUCHES = 3
 const TOTALS_EVICTION_TOKENS_SAVED = 3072
 const TOTALS_DEDUP_TOKENS_SAVED = 2250
+const TOTALS_COLLAPSED_WINDOW_TOKENS_SAVED = 1024
 const TOTALS_REASONING_TOKENS_SAVED = 640
 
 const HUGE_RECLAIMED_BYTES = 123456789012
@@ -45,6 +46,8 @@ const LOG_LINE_TS_STALE = "2026-09-18T08:00:00.000Z"
 
 const LOG_LINE_ONLY_EVICTIONS = TOTALS_EVICTIONS + 1
 const TOTALS_DEDUPED_BYTES = 9000
+const TOTALS_COLLAPSED_WINDOWS = 2
+const TOTALS_COLLAPSED_WINDOW_BYTES = 4096
 
 // One value per shared schema totals key: the mapped type forces a fixture
 // value for every key in plugin/lru-schema.ts, so a counter added there
@@ -60,6 +63,9 @@ const TOTALS_VALUES: Record<TotalsKey, number> = {
   dedupedBytes: TOTALS_DEDUPED_BYTES,
   dedupedUnique: TOTALS_DEDUPED_UNIQUE,
   dedupTokensSaved: TOTALS_DEDUP_TOKENS_SAVED,
+  collapsedWindows: TOTALS_COLLAPSED_WINDOWS,
+  collapsedWindowBytes: TOTALS_COLLAPSED_WINDOW_BYTES,
+  collapsedWindowTokensSaved: TOTALS_COLLAPSED_WINDOW_TOKENS_SAVED,
   reasoningExpired: TOTALS_REASONING_EXPIRED,
   reasoningBytesExpired: TOTALS_REASONING_BYTES,
   reasoningExpiredUnique: TOTALS_REASONING_EXPIRED_UNIQUE,
@@ -77,9 +83,12 @@ const makePreSchemaTotals = (): Record<string, number> => {
   const {
     evictionTokensSaved: _evictionTokensSaved,
     dedupTokensSaved: _dedupTokensSaved,
+    collapsedWindowTokensSaved: _collapsedWindowTokensSaved,
     reasoningTokensSaved: _reasoningTokensSaved,
     dedupedUnique: _dedupedUnique,
     reasoningExpiredUnique: _reasoningExpiredUnique,
+    collapsedWindows: _collapsedWindows,
+    collapsedWindowBytes: _collapsedWindowBytes,
     ...preSchema
   } = TOTALS_VALUES
   return preSchema
@@ -154,6 +163,9 @@ export {
   TOTALS_STASH_MISSES,
   TOTALS_DEDUPED,
   TOTALS_DEDUPED_UNIQUE,
+  TOTALS_COLLAPSED_WINDOWS,
+  TOTALS_COLLAPSED_WINDOW_BYTES,
+  TOTALS_COLLAPSED_WINDOW_TOKENS_SAVED,
   TOTALS_REASONING_EXPIRED,
   TOTALS_REASONING_EXPIRED_UNIQUE,
   TOTALS_REASONING_BYTES,

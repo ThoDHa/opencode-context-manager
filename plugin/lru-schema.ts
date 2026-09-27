@@ -22,6 +22,8 @@ export const RAW_COUNTER_KEYS = [
   "deduped",
   "dedupedBytes",
   "dedupedUnique",
+  "collapsedWindows",
+  "collapsedWindowBytes",
   "reasoningExpired",
   "reasoningBytesExpired",
   "reasoningExpiredUnique",
@@ -38,6 +40,7 @@ export type RawCounterKey = (typeof RAW_COUNTER_KEYS)[number]
 export const DERIVED_COUNTER_KEYS = [
   "evictionTokensSaved",
   "dedupTokensSaved",
+  "collapsedWindowTokensSaved",
   "reasoningTokensSaved",
 ] as const
 

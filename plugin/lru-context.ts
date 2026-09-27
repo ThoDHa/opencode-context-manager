@@ -79,6 +79,7 @@ const RECEIVED_LABEL = "received"
 const FALLBACK_SESSION_KEY = "no-session"
 const DEDUP_MARKER = "[lru-deduped]"
 const DEDUP_SUPERSEDED_LEAD = "identical call superseded by the newer output at message"
+const DEDUP_RANGE_SUPERSEDED_LEAD = "range read superseded by the retained range at message"
 const DEDUP_FILE_SUPERSEDED_LEAD = "identical attachment superseded by the newer attachment at message"
 const FILE_PART_TYPE = "file"
 const FILE_FILENAME_KEY = "filename"
@@ -245,6 +246,8 @@ type RunOutcome = {
   deduped: number
   dedupedBytes: number
   dedupedUnique: number
+  collapsedWindows: number
+  collapsedWindowBytes: number
   touches: number
   reasoningExpired: ReasoningExpiry
   fenceEvicted: FenceEviction
@@ -275,6 +278,8 @@ type SessionMetrics = {
   deduped: number
   dedupedBytes: number
   dedupedUnique: number
+  collapsedWindows: number
+  collapsedWindowBytes: number
   reasoningExpired: number
   reasoningBytesExpired: number
   reasoningExpiredUnique: number
@@ -711,6 +716,78 @@ const deduplicateFileAttachments = (messages: MessageBundle[], options: Resolved
   // A file part's payload size is not observable from its url, so file dedup
   // contributes tombstones but no superseded bytes to the savings estimate.
   return { tombstones, supersededBytes: 0, tombstonedKeys }
+}
+
+type RangeReadWindow = { msgIndex: number; stateRef: { output: string }; range: SubjectRange }
+
+type RangeCollapseOutcome = { collapsed: number; collapsedBytes: number }
+
+const rangeContains = (outer: SubjectRange, inner: SubjectRange): boolean =>
+  outer.start <= inner.start && outer.end >= inner.end
+
+// The window a read carried is recoverable from its input's offset and
+// limit; a read without both is not a range read and never collapses.
+const rangeWindowOf = (part: Record<string, unknown>): { range: SubjectRange; stateRef: { output: string }; path: string | undefined } | undefined => {
+  if (part["type"] !== "tool" || part["tool"] !== READ_TOOL_NAME) return undefined
+  const state = part["state"]
+  if (typeof state !== "object" || state === null) return undefined
+  const typedState = state as Record<string, unknown>
+  if (typedState["status"] !== "completed" || typeof typedState["output"] !== "string") return undefined
+  if (typedState["output"].startsWith(EVICTION_MARKER) || typedState["output"].startsWith(DEDUP_MARKER)) return undefined
+  const input = typeof typedState["input"] === "object" && typedState["input"] !== null ? (typedState["input"] as Record<string, unknown>) : {}
+  // Malformed ranges never become windows: a non-integer, negative, or
+  // empty range cannot be compared for containment meaningfully. The guards
+  // live here, not in rangeOf, which subjectsOf shares and whose subject
+  // rendering tolerates odd values.
+  const range = rangeOf(input)
+  if (range === undefined) return undefined
+  if (Number.isInteger(range.start) === false || Number.isInteger(range.end) === false) return undefined
+  if (range.start < 0 || range.end <= range.start) return undefined
+  const path = PATH_INPUT_KEYS.map((key) => input[key]).find((value) => typeof value === "string" && value.length > 0)
+  return { range, stateRef: typedState as { output: string }, path: typeof path === "string" ? path : undefined }
+}
+
+// Range reads of one file fragment its content into standing windows dedup
+// cannot see: every distinct offset/limit pair is a distinct key, so the
+// same file is paid for once per window on every request. This pass
+// tombstones a contained window exactly the way file-part dedup tombstones
+// a superseded part: walking newest first, a read whose [start, end) range
+// is fully contained in a strictly newer retained read's range of the same
+// path becomes a text tombstone naming the retained read's message.
+// Containment only: merely overlapping or merely contiguous windows are
+// left alone because a contained window provably adds no unique lines,
+// while an overlap may carry lines the retained window lacks, so
+// collapsing it would drop context the model paid for and received. The
+// discipline mirrors dedup: reads inside the recent window never
+// collapse, outputs under minEvictableBytes never collapse, and
+// already-tombstoned outputs never collapse.
+const collapseRangeReads = (messages: MessageBundle[], options: ResolvedOptions): RangeCollapseOutcome => {
+  const hotFromIndex = hotFromIndexOf(messages, options)
+  const retainedByPath = new Map<string, RangeReadWindow>()
+  let collapsed = 0
+  let collapsedBytes = 0
+  for (let msgIndex = messages.length - 1; msgIndex >= 0; msgIndex -= 1) {
+    const messageParts = messages[msgIndex].parts
+    for (let partIndex = messageParts.length - 1; partIndex >= 0; partIndex -= 1) {
+      const window = rangeWindowOf(messageParts[partIndex])
+      if (window === undefined || window.path === undefined) continue
+      const retained = retainedByPath.get(window.path)
+      if (retained === undefined) {
+        retainedByPath.set(window.path, { msgIndex, stateRef: window.stateRef, range: window.range })
+        continue
+      }
+      if (rangeContains(retained.range, window.range) === false) continue
+      if (msgIndex >= hotFromIndex) continue
+      if (window.stateRef.output.length < options.minEvictableBytes) continue
+      collapsedBytes += window.stateRef.output.length
+      messageParts[partIndex] = {
+        type: TEXT_PART_TYPE,
+        text: `${DEDUP_MARKER} ${READ_TOOL_NAME} ${renderSubject({ path: window.path, range: window.range })} ${DEDUP_RANGE_SUPERSEDED_LEAD} ${retained.msgIndex} (${renderSubject({ path: window.path, range: retained.range })})`,
+      }
+      collapsed += 1
+    }
+  }
+  return { collapsed, collapsedBytes }
 }
 
 // Membership test plus bounded remember shared by the unique-event counters:
@@ -1353,7 +1430,7 @@ const lastRunMetricsOf = (eviction: EvictionResult): LastRunMetrics => ({
 })
 
 const recordRunOutcome = (metrics: SessionMetrics, run: RunOutcome, rememberedSubjectsBound: number): void => {
-  const { eviction, deduped: dedupedThisRun, dedupedBytes: dedupedBytesThisRun, dedupedUnique: dedupedUniqueThisRun, touches: touchesThisRun, reasoningExpired: reasoningExpiredThisRun, fenceEvicted: fenceEvictedThisRun } = run
+  const { eviction, deduped: dedupedThisRun, dedupedBytes: dedupedBytesThisRun, dedupedUnique: dedupedUniqueThisRun, collapsedWindows: collapsedWindowsThisRun, collapsedWindowBytes: collapsedWindowBytesThisRun, touches: touchesThisRun, reasoningExpired: reasoningExpiredThisRun, fenceEvicted: fenceEvictedThisRun } = run
   metrics.lastRun = lastRunMetricsOf(eviction)
   metrics.evictions += eviction.evicted.length
   metrics.stashDropped += eviction.stashDropped
@@ -1365,6 +1442,8 @@ const recordRunOutcome = (metrics: SessionMetrics, run: RunOutcome, rememberedSu
   metrics.deduped += dedupedThisRun
   metrics.dedupedBytes += dedupedBytesThisRun
   metrics.dedupedUnique += dedupedUniqueThisRun
+  metrics.collapsedWindows += collapsedWindowsThisRun
+  metrics.collapsedWindowBytes += collapsedWindowBytesThisRun
   metrics.reasoningExpired += reasoningExpiredThisRun.parts
   metrics.reasoningBytesExpired += reasoningExpiredThisRun.bytes
   metrics.reasoningExpiredUnique += reasoningExpiredThisRun.unique
@@ -1464,6 +1543,7 @@ const recordMetricsLine = async (
 const DERIVED_TOTAL_SOURCES: { [K in TotalsDerivedKey]: RawCounterKey } = {
   evictionTokensSaved: "bytesReclaimed",
   dedupTokensSaved: "dedupedBytes",
+  collapsedWindowTokensSaved: "collapsedWindowBytes",
   reasoningTokensSaved: "reasoningBytesExpired",
 }
 
@@ -1511,8 +1591,9 @@ const liveStateSnapshotOf = (
 // scans again. Tests inject a 0 interval to assert scan effects
 // time-independently; the throttled path is pinned time-independently by
 // asserting that a stale file planted right after a completed scan
-// survives the next snapshot write, and the window expiry is pinned
-// with a small injected interval plus a real wait.
+// survives the next snapshot write, and the window expiry is pinned by
+// the injected now() clock, whose advanceMs crosses the throttle interval
+// in zero real time.
 const isPrunableStateFileName = (name: string): boolean =>
   name.endsWith(LIVE_STATE_FILE_SUFFIX) || name.endsWith(`${LIVE_STATE_FILE_SUFFIX}${LIVE_STATE_TEMP_FILE_SUFFIX}`)
 
@@ -1923,6 +2004,7 @@ export default (async (_input, rawOptions) => {
       stripLegacyHintParts(messages)
       const toolDedup = deduplicateToolOutputs(messages, options)
       const fileDedup = deduplicateFileAttachments(messages, options)
+      const rangeCollapse = collapseRangeReads(messages, options)
       const dedupedThisRun = toolDedup.tombstones + fileDedup.tombstones
       const dedupedUniqueThisRun = countUniqueDedupedPairs(sessionMetrics, [
         ...toolDedup.tombstonedKeys,
@@ -1941,6 +2023,8 @@ export default (async (_input, rawOptions) => {
         deduped: dedupedThisRun,
         dedupedBytes: toolDedup.supersededBytes,
         dedupedUnique: dedupedUniqueThisRun,
+        collapsedWindows: rangeCollapse.collapsed,
+        collapsedWindowBytes: rangeCollapse.collapsedBytes,
         touches: touchesThisRun,
         reasoningExpired: reasoningExpiredThisRun,
         fenceEvicted: fenceEvictedThisRun,

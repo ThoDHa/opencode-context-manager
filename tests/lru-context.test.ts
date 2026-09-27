@@ -126,7 +126,17 @@ const STASH_ISOLATION_SUBJECT = "/data/shared-stash.txt"
 const STASH_ISOLATION_SESSION_C = "lru-harness-session-c"
 const DEDUP_MARKER = "[lru-deduped]"
 const DEDUP_SUPERSEDED_LEAD = "identical call superseded by the newer output at message"
+const DEDUP_RANGE_SUPERSEDED_LEAD = "range read superseded by the retained range at message"
+const PATH_RANGE_SEPARATOR = ":"
+const RANGE_SEPARATOR = "-"
 const DEDUP_PATH = "/data/dedup.txt"
+const RANGE_COLLAPSE_PATH = "/data/range-collapse.txt"
+const RANGE_COLLAPSE_WINDOW_COUNT = 1
+// A limit large enough that no eviction fires in the range-collapse tests:
+// the post-collapse bundle (one tombstone, one retained 2560-byte read, six
+// filler messages) sits far under this, so the tests isolate the collapse
+// pass from the eviction pass.
+const RANGE_COLLAPSE_SPACIOUS_CONTEXT_LIMIT = 100000
 const DEDUP_SECOND_PATH = "/data/dedup-second.txt"
 const DEDUP_ENCODING_KEY = "encoding"
 const DEDUP_ENCODING_VALUE = "utf-8"
@@ -2143,6 +2153,194 @@ test("transform tombstones an older duplicate file attachment whose newest copy 
   assert.deepEqual(bundle.messages[6].parts[0], fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME))
 })
 
+const rangeReadPart = (path: string, offset: number, limit: number, outputBytes: number): CompletedToolPart =>
+  completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: path, [OFFSET_INPUT_KEY]: offset, [LIMIT_INPUT_KEY]: limit }, outputOfBytes(outputBytes))
+
+const rangeTombstoneFor = (path: string, start: number, end: number, retainedMsgIndex: number, retainedStart: number, retainedEnd: number): string =>
+  `${DEDUP_MARKER} ${READ_TOOL} ${path}${PATH_RANGE_SEPARATOR}${start}${RANGE_SEPARATOR}${end} ${DEDUP_RANGE_SUPERSEDED_LEAD} ${retainedMsgIndex} (${path}${PATH_RANGE_SEPARATOR}${retainedStart}${RANGE_SEPARATOR}${retainedEnd})`
+
+test("transform collapses a range read fully contained in a newer read of the same path", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, RANGE_COLLAPSE_SPACIOUS_CONTEXT_LIMIT)
+
+  const bundle = buildBundle([
+    [rangeReadPart(RANGE_COLLAPSE_PATH, 100, 50, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(2),
+    [rangeReadPart(RANGE_COLLAPSE_PATH, 80, 120, MIN_EVICTABLE_BYTES + 512)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.deepEqual(bundle.messages[0].parts[0], {
+    type: "text",
+    text: rangeTombstoneFor(RANGE_COLLAPSE_PATH, 100, 150, 3, 80, 200),
+  })
+  assert.equal(toolPartAt(bundle.messages[3], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES + 512))
+})
+
+test("metrics log counts a collapsed range read and its bytes in the savings totals", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const hooks = await loadPluginHooksWith({ metricsLog: true, metricsPath })
+    await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+    const bundle = buildBundle([
+      [rangeReadPart(RANGE_COLLAPSE_PATH, 100, 50, MIN_EVICTABLE_BYTES)],
+      ...fillerMessages(2),
+      [rangeReadPart(RANGE_COLLAPSE_PATH, 80, 120, MIN_EVICTABLE_BYTES + 512)],
+      ...fillerMessages(),
+    ])
+    await runTransform(hooks, bundle)
+
+    const lines = metricsLinesIn(metricsPath)
+    assert.equal(lines.length, STATS_LOG_FILE_LINES)
+    assert.equal(lines[0].totals.collapsedWindows, RANGE_COLLAPSE_WINDOW_COUNT)
+    assert.equal(lines[0].totals.collapsedWindowBytes, MIN_EVICTABLE_BYTES)
+    assert.equal(lines[0].totals.collapsedWindowTokensSaved, tokensForChars(MIN_EVICTABLE_BYTES))
+    assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).collapsedWindows, RANGE_COLLAPSE_WINDOW_COUNT)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("transform collapses a duplicate window whose sibling input key differs so tool dedup does not claim it", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, RANGE_COLLAPSE_SPACIOUS_CONTEXT_LIMIT)
+
+  // Identical offset/limit to the retained read, but the differing
+  // encoding key makes the input distinct, so tool dedup (exact input
+  // identity) leaves both and range collapse must catch the equal range.
+  // The containment operators are non-strict (start <= and end >=) on
+  // purpose: an equal range is fully contained in itself and carries no
+  // lines the retained window lacks.
+  const bundle = buildBundle([
+    [completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: RANGE_COLLAPSE_PATH, [OFFSET_INPUT_KEY]: 80, [LIMIT_INPUT_KEY]: 120, [DEDUP_ENCODING_KEY]: "other" }, outputOfBytes(MIN_EVICTABLE_BYTES))],
+    ...fillerMessages(2),
+    [rangeReadPart(RANGE_COLLAPSE_PATH, 80, 120, MIN_EVICTABLE_BYTES + 512)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.deepEqual(bundle.messages[0].parts[0], {
+    type: "text",
+    text: rangeTombstoneFor(RANGE_COLLAPSE_PATH, 80, 200, 3, 80, 200),
+  })
+  assert.equal(toolPartAt(bundle.messages[3], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES + 512))
+})
+
+test("transform never collapses a read whose range is malformed", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, RANGE_COLLAPSE_SPACIOUS_CONTEXT_LIMIT)
+
+  const negativeOffset = buildBundle([
+    [completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: RANGE_COLLAPSE_PATH, [OFFSET_INPUT_KEY]: -20, [LIMIT_INPUT_KEY]: 300 }, outputOfBytes(MIN_EVICTABLE_BYTES))],
+    ...fillerMessages(2),
+    [rangeReadPart(RANGE_COLLAPSE_PATH, 80, 120, MIN_EVICTABLE_BYTES + 512)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, negativeOffset)
+  assert.equal(toolPartAt(negativeOffset.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+
+  const zeroLimit = buildBundle([
+    [completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: RANGE_COLLAPSE_PATH, [OFFSET_INPUT_KEY]: 100, [LIMIT_INPUT_KEY]: 0 }, outputOfBytes(MIN_EVICTABLE_BYTES))],
+    ...fillerMessages(2),
+    [rangeReadPart(RANGE_COLLAPSE_PATH, 80, 120, MIN_EVICTABLE_BYTES + 512)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, zeroLimit)
+  assert.equal(toolPartAt(zeroLimit.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+
+  const fractional = buildBundle([
+    [completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: RANGE_COLLAPSE_PATH, [OFFSET_INPUT_KEY]: 100.5, [LIMIT_INPUT_KEY]: 119.5 }, outputOfBytes(MIN_EVICTABLE_BYTES))],
+    ...fillerMessages(2),
+    [rangeReadPart(RANGE_COLLAPSE_PATH, 80, 120, MIN_EVICTABLE_BYTES + 512)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, fractional)
+  assert.equal(toolPartAt(fractional.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+})
+
+test("transform keeps overlapping range reads that are not contained in a newer window", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, RANGE_COLLAPSE_SPACIOUS_CONTEXT_LIMIT)
+
+  const bundle = buildBundle([
+    [rangeReadPart(RANGE_COLLAPSE_PATH, 100, 50, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(2),
+    [rangeReadPart(RANGE_COLLAPSE_PATH, 120, 50, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(toolPartAt(bundle.messages[3], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+})
+
+test("transform never collapses a range read inside the recent window", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, RANGE_COLLAPSE_SPACIOUS_CONTEXT_LIMIT)
+
+  const bundle = buildBundle([
+    [rangeReadPart(RANGE_COLLAPSE_PATH, 80, 120, MIN_EVICTABLE_BYTES + 512)],
+    [rangeReadPart(RANGE_COLLAPSE_PATH, 100, 50, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES + 512))
+  assert.equal(toolPartAt(bundle.messages[1], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+})
+
+test("transform never collapses a range read whose output sits below the size floor", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, RANGE_COLLAPSE_SPACIOUS_CONTEXT_LIMIT)
+
+  const bundle = buildBundle([
+    [rangeReadPart(RANGE_COLLAPSE_PATH, 100, 50, APPEARANCE_ONLY_OUTPUT_BYTES)],
+    ...fillerMessages(2),
+    [rangeReadPart(RANGE_COLLAPSE_PATH, 80, 120, MIN_EVICTABLE_BYTES + 512)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(APPEARANCE_ONLY_OUTPUT_BYTES))
+})
+
+test("a contained window scrolled into the recent window keeps counting as collapsed without resurrecting its output", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, RANGE_COLLAPSE_SPACIOUS_CONTEXT_LIMIT)
+
+  const bundle = buildBundle([
+    [rangeReadPart(RANGE_COLLAPSE_PATH, 100, 50, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(2),
+    [rangeReadPart(RANGE_COLLAPSE_PATH, 80, 120, MIN_EVICTABLE_BYTES + 512)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+  assert.deepEqual(bundle.messages[0].parts[0], {
+    type: "text",
+    text: rangeTombstoneFor(RANGE_COLLAPSE_PATH, 100, 150, 3, 80, 200),
+  })
+
+  // The stored session re-offers the same message list every run, with the
+  // former tombstone's message now inside the recent window: the contained
+  // read must stay tombstoned (never resurrect) and the counters must not
+  // grow, because a tombstoned output is never a collapse candidate again.
+  // The tombstone text is stable from the first run: the pass does not
+  // rewrite it, so it still names the retained read's original message
+  // index even though later unshifts moved both messages down.
+  bundle.messages.unshift(syntheticMessage([textPart(textOfChars(FILLER_TEXT_CHARS))]))
+  bundle.messages.unshift(syntheticMessage([textPart(textOfChars(FILLER_TEXT_CHARS))]))
+  await runTransform(hooks, bundle)
+
+  assert.deepEqual(bundle.messages[2].parts[0], {
+    type: "text",
+    text: rangeTombstoneFor(RANGE_COLLAPSE_PATH, 100, 150, 3, 80, 200),
+  })
+  assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).collapsedWindows, RANGE_COLLAPSE_WINDOW_COUNT)
+})
+
 test("transform leaves a duplicate file attachment inside the recent window untouched", async () => {
   const hooks = await loadPluginHooks()
 
@@ -3003,6 +3201,9 @@ const STATS_ZEROED_COUNTERS = {
   dedupedBytes: 0,
   dedupedUnique: 0,
   dedupTokensSaved: 0,
+  collapsedWindows: 0,
+  collapsedWindowBytes: 0,
+  collapsedWindowTokensSaved: 0,
   postEvictionTouches: 0,
   reasoningExpired: 0,
   reasoningBytesExpired: 0,
