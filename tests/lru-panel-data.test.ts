@@ -8,6 +8,7 @@ import {
   DEFAULT_LIVE_STATE_DIR,
   DEFAULT_METRICS_PATH,
   budgetSourceLabel,
+  canRegisterSidebar,
   createMetricsLogReader,
   formatBytes,
   formatTokenCount,
@@ -665,6 +666,25 @@ test("budgetSourceLabel maps the plugin's source ids to panel labels", () => {
   assert.equal(budgetSourceLabel(DEFAULT_BUDGET_SOURCE), "plugin default")
   assert.equal(budgetSourceLabel(UNKNOWN_BUDGET_SOURCE), "inactive (no budget)")
   assert.equal(budgetSourceLabel("anything-else"), "inactive (no budget)")
+})
+
+test("canRegisterSidebar accepts only an api object whose slots.register is callable", () => {
+  assert.equal(canRegisterSidebar({ slots: { register: () => {} } }), true)
+  assert.equal(canRegisterSidebar({ slots: { register: undefined } }), false)
+  assert.equal(canRegisterSidebar({ slots: {} }), false)
+  assert.equal(canRegisterSidebar({ slots: "yes" }), false)
+  assert.equal(canRegisterSidebar({}), false)
+  assert.equal(canRegisterSidebar(null), false)
+  assert.equal(canRegisterSidebar("slots"), false)
+  assert.equal(canRegisterSidebar(42), false)
+  assert.equal(canRegisterSidebar(undefined), false)
+  // A hostile getter must not propagate into the TUI mount path: reading
+  // api.slots or slots.register through a throwing getter reads as
+  // cannot-register.
+  const throwingSlots = Object.create(null, { slots: { get: () => { throw new Error("slots getter exploded") } } })
+  assert.equal(canRegisterSidebar(throwingSlots), false)
+  const throwingRegister = { slots: Object.create(null, { register: { get: () => { throw new Error("register getter exploded") } } }) }
+  assert.equal(canRegisterSidebar(throwingRegister), false)
 })
 
 test("the default metrics path matches the plugin's log location", () => {

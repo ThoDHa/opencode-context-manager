@@ -20,6 +20,27 @@ export const DEFAULT_SIDEBAR_SUBAGENTS = false
 export const resolveSidebarSubagents = (value: unknown): boolean =>
   typeof value === "boolean" ? value : DEFAULT_SIDEBAR_SUBAGENTS
 
+// True when the host TUI api object actually exposes the slots registry the
+// sidebar needs. The .tsx cannot export logic node can load, so the
+// predicate lives here and the TUI imports it: a host without the slots
+// API (or with a non-callable register) gets no sidebar registration and
+// no error, matching the README's degradation promise.
+export const canRegisterSidebar = (api: unknown): boolean => {
+  if (isRecord(api) === false) return false
+  let slots: unknown
+  try {
+    slots = api["slots"]
+  } catch {
+    return false
+  }
+  if (isRecord(slots) === false) return false
+  try {
+    return typeof slots["register"] === "function"
+  } catch {
+    return false
+  }
+}
+
 export const SUBAGENT_FALLBACK_TYPE = "subagent"
 
 export type SubagentChild = {

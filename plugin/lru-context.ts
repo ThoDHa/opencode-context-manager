@@ -78,6 +78,7 @@ const STASH_INVALID_SUBJECT_LEAD = "requires a non-empty subject string"
 const RECEIVED_LABEL = "received"
 const FALLBACK_SESSION_KEY = "no-session"
 const DEDUP_MARKER = "[lru-deduped]"
+const TOOL_ERROR_PREFIX = "[lru-error] "
 const DEDUP_SUPERSEDED_LEAD = "identical call superseded by the newer output at message"
 const DEDUP_RANGE_SUPERSEDED_LEAD = "range read superseded by the retained range at message"
 const DEDUP_FILE_SUPERSEDED_LEAD = "identical attachment superseded by the newer attachment at message"
@@ -184,6 +185,12 @@ type LruContextOptions = {
   manualMode?: boolean
   userFenceEviction?: { enabled?: boolean; minBlockLines?: number }
   now?: () => number
+  // Test-only fault injection: when the injected function returns a
+  // message, the transform hook's fault boundary treats the run as if the
+  // body threw that message (identity behavior plus lastFault). Never
+  // documented as a user option; exists so the fault path is testable
+  // without monkey-patching internals.
+  faultTransform?: () => string | undefined
 }
 
 type CompiledGlob = { regexp: RegExp; matchesSegments: boolean }
@@ -309,10 +316,16 @@ type SessionMetrics = {
   // The manual-mode dry run from this session's newest run: run-scoped
   // diagnostic state for lru_stats, never persisted, replaced every run.
   lastDryRun?: DryRunResult
+  // The newest fault-isolated failure on this session's transform: set by
+  // the transform boundary when the body throws, surfaced through
+  // lru_stats, never persisted, replaced by the next run's outcome.
+  lastFault?: LastFault
   lastRun?: LastRunMetrics
   logWriteError?: string
   stateWriteError?: string
 }
+
+type LastFault = { message: string; atMs: number }
 
 type MetricsStore = Map<string, SessionMetrics>
 
@@ -496,6 +509,7 @@ const resolveOptions = (raw: LruContextOptions = {}): ResolvedOptions => {
     // source. The default is real time; only tests override it, so it is
     // deliberately absent from the README's option surface and lru_stats.
     now: typeof raw.now === "function" ? raw.now : DEFAULT_NOW,
+    faultTransform: typeof raw.faultTransform === "function" ? raw.faultTransform : undefined,
   }
 }
 
@@ -1805,6 +1819,9 @@ const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
             wouldEvictSubjects: metrics.lastDryRun.wouldEvictSubjects.slice(0, source.options.rememberedEvictedSubjects),
           },
         }),
+    ...(metrics.lastFault === undefined
+      ? {}
+      : { lastFault: { message: metrics.lastFault.message, at: new Date(metrics.lastFault.atMs).toISOString() } }),
     ...(metrics.logWriteError === undefined ? {} : { logWriteError: metrics.logWriteError }),
     ...(metrics.stateWriteError === undefined ? {} : { stateWriteError: metrics.stateWriteError }),
   }
@@ -2008,6 +2025,151 @@ const deliverHint = (hintBySession: Map<string, string>, input: unknown, output:
   else output.system[existingIndex] = hintLine
 }
 
+// The transform hook's body, extracted so the registration-site boundary
+// can wrap it in fault isolation. Everything it needs rides the deps
+// object (the plugin instance's per-process stores plus resolved
+// options); nothing mutates state outside them.
+type TransformHookDeps = {
+  contextTokensBySession: Map<string, SessionBudgetEntry>
+  modelKeyBySession: Map<string, string | undefined>
+  metricsBySession: MetricsStore
+  metricsHydrationBySession: MetricsHydration
+  persistedTotalsForSession: (sessionKey: string) => Promise<PersistedTotals | undefined>
+  stashBySession: StashStore
+  hintBySession: Map<string, string>
+  pruneThrottle: PruneThrottle
+  options: ResolvedOptions
+}
+
+const transformHookBody = async (messages: MessageBundle[], deps: TransformHookDeps): Promise<void> => {
+  const { options } = deps
+  const info = messages[0]?.info
+  const sessionKey = sessionKeyFromContext(info)
+  const sessionID = info?.sessionID
+  // The budget fallback rides the session metrics, so hydration must
+  // land before resolution: a restart resolves the persisted budget
+  // instead of flickering to unknown, and a live chat.params capture
+  // still wins because the fallback fills only the unknown state.
+  const sessionMetrics = await metricsForSession(deps.metricsBySession, deps.metricsHydrationBySession, deps.persistedTotalsForSession, sessionKey, options.metricsSessions)
+  const sessionLimit = sessionID !== undefined ? touchMapEntry(deps.contextTokensBySession, sessionID) : undefined
+  const sittingModelKey = sessionID === undefined ? undefined : deps.modelKeyBySession.get(sessionID)
+  const { budget, fallbackSuppressed } = sessionBudgetForRun(sessionLimit, sessionMetrics.persistedBudget, sittingModelKey, options)
+  if (fallbackSuppressed) sessionMetrics.persistedBudget = undefined
+  else if (budget.source !== CONTEXT_TOKENS_SOURCE_UNKNOWN) sessionMetrics.persistedBudget = { tokens: budget.tokens, source: budget.source, modelKey: budget.modelKey }
+  const sessionStash = stashForSession(deps.stashBySession, sessionKey, options.stashSessions)
+  stripLegacyHintParts(messages)
+  const toolDedup = deduplicateToolOutputs(messages, options)
+  const fileDedup = deduplicateFileAttachments(messages, options)
+  const rangeCollapse = collapseRangeReads(messages, options)
+  const dedupedThisRun = toolDedup.tombstones + fileDedup.tombstones
+  const dedupedUniqueThisRun = countUniqueDedupedPairs(sessionMetrics, [
+    ...toolDedup.tombstonedKeys,
+    ...fileDedup.tombstonedKeys,
+  ])
+  purgeErroredToolInputs(messages, options)
+  const reasoningExpiredThisRun = expireAgedReasoning(sessionMetrics, messages, options)
+  const fenceEvictedThisRun = evictLargeUserFences(messages, options, sessionStash)
+  const effectiveWatermarkTokens = effectiveWatermarkTokensOf(budget.tokens, options)
+  // One scan and one candidate walk feed whichever path runs: the
+  // manual-mode pair (stand-down measurement plus dry run) shares a
+  // single candidates computation, halving manual-mode diagnostic
+  // cost versus scanning twice.
+  const candidates =
+    options.manualMode || effectiveWatermarkTokens === null
+      ? evictionCandidatesOf(messages, options)
+      : undefined
+  const eviction =
+    candidates === undefined
+      ? evictLeastRecentlyUsed(messages, evictionCandidatesOf(messages, options), options, effectiveWatermarkTokens as number, sessionStash)
+      : measureWithoutEvicting(candidates)
+  // The manual-mode dry run: with an effective watermark set, report
+  // what the evictor would reclaim so a staged watermark can be
+  // evaluated before manual mode is ever turned off. Never mutates
+  // the message list.
+  const dryRun =
+    candidates !== undefined && effectiveWatermarkTokens !== null
+      ? measureDryRun(candidates, options, effectiveWatermarkTokens)
+      : undefined
+  const touchesThisRun = countPostEvictionTouches(sessionMetrics, eviction.appearances, options.minSubstringMatchChars)
+  const runOutcome: RunOutcome = {
+    eviction,
+    deduped: dedupedThisRun,
+    dedupedBytes: toolDedup.supersededBytes,
+    dedupedUnique: dedupedUniqueThisRun,
+    collapsedWindows: rangeCollapse.collapsed,
+    collapsedWindowBytes: rangeCollapse.collapsedBytes,
+    touches: touchesThisRun,
+    reasoningExpired: reasoningExpiredThisRun,
+    fenceEvicted: fenceEvictedThisRun,
+    dryRun,
+  }
+  recordRunOutcome(sessionMetrics, runOutcome, options.rememberedEvictedSubjects)
+  sessionMetrics.lastDryRun = runOutcome.dryRun
+  storeHint(deps.hintBySession, sessionKey, eviction.hotSubjects, options.hintSubjects, options.hintSessions)
+  await recordMetricsLine(options, sessionMetrics, sessionKey, budget, runOutcome)
+  await recordLiveStateSnapshot(options, sessionKey, budget, sessionMetrics, sessionStash, eviction.hotSubjects, deps.pruneThrottle)
+}
+
+// A throwing tool degrades to a structured error string the TUI can
+// render, never a raw throw into the host's tool dispatcher.
+const guardTool = (tool: (args: unknown, toolContext: unknown) => Promise<string>) => {
+  return async (args: unknown, toolContext: unknown): Promise<string> => {
+    try {
+      return await tool(args, toolContext)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return `${TOOL_ERROR_PREFIX}${message}`
+    }
+  }
+}
+
+// The transform fault boundary stores the failure on the session's metrics
+// entry; when the entry itself does not exist yet (the fault may have hit
+// before hydration created it), a fresh entry is created so the fault is
+// still surfaced rather than dropped.
+// Records the transform fault on the session's metrics entry, creating a
+// fresh entry when none exists (an early fault can land before hydration
+// created one). An existing entry is updated in place and must not be
+// trimmed or refreshed, so its counters and LRU position survive.
+const rememberFault = (metrics: MetricsStore, sessionKey: string, fault: LastFault, sessionBound: number): void => {
+  const existing = metrics.get(sessionKey)
+  if (existing !== undefined) {
+    existing.lastFault = fault
+    return
+  }
+  trimMapToBound(metrics, sessionBound)
+  const entry = createSessionMetrics()
+  entry.lastFault = fault
+  metrics.set(sessionKey, entry)
+}
+
+const chatParamsHookBody = (
+  input: { sessionID: string; model?: ChatParamsModel },
+  contextTokensBySession: Map<string, SessionBudgetEntry>,
+  modelKeyBySession: Map<string, string | undefined>,
+  metricsBySession: MetricsStore,
+  options: ResolvedOptions,
+): void => {
+  const modelKey = modelKeyOf(input.model)
+  // The sitting's newest model identity rides the transform side: the
+  // persisted-budget fallback suppresses itself against it when the
+  // session changed models, mid sitting or across a restart.
+  rememberSessionValue(modelKeyBySession, input.sessionID, modelKey, options.limitSessions)
+  const captured = captureBudgetOf(input.model, options.modelContextTokens)
+  if (captured !== undefined) {
+    rememberSessionValue(contextTokensBySession, input.sessionID, captured, options.limitSessions)
+    return
+  }
+  const stored = contextTokensBySession.get(input.sessionID)
+  if (!storedBudgetBelongsToAnotherModel(stored, modelKey)) return
+  contextTokensBySession.delete(input.sessionID)
+  // A model change also invalidates the persisted-budget fallback:
+  // without this, the deleted live capture would refill from the
+  // previous model's rehydrated budget on the next run.
+  const metrics = metricsBySession.get(input.sessionID)
+  if (metrics !== undefined) metrics.persistedBudget = undefined
+}
+
 export default (async (_input, rawOptions) => {
   const options = resolveOptions(rawOptions as LruContextOptions)
   const contextTokensBySession = new Map<string, SessionBudgetEntry>()
@@ -2019,6 +2181,19 @@ export default (async (_input, rawOptions) => {
   const pruneThrottle: PruneThrottle = { lastScanMs: PRUNE_SCAN_NEVER }
   const persistedTotalsForSession = (sessionKey: string): Promise<PersistedTotals | undefined> =>
     newestPersistedTotalsOf(options, sessionKey)
+  // Hoisted per plugin instance: every run passes the same deps object to
+  // the extracted transform body instead of rebuilding the literal per run.
+  const transformHookDeps: TransformHookDeps = {
+    contextTokensBySession,
+    modelKeyBySession,
+    metricsBySession,
+    metricsHydrationBySession,
+    persistedTotalsForSession,
+    stashBySession,
+    hintBySession,
+    pruneThrottle,
+    options,
+  }
 
   // Workaround: read_evicted and lru_stats are registered as plain
   // { description, args, execute } definitions instead of calling tool() from
@@ -2040,107 +2215,55 @@ export default (async (_input, rawOptions) => {
 
   return {
     "chat.params": async (input: { sessionID: string; model?: ChatParamsModel }) => {
-      const modelKey = modelKeyOf(input.model)
-      // The sitting's newest model identity rides the transform side: the
-      // persisted-budget fallback suppresses itself against it when the
-      // session changed models, mid sitting or across a restart.
-      rememberSessionValue(modelKeyBySession, input.sessionID, modelKey, options.limitSessions)
-      const captured = captureBudgetOf(input.model, options.modelContextTokens)
-      if (captured !== undefined) {
-        rememberSessionValue(contextTokensBySession, input.sessionID, captured, options.limitSessions)
-        return
+      try {
+        chatParamsHookBody(input, contextTokensBySession, modelKeyBySession, metricsBySession, options)
+      } catch {
+        // A malformed or hostile chat.params payload degrades to no-op:
+        // the session keeps whatever budget state it already had.
       }
-      const stored = contextTokensBySession.get(input.sessionID)
-      if (!storedBudgetBelongsToAnotherModel(stored, modelKey)) return
-      contextTokensBySession.delete(input.sessionID)
-      // A model change also invalidates the persisted-budget fallback:
-      // without this, the deleted live capture would refill from the
-      // previous model's rehydrated budget on the next run.
-      const metrics = metricsBySession.get(input.sessionID)
-      if (metrics !== undefined) metrics.persistedBudget = undefined
     },
     "experimental.chat.messages.transform": async (_input: unknown, output: { messages: MessageBundle[] }) => {
       const messages = output.messages
       if (!Array.isArray(messages) || messages.length === 0) return
-      const info = messages[0]?.info
-      const sessionKey = sessionKeyFromContext(info)
-      const sessionID = info?.sessionID
-      // The budget fallback rides the session metrics, so hydration must
-      // land before resolution: a restart resolves the persisted budget
-      // instead of flickering to unknown, and a live chat.params capture
-      // still wins because the fallback fills only the unknown state.
-      const sessionMetrics = await metricsForSession(metricsBySession, metricsHydrationBySession, persistedTotalsForSession, sessionKey, options.metricsSessions)
-      const sessionLimit = sessionID !== undefined ? touchMapEntry(contextTokensBySession, sessionID) : undefined
-      const sittingModelKey = sessionID === undefined ? undefined : modelKeyBySession.get(sessionID)
-      const { budget, fallbackSuppressed } = sessionBudgetForRun(sessionLimit, sessionMetrics.persistedBudget, sittingModelKey, options)
-      if (fallbackSuppressed) sessionMetrics.persistedBudget = undefined
-      else if (budget.source !== CONTEXT_TOKENS_SOURCE_UNKNOWN) sessionMetrics.persistedBudget = { tokens: budget.tokens, source: budget.source, modelKey: budget.modelKey }
-      const sessionStash = stashForSession(stashBySession, sessionKey, options.stashSessions)
-      stripLegacyHintParts(messages)
-      const toolDedup = deduplicateToolOutputs(messages, options)
-      const fileDedup = deduplicateFileAttachments(messages, options)
-      const rangeCollapse = collapseRangeReads(messages, options)
-      const dedupedThisRun = toolDedup.tombstones + fileDedup.tombstones
-      const dedupedUniqueThisRun = countUniqueDedupedPairs(sessionMetrics, [
-        ...toolDedup.tombstonedKeys,
-        ...fileDedup.tombstonedKeys,
-      ])
-      purgeErroredToolInputs(messages, options)
-      const reasoningExpiredThisRun = expireAgedReasoning(sessionMetrics, messages, options)
-      const fenceEvictedThisRun = evictLargeUserFences(messages, options, sessionStash)
-      const effectiveWatermarkTokens = effectiveWatermarkTokensOf(budget.tokens, options)
-      // One scan and one candidate walk feed whichever path runs: the
-      // manual-mode pair (stand-down measurement plus dry run) shares a
-      // single candidates computation, halving manual-mode diagnostic
-      // cost versus scanning twice.
-      const candidates =
-        options.manualMode || effectiveWatermarkTokens === null
-          ? evictionCandidatesOf(messages, options)
-          : undefined
-      const eviction =
-        candidates === undefined
-          ? evictLeastRecentlyUsed(messages, evictionCandidatesOf(messages, options), options, effectiveWatermarkTokens as number, sessionStash)
-          : measureWithoutEvicting(candidates)
-      // The manual-mode dry run: with an effective watermark set, report
-      // what the evictor would reclaim so a staged watermark can be
-      // evaluated before manual mode is ever turned off. Never mutates
-      // the message list.
-      const dryRun =
-        candidates !== undefined && effectiveWatermarkTokens !== null
-          ? measureDryRun(candidates, options, effectiveWatermarkTokens)
-          : undefined
-      const touchesThisRun = countPostEvictionTouches(sessionMetrics, eviction.appearances, options.minSubstringMatchChars)
-      const runOutcome: RunOutcome = {
-        eviction,
-        deduped: dedupedThisRun,
-        dedupedBytes: toolDedup.supersededBytes,
-        dedupedUnique: dedupedUniqueThisRun,
-        collapsedWindows: rangeCollapse.collapsed,
-        collapsedWindowBytes: rangeCollapse.collapsedBytes,
-        touches: touchesThisRun,
-        reasoningExpired: reasoningExpiredThisRun,
-        fenceEvicted: fenceEvictedThisRun,
-        dryRun,
+      // Resolved inside the try: a hostile messages[0].info accessor is
+      // itself a fault on the highest-likelihood path and must hit the
+      // boundary, not escape ahead of it. The fallback key names the
+      // shared no-session entry for the fault record.
+      let sessionKey = FALLBACK_SESSION_KEY
+      try {
+        sessionKey = sessionKeyFromContext(messages[0]?.info)
+        const injectedFault = options.faultTransform?.()
+        if (typeof injectedFault === "string") throw new Error(injectedFault)
+        await transformHookBody(messages, transformHookDeps)
+      } catch (error) {
+        // Fault isolation: a plugin bug must never corrupt or block the
+        // session. A fault before the body starts leaves the list
+        // untouched; a mid-body fault returns the partially applied
+        // normal edits (same references, subset of healthy edits) —
+        // either way never a corrupted structure — and the failure
+        // surfaces through lru_stats.
+        const fault = { message: error instanceof Error ? error.message : String(error), atMs: options.now() }
+        rememberFault(metricsBySession, sessionKey, fault, options.metricsSessions)
       }
-      recordRunOutcome(sessionMetrics, runOutcome, options.rememberedEvictedSubjects)
-      sessionMetrics.lastDryRun = runOutcome.dryRun
-      storeHint(hintBySession, sessionKey, eviction.hotSubjects, options.hintSubjects, options.hintSessions)
-      await recordMetricsLine(options, sessionMetrics, sessionKey, budget, runOutcome)
-      await recordLiveStateSnapshot(options, sessionKey, budget, sessionMetrics, sessionStash, eviction.hotSubjects, pruneThrottle)
     },
     "experimental.chat.system.transform": async (input: { sessionID?: string }, output: { system: string[] }) => {
-      deliverHint(hintBySession, input, output)
+      try {
+        deliverHint(hintBySession, input, output)
+      } catch {
+        // A hint failure degrades to returning the prompt unchanged: the
+        // hint is advisory, never worth blocking a model call over.
+      }
     },
     tool: {
       [RELOAD_TOOL_NAME]: {
         description: RELOAD_TOOL_DESCRIPTION,
         args: { [RELOAD_ARG_NAME]: RELOAD_ARG_SCHEMA },
-        execute: readEvicted,
+        execute: guardTool(readEvicted),
       },
       [STATS_TOOL_NAME]: {
         description: STATS_TOOL_DESCRIPTION,
         args: {},
-        execute: lruStats,
+        execute: guardTool(lruStats),
       },
     },
   }

@@ -125,6 +125,9 @@ const INVALID_SUBJECT_VALUE = 42
 const STASH_ISOLATION_SUBJECT = "/data/shared-stash.txt"
 const STASH_ISOLATION_SESSION_C = "lru-harness-session-c"
 const DEDUP_MARKER = "[lru-deduped]"
+const TOOL_ERROR_PREFIX = "[lru-error] "
+const FAULT_SUBJECT = "/data/fault-subject.txt"
+const TOOL_FAULT_MESSAGE = "tool getter exploded"
 const DEDUP_SUPERSEDED_LEAD = "identical call superseded by the newer output at message"
 const DEDUP_RANGE_SUPERSEDED_LEAD = "range read superseded by the retained range at message"
 const PATH_RANGE_SEPARATOR = ":"
@@ -5629,6 +5632,120 @@ test("transform keeps dedup active under pressure while manualMode is enabled", 
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, dedupTombstoneFor(READ_TOOL, 1))
   assert.equal(toolPartAt(bundle.messages[1], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
   assert.ok(!toolPartAt(bundle.messages[1], 0).state.output.startsWith(TOMBSTONE_MARKER))
+})
+
+const FAULT_MESSAGE = "injected transform fault"
+const SECOND_SESSION_FAULT = "second session fault"
+
+test("a faulting transform run degrades to identity behavior and surfaces lastFault", async () => {
+  const hooks = await loadPluginHooksWith({ faultTransform: () => FAULT_MESSAGE })
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+  const bundle = buildStandardBundle(SESSION_ID, FAULT_SUBJECT)
+  await runTransform(hooks, bundle)
+
+  // Identity behavior: the output the host delivered comes back unchanged,
+  // with no tombstone, dedup marker, or other plugin edit.
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+  const stats = await lruStats(hooks, SESSION_ID)
+  const lastFault = stats.lastFault as Record<string, unknown>
+  assert.ok(lastFault !== undefined)
+  assert.equal(lastFault.message, FAULT_MESSAGE)
+  assert.equal(typeof lastFault.at, "string")
+})
+
+test("a fault on one session does not leak into another session's run", async () => {
+  const hooks = await loadPluginHooksWith({
+    faultTransform: ((): (() => string | undefined) => {
+      let calls = 0
+      return () => {
+        calls += 1
+        return calls === 1 ? FAULT_MESSAGE : undefined
+      }
+    })(),
+  })
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+  await setContextLimit(hooks, SESSION_ID_B, contextForDeficit(THREE_ENTRY_BUNDLE_CHARS, TWO_ENTRY_DEFICIT_TOKENS))
+
+  const faulted = buildStandardBundle(SESSION_ID, FAULT_SUBJECT)
+  await runTransform(hooks, faulted)
+  // Mirror the isolation test's B bundle: three candidates are needed for
+  // the deficit-driven walk to reclaim anything on SESSION_ID_B.
+  const healthy = buildBundle(
+    [
+      [pathToolPart("/data/fault-free-a.txt", THREE_ENTRY_OUTPUT_BYTES), pathToolPart("/data/fault-free-b.txt", THREE_ENTRY_OUTPUT_BYTES), pathToolPart("/data/fault-free-c.txt", THREE_ENTRY_OUTPUT_BYTES)],
+      ...fillerMessages(),
+    ],
+    SESSION_ID_B,
+  )
+  await runTransform(hooks, healthy)
+
+  assert.ok(toolPartAt(healthy.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  const faultedStats = await lruStats(hooks, SESSION_ID)
+  assert.equal((faultedStats.lastFault as Record<string, unknown>).message, FAULT_MESSAGE)
+  const healthyStats = await lruStats(hooks, SESSION_ID_B)
+  assert.equal(Object.hasOwn(healthyStats, "lastFault"), false)
+})
+
+test("a second fault replaces the session's lastFault message", async () => {
+  const hooks = await loadPluginHooksWith({ faultTransform: ((): (() => string | undefined) => {
+    let calls = 0
+    return () => {
+      calls += 1
+      return calls === 1 ? FAULT_MESSAGE : SECOND_SESSION_FAULT
+    }
+  })() })
+
+  const first = buildStandardBundle(SESSION_ID, FAULT_SUBJECT)
+  await runTransform(hooks, first)
+  const second = buildStandardBundle(SESSION_ID, FAULT_SUBJECT)
+  await runTransform(hooks, second)
+
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.equal((stats.lastFault as Record<string, unknown>).message, SECOND_SESSION_FAULT)
+})
+
+test("a throwing tool returns the structured error shape instead of throwing", async () => {
+  const hooks = await loadPluginHooks()
+
+  // The internals guard ordinary hostile shapes and return their own miss
+  // strings, so the boundary is exercised with an args object whose
+  // property getter throws mid-read: the boundary must convert the throw
+  // into the structured error string.
+  const hostileArgs = Object.create(null, { subject: { get: () => { throw new Error(TOOL_FAULT_MESSAGE) } } })
+  const result = await (hooks as Record<string, Record<string, { execute: (args: unknown, context: unknown) => Promise<string> }>>)[RELOAD_TOOL_MAP_KEY][RELOAD_TOOL_NAME].execute(
+    hostileArgs,
+    { sessionID: SESSION_ID },
+  )
+
+  assert.equal(typeof result, "string")
+  assert.ok(result.startsWith(TOOL_ERROR_PREFIX))
+  assert.ok(result.includes(TOOL_FAULT_MESSAGE))
+})
+
+const HOSTILE_CHAT_PARAMS_PAYLOADS: unknown[] = [
+  undefined,
+  null,
+  42,
+  "session",
+  [],
+  {},
+  { model: "not-a-record" },
+  { model: { providerID: 7, modelID: true } },
+  { model: { limit: "none" } },
+  { model: { providerID: "p", modelID: "m", limit: { context: "most of it" } } },
+]
+
+test("the chat.params handler survives hostile payloads without throwing", async () => {
+  const hooks = await loadPluginHooks()
+
+  for (const payload of HOSTILE_CHAT_PARAMS_PAYLOADS) {
+    await hooks[CHAT_PARAMS_HOOK](payload as { sessionID: string }, {})
+  }
+
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.equal(stats.modelContextTokens, null)
+  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
 })
 
 const DRY_RUN_CANDIDATE_BYTES = 3000

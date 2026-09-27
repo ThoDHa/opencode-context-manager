@@ -13,6 +13,7 @@
 import type { TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
 import { createSignal, onCleanup, onMount } from "solid-js"
 import {
+  canRegisterSidebar,
   createMetricsLogReader,
   DEFAULT_METRICS_PATH,
   filterSubagentChildren,
@@ -153,7 +154,7 @@ const tui: TuiPluginModule["tui"] = async (api, options) => {
       },
     ],
   })
-  if (resolveSidebarEnabled(options?.sidebarEnabled)) {
+  if (resolveSidebarEnabled(options?.sidebarEnabled) && canRegisterSidebar(api)) {
     const subagentsEnabled = resolveSidebarSubagents(options?.sidebarSubagents)
     api.slots.register({
       order: SIDEBAR_SLOT_ORDER,
