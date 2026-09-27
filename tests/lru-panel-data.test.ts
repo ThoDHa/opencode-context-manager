@@ -453,6 +453,9 @@ test("parseMetricsLine consumes the line's ts and accepts the plugin's remaining
     stashReadsSinceLastLine: 3,
     wouldEvictThisRun: 4,
     wouldEvictBytesThisRun: 12288,
+    toolPoolBytes: 9500,
+    textChars: 1800,
+    reasoningInWindowBytes: 512,
   })
 
   const line = parseMetricsLine(raw)

@@ -4620,6 +4620,91 @@ test("metrics log counts expired reasoning bytes separately from evictions on a 
   }
 })
 
+// Known composition: message 0 carries an aged reasoning part (expired) and
+// a 4000-byte read of A whose identical twin at message 4 (3500 B, aged)
+// dedup-tombstones it; message 8 is a 3000-byte read of B contained in
+// message 13's 3500-byte read of B and is range-collapse-tombstoned; message
+// 13 sits inside the recent window and carries the windowed reasoning part.
+// Post-pass arithmetic asserted below: toolPoolBytes = 3500 + 3500 + 77 (the
+// dedup tombstone naming message 4), textChars = 4 x 240 + 9 x 10 + 141 (the
+// range-collapse tombstone as a text part), reasoningInWindowBytes = 24.
+test("metrics line carries the post-transform composition fields on a known bundle", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const hooks = await loadPluginHooksWith({ metricsLog: true, metricsPath, manualMode: true })
+    await setContextLimit(hooks, SESSION_ID, LARGE_DEFAULT_CONTEXT_TOKENS)
+
+    // 17 messages, recent window covering the last 4 (indices 13-16).
+    // Construction with distinct paths so each pass's effect is countable:
+    // - msg0: aged reasoning (expired, its bytes leave the list) + a
+    //   4000-byte read of A; msg4's read of A has identical input, so
+    //   dedup tombstones msg0's output into a 77-char tombstone naming
+    //   message 4, which stays inside the tool pool
+    // - msg8: a 3000-byte read of B at (100,150), contained in msg13's
+    //   (90,180) read of B -> range collapse tombstones it as a 141-char
+    //   text part, leaving msg13's 3500 live
+    // - msg13 sits inside the recent window, so its reasoning part
+    //   survives and reasoningInWindowBytes counts it
+    const textMessages = (count: number): MessagePart[][] => Array.from({ length: count }, () => [textPart(textOfChars(COMPOSITION_TEXT_CHARS))])
+    const bundle = buildBundle([
+      [reasoningPart(REASONING_COLD_TEXT), completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: COMPOSITION_PATH_A, [OFFSET_INPUT_KEY]: 100, [LIMIT_INPUT_KEY]: 50 }, outputOfBytes(COMPOSITION_TOOL_COLD_BYTES))],
+      ...textMessages(1),
+      ...fillerMessages(2),
+      [completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: COMPOSITION_PATH_A, [OFFSET_INPUT_KEY]: 100, [LIMIT_INPUT_KEY]: 50 }, outputOfBytes(COMPOSITION_TOOL_RETAINED_BYTES))],
+      ...textMessages(1),
+      ...fillerMessages(2),
+      [completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: COMPOSITION_PATH_B, [OFFSET_INPUT_KEY]: 100, [LIMIT_INPUT_KEY]: 50 }, outputOfBytes(COMPOSITION_TOOL_CONTAINED_BYTES))],
+      ...textMessages(1),
+      ...fillerMessages(2),
+      ...textMessages(1),
+      [completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: COMPOSITION_PATH_B, [OFFSET_INPUT_KEY]: 90, [LIMIT_INPUT_KEY]: 90 }, outputOfBytes(COMPOSITION_TOOL_RETAINED_BYTES)), reasoningPart(COMPOSITION_WINDOWED_REASONING_TEXT)],
+      ...fillerMessages(3),
+    ])
+    await runTransform(hooks, bundle)
+
+    const lines = metricsLinesIn(metricsPath)
+    assert.equal(lines.length, STATS_LOG_FILE_LINES)
+    // toolPool: the two retained reads plus the dedup tombstone (naming
+    // the retained copy at message 4) that replaced msg0's 4000 bytes.
+    const dedupTombstoneBytes = dedupTombstoneFor(READ_TOOL, COMPOSITION_RETAINED_MSG_INDEX).length
+    assert.equal(lines[0].toolPoolBytes, COMPOSITION_TOOL_RETAINED_BYTES * COMPOSITION_TOOL_RETAINED_COUNT + dedupTombstoneBytes)
+    assert.equal(lines[0].textChars, COMPOSITION_TEXT_CHARS * COMPOSITION_TEXT_MESSAGE_COUNT + fillerMessagesChars(9) + COMPOSITION_COLLAPSE_TOMBSTONE_CHARS)
+    assert.equal(lines[0].reasoningInWindowBytes, COMPOSITION_WINDOWED_REASONING_TEXT.length)
+    assert.equal(lines[0].dedupedThisRun, DEDUP_TOMBSTONE_SINGLE_COUNT)
+    assert.equal(lines[0].reasoningExpiredThisRun, EXPIRED_REASONING_SINGLE_COUNT)
+
+    const stats = await lruStats(hooks, SESSION_ID)
+    const composition = stats.composition as Record<string, unknown>
+    assert.ok(composition !== undefined)
+    assert.equal(composition.toolPoolBytes, lines[0].toolPoolBytes)
+    assert.equal(composition.textChars, lines[0].textChars)
+    assert.equal(composition.reasoningInWindowBytes, COMPOSITION_WINDOWED_REASONING_TEXT.length)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("composition fields stay off quiet runs and off lru_stats before any run", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const stats = await lruStats(await loadPluginHooksWith({ manualMode: true }), SESSION_ID)
+    assert.equal(Object.hasOwn(stats, "composition"), false)
+
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const hooks = await loadPluginHooksWith({ manualMode: true, metricsLog: true, metricsPath, liveStatePath: stateDir })
+    await runTransform(hooks, buildBundle([[textPart(textOfChars(REHYDRA_PROBE_TEXT_CHARS))], ...fillerMessages(2)]))
+
+    // The text-only run is quiet (nothing eventful), so no line lands and
+    // the eventfulness gate stays the sole writer, composition included.
+    assert.equal(existsSync(metricsPath), false)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
 const ATTACHMENTS_STATE_KEY = "attachments"
 const ATTACHMENT_ID_KEY = "id"
 const ATTACHMENT_MESSAGE_ID_KEY = "messageID"
@@ -5536,6 +5621,20 @@ const MANUAL_FALSE_PIN_SUBJECT = "/data/manual-false-pin.txt"
 const MANUAL_PRESSURE_SUBJECT = "/data/manual-pressure.txt"
 const MANUAL_DEFAULT_BUDGET_SUBJECT = "/data/manual-default-budget.txt"
 const DRY_RUN_SECOND_PATH = "/data/dry-run-second.txt"
+const COMPOSITION_TEXT_CHARS = 240
+const COMPOSITION_WINDOWED_REASONING_TEXT = "windowed reasoning block"
+const COMPOSITION_TEXT_MESSAGE_COUNT = 4
+const COMPOSITION_TOOL_RETAINED_COUNT = 2
+const COMPOSITION_TOOL_COLD_BYTES = 4000
+const COMPOSITION_TOOL_RETAINED_BYTES = 3500
+const COMPOSITION_TOOL_CONTAINED_BYTES = 3000
+const COMPOSITION_PATH_A = "/data/composition-a.txt"
+const COMPOSITION_PATH_B = "/data/composition-b.txt"
+const COMPOSITION_RETAINED_MSG_INDEX = 4
+const DEDUP_TOMBSTONE_SINGLE_COUNT = 1
+const COMPOSITION_COLLAPSE_TOMBSTONE_CHARS = 141
+
+const fillerMessagesChars = (count: number): number => count * FILLER_TEXT_CHARS
 const MANUAL_OVERRIDE_BUDGET_SUBJECT = "/data/manual-override-budget.txt"
 const MANUAL_CAPTURED_LIMIT_SUBJECT = "/data/manual-captured-limit.txt"
 const MANUAL_HINT_SUBJECT = "/data/manual-hint.txt"

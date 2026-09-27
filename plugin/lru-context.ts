@@ -261,6 +261,7 @@ type RunOutcome = {
   reasoningExpired: ReasoningExpiry
   fenceEvicted: FenceEviction
   dryRun: DryRunResult | undefined
+  composition: RunComposition
 }
 
 type ReasoningExpiry = { parts: number; bytes: number; unique: number }
@@ -316,6 +317,10 @@ type SessionMetrics = {
   // The manual-mode dry run from this session's newest run: run-scoped
   // diagnostic state for lru_stats, never persisted, replaced every run.
   lastDryRun?: DryRunResult
+  // The newest run's composition (toolPoolBytes, textChars,
+  // reasoningInWindowBytes): run-scoped diagnostic state for lru_stats,
+  // never persisted, replaced every run.
+  lastComposition?: RunComposition
   // The newest fault-isolated failure on this session's transform: set by
   // the transform boundary when the body throws, surfaced through
   // lru_stats, never persisted, replaced by the next run's outcome.
@@ -864,6 +869,39 @@ const estimateTokens = (messages: MessageBundle[], charsPerToken: number): numbe
     }
   }
   return estimateTokensFromBytes(chars, charsPerToken)
+}
+
+type RunComposition = { toolPoolBytes: number; textChars: number; reasoningInWindowBytes: number }
+
+// The post-transform composition of one run's message list: live tool
+// outputs, text parts, and the reasoning still inside the recent window.
+// Called after every pass has edited the list, so the three sums are the
+// view the model actually receives; estimateTokens over the same list
+// then decomposes as approximately toolPoolBytes + textChars +
+// reasoningInWindowBytes plus attachments and small markers.
+const runCompositionOf = (messages: MessageBundle[], options: ResolvedOptions): RunComposition => {
+  const hotFromIndex = hotFromIndexOf(messages, options)
+  let toolPoolBytes = 0
+  let textChars = 0
+  let reasoningInWindowBytes = 0
+  for (let msgIndex = 0; msgIndex < messages.length; msgIndex += 1) {
+    const inHotWindow = msgIndex >= hotFromIndex
+    for (const part of messages[msgIndex].parts) {
+      if (part["type"] === TEXT_PART_TYPE) {
+        const text = part["text"]
+        if (typeof text === "string") textChars += text.length
+        continue
+      }
+      if (part["type"] === REASONING_PART_TYPE) {
+        const text = part[REASONING_TEXT_KEY]
+        if (inHotWindow && typeof text === "string") reasoningInWindowBytes += text.length
+        continue
+      }
+      const outputRef = completedOutputOf(part)
+      if (outputRef) toolPoolBytes += outputRef.output.length
+    }
+  }
+  return { toolPoolBytes, textChars, reasoningInWindowBytes }
 }
 
 const purgeErroredToolInputs = (messages: MessageBundle[], options: ResolvedOptions): void => {
@@ -1535,6 +1573,9 @@ const recordMetricsLine = async (
     modelContextTokensSource: budget.source,
     modelContextTokensModelKey: budget.modelKey ?? null,
     estimatedTokens: eviction.estimatedTokens,
+    toolPoolBytes: run.composition.toolPoolBytes,
+    textChars: run.composition.textChars,
+    reasoningInWindowBytes: run.composition.reasoningInWindowBytes,
     watermarkTokens: eviction.watermarkTokens,
     deficitTokens: eviction.deficitTokens,
     evictedThisRun: eviction.evicted.map((entry) => ({
@@ -1819,6 +1860,15 @@ const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
             wouldEvictSubjects: metrics.lastDryRun.wouldEvictSubjects.slice(0, source.options.rememberedEvictedSubjects),
           },
         }),
+    ...(metrics.lastComposition === undefined
+      ? {}
+      : {
+          composition: {
+            toolPoolBytes: metrics.lastComposition.toolPoolBytes,
+            textChars: metrics.lastComposition.textChars,
+            reasoningInWindowBytes: metrics.lastComposition.reasoningInWindowBytes,
+          },
+        }),
     ...(metrics.lastFault === undefined
       ? {}
       : { lastFault: { message: metrics.lastFault.message, at: new Date(metrics.lastFault.atMs).toISOString() } }),
@@ -2091,6 +2141,9 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
       ? measureDryRun(candidates, options, effectiveWatermarkTokens)
       : undefined
   const touchesThisRun = countPostEvictionTouches(sessionMetrics, eviction.appearances, options.minSubstringMatchChars)
+  // Composition reads the final post-transform list: every pass above has
+  // applied its edits, so the sums are what this request carries.
+  const composition = runCompositionOf(messages, options)
   const runOutcome: RunOutcome = {
     eviction,
     deduped: dedupedThisRun,
@@ -2102,9 +2155,11 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
     reasoningExpired: reasoningExpiredThisRun,
     fenceEvicted: fenceEvictedThisRun,
     dryRun,
+    composition,
   }
   recordRunOutcome(sessionMetrics, runOutcome, options.rememberedEvictedSubjects)
   sessionMetrics.lastDryRun = runOutcome.dryRun
+  sessionMetrics.lastComposition = runOutcome.composition
   storeHint(deps.hintBySession, sessionKey, eviction.hotSubjects, options.hintSubjects, options.hintSessions)
   await recordMetricsLine(options, sessionMetrics, sessionKey, budget, runOutcome)
   await recordLiveStateSnapshot(options, sessionKey, budget, sessionMetrics, sessionStash, eviction.hotSubjects, deps.pruneThrottle)
