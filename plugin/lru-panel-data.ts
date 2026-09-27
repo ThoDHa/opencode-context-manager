@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises"
+import { open, readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { DEFAULT_LIVE_STATE_DIR_BASENAME, DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_METRICS_FILE_BASENAME, TOTALS_KEYS, type TotalsKey } from "./lru-schema.ts"
@@ -179,6 +179,11 @@ export type LoadPanelDataOptions = {
   sessionID?: string
   recentEvictions?: number
   childSessionIDs?: readonly string[]
+  // A stateful incremental reader over one log path. Callers ticking the
+  // same path repeatedly (the sidebar poll) should hold one reader across
+  // calls so each load parses only appended bytes; without one, each call
+  // creates a fresh reader and behaves as a full read, today's behavior.
+  reader?: MetricsLogReader
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -288,10 +293,16 @@ export const parseMetricsLog = (content: string): PanelMetricsLine[] => {
 // enough to name its session scopes the tolerance to that session; a line
 // that does not parse at all contributes nothing. The strict parser
 // itself stays strict; tolerance lives only here.
-const tolerantMetricsLines = (content: string): PanelMetricsLine[] => {
-  const lines: PanelMetricsLine[] = []
-  const newestIndexBySession = new Map<string, number>()
-  const staleSessions = new Set<string>()
+// The tolerant aggregation, shared by the whole-file reader and the
+// incremental reader so there is one implementation and no lockstep pair:
+// raw lines are ingested into the caller's line list, and a stale session
+// (one carrying a line the strict parser rejects, whatever the reason)
+// collapses to its newest parseable line via one backward walk over the
+// retained list. `staleSessions` persists across incremental calls on the
+// reader: once a session is marked stale it stays stale, matching a cold
+// full read of the same content, where the marking line keeps rejecting
+// on every later re-read.
+const ingestLines = (content: string, lines: PanelMetricsLine[], staleSessions: Set<string>): void => {
   for (const raw of content.split("\n")) {
     const trimmed = raw.trim()
     if (trimmed.length === 0) continue
@@ -306,10 +317,25 @@ const tolerantMetricsLines = (content: string): PanelMetricsLine[] => {
       if (isRecord(parsed) && typeof parsed["session"] === "string") staleSessions.add(parsed["session"])
       continue
     }
-    newestIndexBySession.set(line.session, lines.length)
     lines.push(line)
   }
-  return lines.filter((line, index) => staleSessions.has(line.session) === false || newestIndexBySession.get(line.session) === index)
+  if (staleSessions.size === 0) return
+  const seenNewest = new Set<string>()
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const session = lines[index].session
+    if (staleSessions.has(session) === false) continue
+    if (seenNewest.has(session)) {
+      lines.splice(index, 1)
+      continue
+    }
+    seenNewest.add(session)
+  }
+}
+
+const tolerantMetricsLines = (content: string): PanelMetricsLine[] => {
+  const lines: PanelMetricsLine[] = []
+  ingestLines(content, lines, new Set())
+  return lines
 }
 
 export const readMetricsLog = async (path: string): Promise<PanelMetricsLine[]> => {
@@ -322,6 +348,82 @@ export const readMetricsLog = async (path: string): Promise<PanelMetricsLine[]> 
     throw error
   }
   return tolerantMetricsLines(content)
+}
+
+// Stateful incremental reader over one metrics log: each load stats the
+// file and reads only the bytes appended since the previous load, parsing
+// only the new lines; a shrink, an offset past the size, or an inode
+// change (rotation renamed the file, or a fresh file replaced it — the
+// size test alone misses a new generation larger than the old offset)
+// falls back to a full read from zero. The retained state is the full
+// parsed line list plus the persistent stale-session set: preserving
+// today's rendered output exactly (global runs = every parsed line,
+// session runs = the session's parsed line count, recentEvictions walking
+// the session's lines backward) requires the whole list, but only the NEW
+// bytes are re-parsed per load, and the parse was the cost the whole-file
+// read paid. ENOENT keeps the accumulated state, unbounded by design: it
+// covers the rotation rename tick, and a permanently deleted log leaves
+// the retained lines rendering in the sidebar until the TUI remounts —
+// accepted, since the snapshot path covers the session block meanwhile.
+// Tail-following limits accepted with it: an inode recycled by
+// delete-plus-recreate between ticks reads as an inode change (full
+// re-read, correct), and an in-place truncation regrown past the stored
+// offset between ticks reads as an append (the pre-truncation tail plus
+// regrown bytes ingest as parseable or rejected lines; the plugin's own
+// writers only append and rotate-by-rename, so neither occurs in
+// production).
+// A chunk ending mid-line (a torn append) makes that tail an unparseable
+// orphan naming no session, so it contributes nothing; the line's
+// remainder arrives in the next chunk as another orphan, and the whole
+// line recovers on the next full read (rotation bounds the loss to one
+// line's context in the panel views, whose snapshot path covers quiet
+// runs).
+export type MetricsLogReader = { load: () => Promise<PanelMetricsLine[]> }
+
+export const createMetricsLogReader = (path: string): MetricsLogReader => {
+  let lines: PanelMetricsLine[] = []
+  const staleSessions = new Set<string>()
+  let offset = 0
+  let inode: number | undefined = undefined
+  return {
+    load: async (): Promise<PanelMetricsLine[]> => {
+      try {
+        const handle = await open(path, "r")
+        try {
+          const info = await handle.stat()
+          const sameFile = inode !== undefined && info.ino === inode
+          if (sameFile && info.size >= offset) {
+            const length = info.size - offset
+            if (length > 0) {
+              const buffer = Buffer.alloc(length)
+              await handle.read(buffer, 0, length, offset)
+              ingestLines(buffer.toString("utf8"), lines, staleSessions)
+            }
+            offset = info.size
+          } else {
+            // The full branch commits the offset from the bytes actually
+            // read: the file can grow between the stat above and the read,
+            // and committing stat's size would make the next incremental
+            // load skip the growth. Committing byteLength re-ingests any
+            // growth as an ordinary append instead.
+            const buffer = await handle.readFile()
+            lines = []
+            staleSessions.clear()
+            const content = buffer.toString("utf8")
+            ingestLines(content, lines, staleSessions)
+            offset = Buffer.byteLength(content, "utf8")
+          }
+          inode = info.ino
+        } finally {
+          await handle.close()
+        }
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException | null)?.code
+        if (code !== "ENOENT") throw error
+      }
+      return lines
+    },
+  }
 }
 
 const parseSnapshotStash = (value: unknown): PanelSnapshotStash | undefined => {
@@ -517,6 +619,7 @@ export const loadPanelData = async (options: LoadPanelDataOptions = {}): Promise
   const sessionID = options.sessionID
   const childSessionIDs = options.childSessionIDs
   const recentEvictionsLimit = options.recentEvictions ?? DEFAULT_RECENT_EVICTIONS
+  const reader = options.reader ?? createMetricsLogReader(path)
   const snapshot = sessionID === undefined ? undefined : await readSessionSnapshot(stateDir, sessionID)
   const childSnapshots = childSessionIDs === undefined ? [] : await Promise.all(childSessionIDs.map((childID) => readSessionSnapshot(stateDir, childID)))
   const childPanels = (lines: PanelMetricsLine[]): SubagentPanelEntry[] | undefined =>
@@ -532,7 +635,7 @@ export const loadPanelData = async (options: LoadPanelDataOptions = {}): Promise
     })
   let lines: PanelMetricsLine[]
   try {
-    lines = await readMetricsLog(path)
+    lines = await reader.load()
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     const current =

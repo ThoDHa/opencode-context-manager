@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { mkdirSync, writeFileSync } from "node:fs"
+import { appendFileSync, mkdirSync, renameSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
@@ -8,6 +8,7 @@ import {
   DEFAULT_LIVE_STATE_DIR,
   DEFAULT_METRICS_PATH,
   budgetSourceLabel,
+  createMetricsLogReader,
   formatBytes,
   formatTokenCount,
   globalTotals,
@@ -71,6 +72,7 @@ import {
 
 const RECENT_LIMIT = 2
 const EVICTION_COUNT_PER_LINE = 3
+const SINGLE_LINE_COUNT = 1
 const LINE_COUNT_TWO = 2
 const LINE_COUNT_THREE = 3
 const PARSED_LINE_COUNT = 2
@@ -221,6 +223,178 @@ test("parseTotals defaults an absent dedupedBytes to zero while still rejecting 
 
 test("the fixture totals carry exactly the shared schema keys at runtime", () => {
   assert.deepEqual(Object.keys(makeTotals()).sort(), [...TOTALS_KEYS].sort())
+})
+
+const appendLine = (path: string, line: PanelMetricsLine): void => {
+  appendFileSync(path, `${JSON.stringify(line)}\n`)
+}
+
+test("the incremental reader matches the full read after appends", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "metrics.jsonl")
+    writeFileSync(path, serialize([makeLine()]))
+    const reader = createMetricsLogReader(path)
+    const first = await reader.load()
+    assert.equal(first.length, SINGLE_LINE_COUNT)
+
+    appendLine(path, makeLine({ session: SESSION_B }))
+    const second = await reader.load()
+    assert.equal(second.length, PARSED_LINE_COUNT)
+    assert.equal(second[1].session, SESSION_B)
+
+    // A cold full read produces the identical line list.
+    const cold = await readMetricsLog(path)
+    assert.deepEqual(second, cold)
+  })
+})
+
+test("the incremental reader falls back to a full read when the file shrinks (rotation)", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "metrics.jsonl")
+    writeFileSync(path, serialize([makeLine(), makeLine({ session: SESSION_B }), makeLine()]))
+    const reader = createMetricsLogReader(path)
+    const first = await reader.load()
+    assert.equal(first.length, LINE_COUNT_THREE)
+
+    // Rotation replaced the file with a fresh generation holding one line.
+    writeFileSync(path, serialize([makeLine({ ts: LOG_LINE_TS_NEWER })]))
+    const second = await reader.load()
+
+    assert.equal(second.length, SINGLE_LINE_COUNT)
+    assert.deepEqual(second, [makeLine({ ts: LOG_LINE_TS_NEWER })])
+  })
+})
+
+test("the incremental reader falls back to a full re-read when rotation swaps in a larger same-path generation", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "metrics.jsonl")
+    writeFileSync(path, serialize([makeLine()]))
+    const reader = createMetricsLogReader(path)
+    const first = await reader.load()
+    assert.equal(first.length, SINGLE_LINE_COUNT)
+
+    // Rotation by rename: the new generation is larger than the old
+    // offset, so the size-greater check alone would read only its tail;
+    // the inode mismatch must take the full-re-read branch.
+    const generationPath = join(dir, "next-generation.jsonl")
+    writeFileSync(generationPath, serialize([makeLine({ ts: LOG_LINE_TS_NEWER }), makeLine({ session: SESSION_B, ts: LOG_LINE_TS_NEWER }), makeLine({ ts: LOG_LINE_TS_NEWER })]))
+    renameSync(generationPath, path)
+
+    const second = await reader.load()
+
+    assert.equal(second.length, LINE_COUNT_THREE)
+    assert.deepEqual(second.map((line) => line.session), [SESSION_A, SESSION_B, SESSION_A])
+  })
+})
+
+test("the incremental reader preserves tolerance semantics when a stale-marking line arrives in a later chunk", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "metrics.jsonl")
+    writeFileSync(path, serialize([makeLine(), makeLine({ session: SESSION_B })]))
+    const reader = createMetricsLogReader(path)
+    const first = await reader.load()
+    assert.equal(first.length, LINE_COUNT_TWO)
+
+    // The appended chunk carries a line the strict parser rejects for
+    // SESSION_A: from this point on, SESSION_A collapses to its newest
+    // parseable line while SESSION_B keeps every line.
+    appendLine(path, makeLine({ totals: makePreSchemaTotals() }))
+
+    const second = await reader.load()
+
+    assert.equal(second.length, LINE_COUNT_TWO)
+    assert.deepEqual(second.map((line) => line.session), [SESSION_A, SESSION_B])
+    assert.deepEqual(second[0].totals, makeTotals())
+    const expectedFullRead = await readMetricsLog(path)
+    assert.deepEqual(second, expectedFullRead)
+  })
+})
+
+test("the incremental reader collapses a session whose only retained line predates its rejecting line in a later chunk", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "metrics.jsonl")
+    writeFileSync(path, serialize([makeLine()]))
+    const reader = createMetricsLogReader(path)
+    const first = await reader.load()
+    assert.equal(first.length, SINGLE_LINE_COUNT)
+
+    // Shape one from the review: the retained list holds [A1] when the
+    // chunk appends only a rejecting line for A. A1 is parseable, so the
+    // cold read of the same content keeps it; the persistent stale set
+    // matters for divergence only when A has multiple retained lines
+    // (the sibling test). Here the assertion is full-read parity: A1
+    // stays, and A is now a stale session so any future A1-then-rejecting
+    // sequence collapses exactly as a cold read would.
+    appendLine(path, makeLine({ totals: makePreSchemaTotals() }))
+
+    const second = await reader.load()
+
+    assert.equal(second.length, SINGLE_LINE_COUNT)
+    const expectedFullRead = await readMetricsLog(path)
+    assert.deepEqual(second, expectedFullRead)
+
+    // The divergence the persistent set closes: a third load with nothing
+    // new still matches, and a later parseable A2 collapses A1 (kept
+    // newest-only for the stale session) matching the cold read.
+    appendLine(path, makeLine({ ts: LOG_LINE_TS_NEWER }))
+    const third = await reader.load()
+    assert.equal(third.length, SINGLE_LINE_COUNT)
+    assert.deepEqual(third, [makeLine({ ts: LOG_LINE_TS_NEWER })])
+    const expectedThirdFullRead = await readMetricsLog(path)
+    assert.deepEqual(third, expectedThirdFullRead)
+  })
+})
+
+test("the incremental reader collapses the older line when a stale-marking line lands between two parseable lines of one session", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "metrics.jsonl")
+    writeFileSync(path, serialize([makeLine()]))
+    const reader = createMetricsLogReader(path)
+    const first = await reader.load()
+    assert.equal(first.length, SINGLE_LINE_COUNT)
+
+    // Shape two from the review: retained [A1], then the chunk appends
+    // rejecting X(A) followed by a parseable A2. The backward walk keeps
+    // A2 (the newest) and splices A1, matching the cold read.
+    appendLine(path, makeLine({ totals: makePreSchemaTotals() }))
+    appendLine(path, makeLine({ ts: LOG_LINE_TS_NEWER }))
+
+    const second = await reader.load()
+
+    assert.equal(second.length, SINGLE_LINE_COUNT)
+    assert.deepEqual(second, [makeLine({ ts: LOG_LINE_TS_NEWER })])
+    const expectedFullRead = await readMetricsLog(path)
+    assert.deepEqual(second, expectedFullRead)
+  })
+})
+
+test("loadPanelData with a held reader produces identical output across incremental loads", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "metrics.jsonl")
+    writeFileSync(path, serialize([makeLine(), makeLine({ session: SESSION_B })]))
+    const reader = createMetricsLogReader(path)
+
+    const first = await loadPanelData({ path, sessionID: SESSION_A, reader })
+    appendLine(path, makeLine())
+    const second = await loadPanelData({ path, sessionID: SESSION_A, reader })
+
+    assert.equal(first.global.runs, LINE_COUNT_TWO)
+    assert.equal(second.global.runs, LINE_COUNT_THREE)
+    assert.equal(second.global.sessions, LINE_COUNT_TWO)
+    assert.deepEqual(second.current?.totals, makeTotals())
+    // Full-read parity: the reader retains all parseable lines, so the
+    // eviction footer walks both SESSION_A lines exactly as a cold read
+    // of the same file would.
+    assert.deepEqual(second.current?.recentEvictions, [
+      makeLine().evictedThisRun[0],
+      makeLine().evictedThisRun[0],
+    ])
+
+    // The readerless call path stays a full read and matches exactly.
+    const readerless = await loadPanelData({ path, sessionID: SESSION_A })
+    assert.equal(readerless.global.runs, LINE_COUNT_THREE)
+    assert.deepEqual(readerless.current?.totals, second.current?.totals)
+  })
 })
 
 test("a log mixing one pre-upgrade line with current lines yields the current newest totals and a global count that skips the stale line", async () => {

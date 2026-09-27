@@ -13,6 +13,8 @@
 import type { TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
 import { createSignal, onCleanup, onMount } from "solid-js"
 import {
+  createMetricsLogReader,
+  DEFAULT_METRICS_PATH,
   filterSubagentChildren,
   loadPanelData,
   panelRows,
@@ -103,6 +105,10 @@ const SidebarEntry = (props: SidebarEntryProps) => {
   const [rows, setRows] = createSignal<PanelRow[]>([])
   let disposed = false
   onMount(() => {
+    // One incremental reader across the component's ticks: each poll stats
+    // the log and parses only appended bytes; rotation or shrink falls
+    // back to a full re-read inside the reader.
+    const reader = createMetricsLogReader(DEFAULT_METRICS_PATH)
     const refresh = async (): Promise<void> => {
       let next: PanelRow[] = []
       try {
@@ -111,7 +117,7 @@ const SidebarEntry = (props: SidebarEntryProps) => {
         // reads; what renders is the builder's call over all fetched children.
         const kept = filterSubagentChildren(children)
         const childSessionIDs = kept.length > 0 ? kept.map((child) => child.id) : undefined
-        const data = await loadPanelData({ sessionID: props.sessionID, childSessionIDs })
+        const data = await loadPanelData({ sessionID: props.sessionID, childSessionIDs, reader })
         if (data.current !== undefined) {
           next = sidebarRows(data, sidebarSubagentsGroup(children, data))
         }
