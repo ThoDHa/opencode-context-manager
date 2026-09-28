@@ -4,8 +4,14 @@ import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
 
-import lruContextFactory from "../plugin/lru-context.ts"
+import lruContextFactory, {
+  DEFAULT_METRICS_ROTATION_MAX_BYTES,
+  METRIC_NUMBER_KEYS,
+  METRICS_CURSOR_KEYS,
+  RAW_COUNTER_KEYS,
+} from "../plugin/lru-context.ts"
 import { loadPanelData } from "../plugin/lru-panel-data.ts"
+import { TOTALS_KEYS } from "../plugin/lru-schema.ts"
 
 const TRANSFORM_HOOK = "experimental.chat.messages.transform"
 const CHAT_PARAMS_HOOK = "chat.params"
@@ -3158,7 +3164,6 @@ const METRICS_PROBE_MISS_SUBJECT = "/data/metrics-probe-miss.txt"
 const METRICS_LINES_AFTER_RELOAD = 2
 const METRICS_LINES_AFTER_RECOVERY = 1
 const METRICS_ROTATION_SUFFIX = ".1"
-const DEFAULT_METRICS_ROTATION_MAX_BYTES = 20 * 1024 * 1024
 const DEFAULT_METRICS_MIN_LINE_INTERVAL_MS = 60 * 1000
 const METRICS_MIN_LINE_INTERVAL_INVALID_VALUES = [-1, Number.NaN, Number.POSITIVE_INFINITY, "soon"]
 const METRICS_COALESCING_DISABLED_MS = 0
@@ -3215,6 +3220,22 @@ const STATS_ZEROED_COUNTERS = {
   fenceEvicted: 0,
 }
 const STATS_LOG_FILE_LINES = 1
+
+// Producer-direction schema lockstep, pinned at runtime because type
+// stripping makes the core's compile-time exhaustiveness assertion inert:
+// the zeroed fixture's key set must equal the persisted totals schema
+// exactly (a totals key missing from the fixture would make totalsOf emit
+// a key no assertion covers), and the producer's numeric SessionMetrics
+// inventory must be raw counters plus the documented cursors exactly — a
+// numeric field lacking a schema key fails here instead of silently
+// skipping persistence.
+test("the zeroed counters fixture, the totals schema, and the producer's numeric metrics stay in lockstep", () => {
+  const fixtureKeys = Object.keys(STATS_ZEROED_COUNTERS).sort()
+  const totalsKeys = [...TOTALS_KEYS].sort()
+  assert.deepEqual(fixtureKeys, totalsKeys)
+  const expectedMetricKeys = [...RAW_COUNTER_KEYS, ...METRICS_CURSOR_KEYS].sort()
+  assert.deepEqual([...METRIC_NUMBER_KEYS], expectedMetricKeys)
+})
 
 type StatsToolDefinition = { execute: (args: unknown, context: unknown) => Promise<unknown> }
 

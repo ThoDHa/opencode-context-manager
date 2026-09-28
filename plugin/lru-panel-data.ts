@@ -41,6 +41,25 @@ export const canRegisterSidebar = (api: unknown): boolean => {
   }
 }
 
+// Same guarded detection for the keymap registry the panel command needs:
+// a missing or hostile keymap means no command registration, never a
+// throw into the TUI mount path.
+export const canRegisterKeymap = (api: unknown): boolean => {
+  if (isRecord(api) === false) return false
+  let keymap: unknown
+  try {
+    keymap = api["keymap"]
+  } catch {
+    return false
+  }
+  if (isRecord(keymap) === false) return false
+  try {
+    return typeof keymap["registerLayer"] === "function"
+  } catch {
+    return false
+  }
+}
+
 export const SUBAGENT_FALLBACK_TYPE = "subagent"
 
 export type SubagentChild = {

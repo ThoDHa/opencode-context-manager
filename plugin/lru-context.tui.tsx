@@ -13,6 +13,7 @@
 import type { TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
 import { createSignal, onCleanup, onMount } from "solid-js"
 import {
+  canRegisterKeymap,
   canRegisterSidebar,
   createMetricsLogReader,
   DEFAULT_METRICS_PATH,
@@ -139,21 +140,23 @@ const SidebarEntry = (props: SidebarEntryProps) => {
 }
 
 const tui: TuiPluginModule["tui"] = async (api, options) => {
-  api.keymap.registerLayer({
-    commands: [
-      {
-        namespace: COMMAND_NAMESPACE,
-        name: COMMAND_NAME,
-        title: COMMAND_TITLE,
-        desc: COMMAND_DESCRIPTION,
-        category: COMMAND_CATEGORY,
-        slashName: SLASH_NAME,
-        run: () => {
-          openPanelSafely(api)
+  if (canRegisterKeymap(api)) {
+    api.keymap.registerLayer({
+      commands: [
+        {
+          namespace: COMMAND_NAMESPACE,
+          name: COMMAND_NAME,
+          title: COMMAND_TITLE,
+          desc: COMMAND_DESCRIPTION,
+          category: COMMAND_CATEGORY,
+          slashName: SLASH_NAME,
+          run: () => {
+            openPanelSafely(api)
+          },
         },
-      },
-    ],
-  })
+      ],
+    })
+  }
   if (resolveSidebarEnabled(options?.sidebarEnabled) && canRegisterSidebar(api)) {
     const subagentsEnabled = resolveSidebarSubagents(options?.sidebarSubagents)
     api.slots.register({

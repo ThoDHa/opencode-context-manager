@@ -8,6 +8,7 @@ import {
   DEFAULT_LIVE_STATE_DIR,
   DEFAULT_METRICS_PATH,
   budgetSourceLabel,
+  canRegisterKeymap,
   canRegisterSidebar,
   createMetricsLogReader,
   formatBytes,
@@ -311,6 +312,34 @@ test("the incremental reader preserves tolerance semantics when a stale-marking 
   })
 })
 
+// Shape one: strict-session retention across two loads, then a
+// rejecting-only chunk collapses session A to newest-only.
+test("the incremental reader retains two parseable lines for a strict session until a rejecting line collapses it to newest-only", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "metrics.jsonl")
+    // Two parseable SESSION_A lines across two loads (the strict-session
+    // retention the parity invariant rests on), then a rejecting-only
+    // chunk for A: the retained state must collapse to the newest A line,
+    // equal to readMetricsLog over the same full content.
+    writeFileSync(path, serialize([makeLine()]))
+    const reader = createMetricsLogReader(path)
+    const first = await reader.load()
+    assert.equal(first.length, SINGLE_LINE_COUNT)
+
+    appendLine(path, makeLine({ ts: LOG_LINE_TS_NEWER }))
+    const two = await reader.load()
+    assert.equal(two.length, LINE_COUNT_TWO)
+
+    appendLine(path, makeLine({ totals: makePreSchemaTotals() }))
+    const third = await reader.load()
+
+    assert.equal(third.length, SINGLE_LINE_COUNT)
+    assert.deepEqual(third, [makeLine({ ts: LOG_LINE_TS_NEWER })])
+    const expectedFullRead = await readMetricsLog(path)
+    assert.deepEqual(third, expectedFullRead)
+  })
+})
+
 test("the incremental reader collapses a session whose only retained line predates its rejecting line in a later chunk", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "metrics.jsonl")
@@ -319,7 +348,7 @@ test("the incremental reader collapses a session whose only retained line predat
     const first = await reader.load()
     assert.equal(first.length, SINGLE_LINE_COUNT)
 
-    // Shape one from the review: the retained list holds [A1] when the
+    // Reviewer's shape two: the retained list holds [A1] when the
     // chunk appends only a rejecting line for A. A1 is parseable, so the
     // cold read of the same content keeps it; the persistent stale set
     // matters for divergence only when A has multiple retained lines
@@ -688,6 +717,22 @@ test("canRegisterSidebar accepts only an api object whose slots.register is call
   assert.equal(canRegisterSidebar(throwingSlots), false)
   const throwingRegister = { slots: Object.create(null, { register: { get: () => { throw new Error("register getter exploded") } } }) }
   assert.equal(canRegisterSidebar(throwingRegister), false)
+})
+
+test("canRegisterKeymap accepts only an api object whose keymap.registerLayer is callable", () => {
+  assert.equal(canRegisterKeymap({ keymap: { registerLayer: () => {} } }), true)
+  assert.equal(canRegisterKeymap({ keymap: { registerLayer: undefined } }), false)
+  assert.equal(canRegisterKeymap({ keymap: {} }), false)
+  assert.equal(canRegisterKeymap({ keymap: "yes" }), false)
+  assert.equal(canRegisterKeymap({}), false)
+  assert.equal(canRegisterKeymap(null), false)
+  assert.equal(canRegisterKeymap("keymap"), false)
+  assert.equal(canRegisterKeymap(42), false)
+  assert.equal(canRegisterKeymap(undefined), false)
+  const throwingKeymap = Object.create(null, { keymap: { get: () => { throw new Error("keymap getter exploded") } } })
+  assert.equal(canRegisterKeymap(throwingKeymap), false)
+  const throwingRegisterLayer = { keymap: Object.create(null, { registerLayer: { get: () => { throw new Error("registerLayer getter exploded") } } }) }
+  assert.equal(canRegisterKeymap(throwingRegisterLayer), false)
 })
 
 test("the default metrics path matches the plugin's log location", () => {

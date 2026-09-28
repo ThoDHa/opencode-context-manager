@@ -115,7 +115,7 @@ const PRUNE_SCAN_THROTTLE_DISABLED = 0
 // older lines rotated out permanently within days; coalescing cut that
 // rate by an estimated 70-85 percent, so two generations now hold roughly
 // three weeks at the old rate and several times that at the current one.
-const DEFAULT_METRICS_ROTATION_MAX_BYTES = 20 * 1024 * 1024
+export const DEFAULT_METRICS_ROTATION_MAX_BYTES = 20 * 1024 * 1024
 const METRICS_ROTATION_DISABLED_MAX_BYTES = 0
 const METRICS_ROTATION_SUFFIX = ".1"
 const DEFAULT_METRICS_MIN_LINE_INTERVAL_MS = SECONDS_PER_MINUTE * MS_PER_SECOND
@@ -339,7 +339,7 @@ type MetricsStore = Map<string, SessionMetrics>
 // assertion below so a renamed or removed counter fails to compile here
 // instead of silently missing its seed. The runtime seeder iterates this
 // same list.
-const RAW_COUNTER_KEYS = SCHEMA_RAW_COUNTER_KEYS
+export const RAW_COUNTER_KEYS: readonly RawCounterKey[] = Object.freeze(SCHEMA_RAW_COUNTER_KEYS)
 type RawCounterKey = SchemaRawCounterKey
 
 // Two-directional exhaustiveness: every number-valued SessionMetrics key
@@ -357,7 +357,8 @@ type RawCounterKey = SchemaRawCounterKey
 type NumberValuedSessionMetricKey = {
   [K in keyof SessionMetrics]-?: SessionMetrics[K] extends number ? K : never
 }[keyof SessionMetrics]
-type MetricsCursorKey = "touchScanThrough" | "stashReadsLoggedThrough"
+export type MetricsCursorKey = "touchScanThrough" | "stashReadsLoggedThrough"
+export const METRICS_CURSOR_KEYS: readonly MetricsCursorKey[] = ["touchScanThrough", "stashReadsLoggedThrough"]
 type UnseededMetricKeys = Exclude<Exclude<NumberValuedSessionMetricKey, MetricsCursorKey>, RawCounterKey>
 type AssertEveryMetricSeeded = UnseededMetricKeys extends never ? true : never
 const everyMetricIsSeeded: AssertEveryMetricSeeded = true
@@ -1279,6 +1280,22 @@ const createSessionMetrics = (): SessionMetrics => ({
   dedupedPairKeys: [],
   stashReadsLoggedThrough: 0,
 })
+
+// Runtime inventory of SessionMetrics's numeric keys, derived from a real
+// seeded entry: the runtime artifact the schema-lockstep pin asserts
+// against (raw counters plus the two cursors), since type stripping makes
+// the compile-time exhaustiveness assertion inert. The cursors are
+// required numeric fields on SessionMetrics, so the seeded entry already
+// carries them.
+const seededMetrics = createSessionMetrics()
+// Type escape, same justification as zeroedRawCounters: SessionMetrics's
+// key set is asserted against the schema list at authoring time, but the
+// type system cannot express that structural overlap for keyed access.
+export const METRIC_NUMBER_KEYS: readonly string[] = Object.freeze(
+  Object.keys(seededMetrics)
+    .filter((key) => typeof (seededMetrics as Record<string, unknown>)[key] === "number")
+    .sort(),
+)
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)

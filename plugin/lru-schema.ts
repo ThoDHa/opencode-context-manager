@@ -13,7 +13,7 @@ export const DEFAULT_LIVE_STATE_DIR_BASENAME = "lru-state"
 // a finite number in every persisted record: the producer seeds from this
 // list, the parser requires every key, so a new counter is added here and
 // both sides pick it up.
-export const RAW_COUNTER_KEYS = [
+export const RAW_COUNTER_KEYS = Object.freeze([
   "evictions",
   "bytesReclaimed",
   "stashHits",
@@ -29,7 +29,7 @@ export const RAW_COUNTER_KEYS = [
   "reasoningExpiredUnique",
   "postEvictionTouches",
   "fenceEvicted",
-] as const
+] as const)
 
 export type RawCounterKey = (typeof RAW_COUNTER_KEYS)[number]
 
@@ -37,15 +37,15 @@ export type RawCounterKey = (typeof RAW_COUNTER_KEYS)[number]
 // the charsPerToken factor (the totalsOf map in lru-context.ts names each
 // derived key's source byte counter); the parser requires them like raw
 // keys, so the full totals shape is RawCounterKey plus these.
-export const DERIVED_COUNTER_KEYS = [
+export const DERIVED_COUNTER_KEYS = Object.freeze([
   "evictionTokensSaved",
   "dedupTokensSaved",
   "collapsedWindowTokensSaved",
   "reasoningTokensSaved",
-] as const
+] as const)
 
 export type DerivedCounterKey = (typeof DERIVED_COUNTER_KEYS)[number]
 
-export const TOTALS_KEYS = [...RAW_COUNTER_KEYS, ...DERIVED_COUNTER_KEYS] as const
+export const TOTALS_KEYS = Object.freeze([...RAW_COUNTER_KEYS, ...DERIVED_COUNTER_KEYS] as const)
 
 export type TotalsKey = (typeof TOTALS_KEYS)[number]
