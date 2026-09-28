@@ -4,7 +4,7 @@ import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
 
-import contextManagerFactory, {
+import contextManagerEntry, {
   DEFAULT_INGESTION_HYGIENE_ROTATION_MAX_BYTES,
   DEFAULT_METRICS_ROTATION_MAX_BYTES,
   METRIC_NUMBER_KEYS,
@@ -12,7 +12,9 @@ import contextManagerFactory, {
   RAW_COUNTER_KEYS,
 } from "../plugin/context-manager.ts"
 import { loadPanelData, PANEL_COMMAND_CATEGORY, PANEL_COMMAND_NAME, PANEL_COMMAND_NAMESPACE, PANEL_COMMAND_SLASH_NAME } from "../plugin/panel-data.ts"
-import { TOTALS_KEYS } from "../plugin/schema.ts"
+import { PLUGIN_ID, TOTALS_KEYS } from "../plugin/schema.ts"
+
+const contextManagerFactory = contextManagerEntry.server
 
 const TRANSFORM_HOOK = "experimental.chat.messages.transform"
 const CHAT_PARAMS_HOOK = "chat.params"
@@ -7979,4 +7981,13 @@ test("the panel command registers under the context slash name and command id", 
   assert.equal(PANEL_COMMAND_NAME, "context.panel")
   assert.equal(PANEL_COMMAND_NAMESPACE, "palette")
   assert.equal(PANEL_COMMAND_CATEGORY, "Context")
+})
+
+test("the plugin entry exports the v1 module object with the shared id and the server factory", () => {
+  assert.equal(typeof contextManagerEntry, "object")
+  assert.ok(contextManagerEntry !== null)
+  assert.equal(typeof PLUGIN_ID, "string")
+  assert.ok(PLUGIN_ID.length > 0)
+  assert.equal(contextManagerEntry.id, PLUGIN_ID)
+  assert.equal(typeof contextManagerEntry.server, "function")
 })

@@ -36,8 +36,8 @@ import {
   type PanelRowTone,
   type SubagentChild,
 } from "./panel-data.ts"
+import { PLUGIN_ID } from "./schema.ts"
 
-const PLUGIN_ID = "context-manager"
 const DIALOG_SIZE = "large"
 const SIDEBAR_SLOT_ORDER = 600
 const SIDEBAR_REFRESH_MS = 5000

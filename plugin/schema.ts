@@ -1,13 +1,17 @@
 // Single source of truth for the metrics totals schema shared by the
 // producer (context-manager.ts: SessionMetrics seeding, CumulativeCounters,
-// totalsOf) and the parser (panel-data.ts: PanelTotals, parseTotals),
-// plus the default path constants both files re-declared. Zero imports:
-// both consumers stay dependency-free, and a counter added here reaches
-// both sides in one edit instead of a six-file lockstep.
+// totalsOf), the parser (panel-data.ts: PanelTotals, parseTotals), and the
+// TUI entry (context-manager.tui.tsx: PLUGIN_ID), plus the default path
+// constants from which the producer and parser each build their default
+// paths. Zero imports: every consumer stays dependency-free, and a counter
+// added here reaches both sides in one edit instead of a six-file lockstep.
 
 export const DEFAULT_METRICS_DIR_SEGMENTS = [".local", "share", "opencode"]
 export const DEFAULT_METRICS_FILE_BASENAME = "context-metrics.jsonl"
 export const DEFAULT_LIVE_STATE_DIR_BASENAME = "context-state"
+
+// Shared by both entry modules so their registrations never drift.
+export const PLUGIN_ID = "context-manager"
 
 // Raw counters a session's persisted totals carry and seed. A key must be
 // a finite number in every persisted record: the producer seeds from this

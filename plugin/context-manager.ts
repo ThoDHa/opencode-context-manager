@@ -1,11 +1,12 @@
 import { appendFile, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
-import type { Plugin } from "@opencode-ai/plugin"
+import type { Plugin, PluginModule } from "@opencode-ai/plugin"
 import {
   DEFAULT_LIVE_STATE_DIR_BASENAME,
   DEFAULT_METRICS_DIR_SEGMENTS,
   DEFAULT_METRICS_FILE_BASENAME,
+  PLUGIN_ID,
   RAW_COUNTER_KEYS as SCHEMA_RAW_COUNTER_KEYS,
   TOTALS_KEYS,
   type DerivedCounterKey as TotalsDerivedKey,
@@ -2583,7 +2584,7 @@ const migrateLegacyDefaultPaths = async (raw: ContextManagerOptions): Promise<vo
   }
 }
 
-export default (async (_input, rawOptions) => {
+const server = (async (_input, rawOptions) => {
   const raw = (rawOptions ?? {}) as ContextManagerOptions
   await migrateLegacyDefaultPaths(raw)
   const options = resolveOptions(raw)
@@ -2735,3 +2736,9 @@ export default (async (_input, rawOptions) => {
     },
   }
 }) satisfies Plugin
+
+// The v1 object entrypoint: opencode's plugin loader (1.18.29+) reads
+// `mod.default` and, on an object carrying `id`/`server`, skips the legacy
+// scan that demands every runtime export be a function. The named constant
+// exports above are never scanned on this path.
+export default { id: PLUGIN_ID, server } satisfies PluginModule

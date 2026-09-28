@@ -3,7 +3,9 @@
 // and `make test` stays zero-skip.
 import { performance } from "node:perf_hooks"
 
-import contextManagerFactory from "../plugin/context-manager.ts"
+import contextManagerEntry from "../plugin/context-manager.ts"
+
+const contextManagerFactory = contextManagerEntry.server
 
 const TRANSFORM_HOOK = "experimental.chat.messages.transform"
 const SYSTEM_TRANSFORM_HOOK = "experimental.chat.system.transform"

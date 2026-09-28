@@ -26,7 +26,7 @@ import {
   type PanelMetricsLine,
 } from "../plugin/panel-data.ts"
 import { TOTALS_KEYS } from "../plugin/schema.ts"
-import contextManagerFactory from "../plugin/context-manager.ts"
+import contextManagerEntry from "../plugin/context-manager.ts"
 import {
   BUDGET_TOKENS_MODEL,
   BUDGET_TOKENS_SMALL,
@@ -71,6 +71,8 @@ import {
   withTempDir,
   writeSnapshot,
 } from "./panel-fixtures.ts"
+
+const contextManagerFactory = contextManagerEntry.server
 
 const RECENT_LIMIT = 2
 const EVICTION_COUNT_PER_LINE = 3
