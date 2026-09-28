@@ -6,8 +6,8 @@
 // both sides in one edit instead of a six-file lockstep.
 
 export const DEFAULT_METRICS_DIR_SEGMENTS = [".local", "share", "opencode"]
-export const DEFAULT_METRICS_FILE_BASENAME = "lru-metrics.jsonl"
-export const DEFAULT_LIVE_STATE_DIR_BASENAME = "lru-state"
+export const DEFAULT_METRICS_FILE_BASENAME = "context-metrics.jsonl"
+export const DEFAULT_LIVE_STATE_DIR_BASENAME = "context-state"
 
 // Raw counters a session's persisted totals carry and seed. A key must be
 // a finite number in every persisted record: the producer seeds from this

@@ -19,6 +19,12 @@ import {
   DEFAULT_METRICS_PATH,
   filterSubagentChildren,
   loadPanelData,
+  PANEL_COMMAND_CATEGORY,
+  PANEL_COMMAND_DESCRIPTION,
+  PANEL_COMMAND_NAME,
+  PANEL_COMMAND_NAMESPACE,
+  PANEL_COMMAND_SLASH_NAME,
+  PANEL_COMMAND_TITLE,
   panelRows,
   resolveSidebarEnabled,
   resolveSidebarSubagents,
@@ -31,13 +37,7 @@ import {
   type SubagentChild,
 } from "./panel-data.ts"
 
-const PLUGIN_ID = "lru-context"
-const COMMAND_NAMESPACE = "palette"
-const COMMAND_NAME = "lru.panel"
-const COMMAND_TITLE = "Context Manager"
-const COMMAND_DESCRIPTION = "Open the Context Manager's session panel"
-const COMMAND_CATEGORY = "LRU"
-const SLASH_NAME = "lru"
+const PLUGIN_ID = "context-manager"
 const DIALOG_SIZE = "large"
 const SIDEBAR_SLOT_ORDER = 600
 const SIDEBAR_REFRESH_MS = 5000
@@ -84,7 +84,7 @@ const openPanel = async (api: TuiPluginApi): Promise<void> => {
 const openPanelSafely = (api: TuiPluginApi): void => {
   openPanel(api).catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error)
-    api.ui.toast({ variant: "error", title: COMMAND_TITLE, message: `panel failed to open: ${message}` })
+    api.ui.toast({ variant: "error", title: PANEL_COMMAND_TITLE, message: `panel failed to open: ${message}` })
   })
 }
 
@@ -144,12 +144,12 @@ const tui: TuiPluginModule["tui"] = async (api, options) => {
     api.keymap.registerLayer({
       commands: [
         {
-          namespace: COMMAND_NAMESPACE,
-          name: COMMAND_NAME,
-          title: COMMAND_TITLE,
-          desc: COMMAND_DESCRIPTION,
-          category: COMMAND_CATEGORY,
-          slashName: SLASH_NAME,
+          namespace: PANEL_COMMAND_NAMESPACE,
+          name: PANEL_COMMAND_NAME,
+          title: PANEL_COMMAND_TITLE,
+          desc: PANEL_COMMAND_DESCRIPTION,
+          category: PANEL_COMMAND_CATEGORY,
+          slashName: PANEL_COMMAND_SLASH_NAME,
           run: () => {
             openPanelSafely(api)
           },

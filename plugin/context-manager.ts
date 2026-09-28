@@ -1,6 +1,6 @@
 import { appendFile, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import type { Plugin } from "@opencode-ai/plugin"
 import {
   DEFAULT_LIVE_STATE_DIR_BASENAME,
@@ -105,13 +105,16 @@ const TOUCH_SCAN_INITIAL_WATERMARK = -1
 const DEFAULT_REMEMBERED_REASONING_PARTS = 4096
 const DEFAULT_REMEMBERED_DEDUP_PAIRS = 4096
 const DEFAULT_METRICS_LOG_ENABLED = true
-const DEFAULT_METRICS_PATH = join(homedir(), ...DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_METRICS_FILE_BASENAME)
+// The default locations derive per resolution instead of once at module
+// load, so the migration below and the resolved options always agree on
+// where the default paths are even if the process home is relocated.
+const defaultMetricsPath = (): string => join(homedir(), ...DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_METRICS_FILE_BASENAME)
 const DEFAULT_LIVE_STATE_LOG_ENABLED = true
-const DEFAULT_LIVE_STATE_DIR = join(homedir(), ...DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_LIVE_STATE_DIR_BASENAME)
+const defaultLiveStateDir = (): string => join(homedir(), ...DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_LIVE_STATE_DIR_BASENAME)
 const DEFAULT_INGESTION_HYGIENE = true
 const DEFAULT_INGESTION_HYGIENE_COPY = true
-const DEFAULT_INGESTION_HYGIENE_FILE_BASENAME = "lru-hygiene.jsonl"
-const DEFAULT_INGESTION_HYGIENE_PATH = join(homedir(), ...DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_INGESTION_HYGIENE_FILE_BASENAME)
+const DEFAULT_INGESTION_HYGIENE_FILE_BASENAME = "context-hygiene.jsonl"
+const defaultIngestionHygienePath = (): string => join(homedir(), ...DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_INGESTION_HYGIENE_FILE_BASENAME)
 // 5 MiB: hygiene lines carry the full original output, the fattest lines
 // the plugin writes, and the copy is a paranoid escape hatch rather than
 // a standing record, so its cap sits well under the metrics log's 20 MiB.
@@ -139,7 +142,7 @@ const METRICS_ROTATION_DISABLED_MAX_BYTES = 0
 const METRICS_ROTATION_SUFFIX = ".1"
 const DEFAULT_METRICS_MIN_LINE_INTERVAL_MS = SECONDS_PER_MINUTE * MS_PER_SECOND
 const METRICS_COALESCING_DISABLED_MS = 0
-const STATS_TOOL_NAME = "lru_stats"
+const STATS_TOOL_NAME = "context_stats"
 const STATS_TOOL_DESCRIPTION =
   "Return live metrics for the Context Manager in this session: eviction counters, expired reasoning counts, post-eviction touches, stash occupancy, the effective context budget, and the most recent transform run's token estimate; also the newest run's post-transform composition (tool outputs, text, windowed reasoning), the manual-mode dry run when armed, and the last transform fault when one occurred."
 const JSON_INDENT_SPACES = 2
@@ -336,7 +339,7 @@ type SessionMetrics = {
   touchScanThrough: number
   // Per-entry memory for the unique-event counters: content identities of
   // reasoning parts and dedup pairs already counted. They reset when the
-  // metrics LRU evicts and reseeds the entry, so unique counts are
+  // metrics store evicts and reseeds the entry, so unique counts are
   // per-entry-lifetime, not per-process; identical content counts once.
   reasoningSeenKeys: string[]
   dedupedPairKeys: string[]
@@ -351,15 +354,15 @@ type SessionMetrics = {
   // unknown; a live chat.params capture always wins over it.
   persistedBudget?: PersistedBudget
   // The manual-mode dry run from this session's newest run: run-scoped
-  // diagnostic state for lru_stats, never persisted, replaced every run.
+  // diagnostic state for context_stats, never persisted, replaced every run.
   lastDryRun?: DryRunResult
   // The newest run's composition (toolPoolBytes, textChars,
-  // reasoningInWindowBytes): run-scoped diagnostic state for lru_stats,
+  // reasoningInWindowBytes): run-scoped diagnostic state for context_stats,
   // never persisted, replaced every run.
   lastComposition?: RunComposition
   // The newest fault-isolated failure on this session's transform: set by
   // the transform boundary when the body throws, surfaced through
-  // lru_stats, never persisted, replaced by the next run's outcome.
+  // context_stats, never persisted, replaced by the next run's outcome.
   lastFault?: LastFault
   lastRun?: LastRunMetrics
   logWriteError?: string
@@ -477,9 +480,11 @@ const userFenceEvictionOf = (raw: ContextManagerOptions["userFenceEviction"]): U
 const boundedIntegerOr = (value: number | undefined, fallback: number, min: number): number =>
   typeof value === "number" && Number.isInteger(value) && value >= min ? value : fallback
 
+const isNonEmptyString = (value: unknown): value is string => typeof value === "string" && value.length > 0
+
 const resolveOptions = (raw: ContextManagerOptions = {}): ResolvedOptions => {
   const protectedPatterns =
-    Array.isArray(raw.protectedPatterns) && raw.protectedPatterns.every((pattern) => typeof pattern === "string" && pattern.length > 0)
+    Array.isArray(raw.protectedPatterns) && raw.protectedPatterns.every(isNonEmptyString)
       ? raw.protectedPatterns
       : DEFAULT_PROTECTED_PATTERNS
   return {
@@ -512,10 +517,7 @@ const resolveOptions = (raw: ContextManagerOptions = {}): ResolvedOptions => {
       typeof raw.hintSubjects === "number" && Number.isInteger(raw.hintSubjects) && raw.hintSubjects >= 0
         ? raw.hintSubjects
         : DEFAULT_HINT_SUBJECTS,
-    protectedTools:
-      Array.isArray(raw.protectedTools) && raw.protectedTools.every((tool) => typeof tool === "string" && tool.length > 0)
-        ? raw.protectedTools
-        : DEFAULT_PROTECTED_TOOLS,
+    protectedTools: Array.isArray(raw.protectedTools) && raw.protectedTools.every(isNonEmptyString) ? raw.protectedTools : DEFAULT_PROTECTED_TOOLS,
     protectedPatterns: protectedPatterns.flatMap((pattern) => {
       const compiled = compiledGlobOf(pattern)
       return compiled === undefined ? [] : [compiled]
@@ -532,7 +534,7 @@ const resolveOptions = (raw: ContextManagerOptions = {}): ResolvedOptions => {
         : DEFAULT_CHARS_PER_TOKEN,
     minSubstringMatchChars: boundedIntegerOr(raw.minSubstringMatchChars, DEFAULT_MIN_SUBSTRING_MATCH_CHARS, 0),
     metricsLog: typeof raw.metricsLog === "boolean" ? raw.metricsLog : DEFAULT_METRICS_LOG_ENABLED,
-    metricsPath: typeof raw.metricsPath === "string" && raw.metricsPath.length > 0 ? raw.metricsPath : DEFAULT_METRICS_PATH,
+    metricsPath: isNonEmptyString(raw.metricsPath) ? raw.metricsPath : defaultMetricsPath(),
     metricsRotationMaxBytes:
       typeof raw.metricsRotationMaxBytes === "number" && Number.isFinite(raw.metricsRotationMaxBytes) && raw.metricsRotationMaxBytes >= 0
         ? raw.metricsRotationMaxBytes
@@ -543,10 +545,7 @@ const resolveOptions = (raw: ContextManagerOptions = {}): ResolvedOptions => {
         : DEFAULT_METRICS_MIN_LINE_INTERVAL_MS,
     ingestionHygiene: typeof raw.ingestionHygiene === "boolean" ? raw.ingestionHygiene : DEFAULT_INGESTION_HYGIENE,
     ingestionHygieneCopy: typeof raw.ingestionHygieneCopy === "boolean" ? raw.ingestionHygieneCopy : DEFAULT_INGESTION_HYGIENE_COPY,
-    ingestionHygienePath:
-      typeof raw.ingestionHygienePath === "string" && raw.ingestionHygienePath.length > 0
-        ? raw.ingestionHygienePath
-        : DEFAULT_INGESTION_HYGIENE_PATH,
+    ingestionHygienePath: isNonEmptyString(raw.ingestionHygienePath) ? raw.ingestionHygienePath : defaultIngestionHygienePath(),
     ingestionHygieneRotationMaxBytes:
       typeof raw.ingestionHygieneRotationMaxBytes === "number" &&
       Number.isFinite(raw.ingestionHygieneRotationMaxBytes) &&
@@ -554,7 +553,7 @@ const resolveOptions = (raw: ContextManagerOptions = {}): ResolvedOptions => {
         ? raw.ingestionHygieneRotationMaxBytes
         : DEFAULT_INGESTION_HYGIENE_ROTATION_MAX_BYTES,
     liveStateLog: typeof raw.liveStateLog === "boolean" ? raw.liveStateLog : DEFAULT_LIVE_STATE_LOG_ENABLED,
-    liveStatePath: typeof raw.liveStatePath === "string" && raw.liveStatePath.length > 0 ? raw.liveStatePath : DEFAULT_LIVE_STATE_DIR,
+    liveStatePath: isNonEmptyString(raw.liveStatePath) ? raw.liveStatePath : defaultLiveStateDir(),
     liveStatePruneMaxAgeMs:
       typeof raw.liveStatePruneMaxAgeMs === "number" && Number.isFinite(raw.liveStatePruneMaxAgeMs) && raw.liveStatePruneMaxAgeMs >= 0
         ? raw.liveStatePruneMaxAgeMs
@@ -570,7 +569,7 @@ const resolveOptions = (raw: ContextManagerOptions = {}): ResolvedOptions => {
     // Test-injection seam for wall-clock time: the coalesce window, the
     // prune throttle, and the metrics-line timestamp all read this one
     // source. The default is real time; only tests override it, so it is
-    // deliberately absent from the README's option surface and lru_stats.
+    // deliberately absent from the README's option surface and context_stats.
     now: typeof raw.now === "function" ? raw.now : DEFAULT_NOW,
     faultTransform: typeof raw.faultTransform === "function" ? raw.faultTransform : undefined,
     faultCompaction: typeof raw.faultCompaction === "function" ? raw.faultCompaction : undefined,
@@ -904,7 +903,7 @@ const rememberUniqueKey = (seenKeys: string[], key: string, rememberedBound: num
 // so identical-input occurrences count once: a standing duplicate
 // re-tombstones every run, but only its first creation counts as unique.
 // Like the reasoning seen-set, the key list lives on the session's metrics
-// entry and resets if that entry is evicted from the metrics LRU and
+// entry and resets if that entry is evicted from the metrics store and
 // reseeded within one process.
 const countUniqueDedupedPairs = (metrics: SessionMetrics, keys: string[]): number => {
   let unique = 0
@@ -1063,7 +1062,7 @@ const purgeErroredToolInputs = (messages: MessageBundle[], options: ResolvedOpti
 // touch watermark. A part counts unique the first run its identity is seen
 // outside the recent window, and identical-content occurrences count once.
 // The seen-set lives on the session's metrics entry, whose lifetime bounds
-// the memory: the entry can be evicted from the metrics LRU and reseeded
+// the memory: the entry can be evicted from the metrics store and reseeded
 // within one process, re-counting that session's standing set once per
 // entry lifetime; unique can therefore exceed the entry's own cumulative
 // count after a reseed but never the session's true unique total. The
@@ -1577,7 +1576,7 @@ type MetricsHydration = Map<string, MetricsHydrationEntry>
 
 // One hydration per session key while it is in flight, and one seed per
 // entry lifetime: the settled guard is replaced only when a freshly
-// re-created entry asks for a reseed (the metrics LRU evicted the key and
+// re-created entry asks for a reseed (the metrics store evicted the key and
 // this call created it again), and that replacement loads from disk again
 // rather than from the first-touch record, which this process's own later
 // runs have already superseded. An entry still in the map is never
@@ -1614,7 +1613,7 @@ const metricsForSession = async (
   sessionBound: number,
 ): Promise<SessionMetrics> => {
   // An eventful run on a zeroed entry (freshly created because the metrics
-  // LRU evicted this key, or created while its seed was still loading)
+  // store evicted this key, or created while its seed was still loading)
   // would persist a regressed newest record and poison later rehydration,
   // so loop until the entry survives the hydration await; the settled
   // guard makes retries microtask-cheap. A re-created entry reseeds.
@@ -1969,7 +1968,7 @@ const resolveSessionBudget = (sessionEntry: SessionBudgetEntry | undefined, expl
 
 type SessionBudgetResolution = { budget: SessionBudget; fallbackSuppressed: boolean }
 
-// Shared by the transform hook and lru_stats so the two surfaces resolve
+// Shared by the transform hook and context_stats so the two surfaces resolve
 // identically. Precedence: a live chat.params capture, the explicit
 // defaultContextTokens option, then the budget persisted for the session;
 // the persisted value fills only the unknown state. The fallback is
@@ -2448,7 +2447,7 @@ const guardTool = (tool: (args: unknown, toolContext: unknown) => Promise<string
   }
 }
 
-// Create-or-update on the session metrics LRU: the shared shape behind
+// Create-or-update on the session metrics store: the shared shape behind
 // rememberFault and the hygiene copy's error surfacing, so a diagnostic
 // recorded for a session with no entry yet (a fault, compaction event, or
 // hygiene write error before the first transform) still lands on a
@@ -2506,8 +2505,88 @@ const chatParamsHookBody = (
   if (metrics !== undefined) metrics.persistedBudget = undefined
 }
 
+// One-time data migration for the plugin family rename: stored metrics,
+// live state, and hygiene copies under the previous lru-* basenames move to
+// the current names on the first default-path load, before any hook is
+// returned, so the producer and the panel readers observe the same
+// locations and accumulated history stays reachable. Each kind migrates
+// only while the plugin actually uses it (the metricsLog, liveStateLog,
+// and hygiene-copy switches respectively). Every rename targets its new
+// name only while that name does not exist yet, and an existing current
+// name wins with the legacy file left readable beside it; the rotated
+// sibling carries the same check of its own, so a load that moved the
+// primary but failed on the sibling moves the stranded sibling on the
+// next default-path load. A configured path option bypasses migration
+// entirely: the user chose their own locations. A failed rename degrades
+// the way the write paths do, never blocking plugin load: the legacy file
+// stays in place and the next default-path load retries, since the
+// condition simply re-runs each time.
+const LEGACY_METRICS_FILE_BASENAME = "lru-metrics.jsonl"
+const LEGACY_LIVE_STATE_DIR_BASENAME = "lru-state"
+const LEGACY_INGESTION_HYGIENE_FILE_BASENAME = "lru-hygiene.jsonl"
+
+const pathExists = async (path: string): Promise<boolean> => {
+  try {
+    await stat(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+const migrateLegacyFileWithRotatedSibling = async (oldPath: string, newPath: string): Promise<void> => {
+  if ((await pathExists(newPath)) === false && (await pathExists(oldPath))) await rename(oldPath, newPath)
+  const oldRotatedPath = `${oldPath}${METRICS_ROTATION_SUFFIX}`
+  if ((await pathExists(oldRotatedPath)) === false) return
+  const newRotatedPath = `${newPath}${METRICS_ROTATION_SUFFIX}`
+  if (await pathExists(newRotatedPath)) return
+  await rename(oldRotatedPath, newRotatedPath)
+}
+
+const migrateLegacyDirectory = async (oldDir: string, newDir: string): Promise<void> => {
+  if ((await pathExists(newDir)) || (await pathExists(oldDir)) === false) return
+  await rename(oldDir, newDir)
+}
+
+const usesDefaultPath = (path: string | undefined): boolean => !isNonEmptyString(path)
+
+// One default-location migration: the legacy basename beside the derived
+// default path, moved to the default path itself. Undefined when the user
+// configured their own path or the kind's logging is off.
+const legacyPathMigration = (
+  rawPath: string | undefined,
+  migrationEnabled: boolean,
+  defaultPath: () => string,
+  legacyBasename: string,
+  migrate: (oldPath: string, newPath: string) => Promise<void>,
+): (() => Promise<void>) | undefined => {
+  if (usesDefaultPath(rawPath) === false || migrationEnabled === false) return undefined
+  return () => {
+    const newPath = defaultPath()
+    return migrate(join(dirname(newPath), legacyBasename), newPath)
+  }
+}
+
+const migrateLegacyDefaultPaths = async (raw: ContextManagerOptions): Promise<void> => {
+  for (const migration of [
+    legacyPathMigration(raw.metricsPath, raw.metricsLog !== false, defaultMetricsPath, LEGACY_METRICS_FILE_BASENAME, migrateLegacyFileWithRotatedSibling),
+    legacyPathMigration(raw.liveStatePath, raw.liveStateLog !== false, defaultLiveStateDir, LEGACY_LIVE_STATE_DIR_BASENAME, migrateLegacyDirectory),
+    legacyPathMigration(raw.ingestionHygienePath, raw.ingestionHygieneCopy !== false, defaultIngestionHygienePath, LEGACY_INGESTION_HYGIENE_FILE_BASENAME, migrateLegacyFileWithRotatedSibling),
+  ]) {
+    if (migration === undefined) continue
+    try {
+      await migration()
+    } catch {
+      // Degrade like the write paths: the old location stays in place, the
+      // plugin loads, and the next default-path load retries the move.
+    }
+  }
+}
+
 export default (async (_input, rawOptions) => {
-  const options = resolveOptions(rawOptions as ContextManagerOptions)
+  const raw = (rawOptions ?? {}) as ContextManagerOptions
+  await migrateLegacyDefaultPaths(raw)
+  const options = resolveOptions(raw)
   const contextTokensBySession = new Map<string, SessionBudgetEntry>()
   const modelKeyBySession = new Map<string, string | undefined>()
   const stashBySession = new Map<string, SessionStash>()
@@ -2531,7 +2610,7 @@ export default (async (_input, rawOptions) => {
     options,
   }
 
-  // Workaround: read_evicted and lru_stats are registered as plain
+  // Workaround: read_evicted and context_stats are registered as plain
   // { description, args, execute } definitions instead of calling tool() from
   // @opencode-ai/plugin. The package only resolves inside the opencode runtime
    // (Bun follows the deployment symlink to this repository's real path, where
@@ -2577,7 +2656,7 @@ export default (async (_input, rawOptions) => {
         // untouched; a mid-body fault returns the partially applied
         // normal edits (same references, subset of healthy edits) —
         // either way never a corrupted structure — and the failure
-        // surfaces through lru_stats.
+        // surfaces through context_stats.
         const fault = { message: error instanceof Error ? error.message : String(error), atMs: options.now() }
         rememberFault(metricsBySession, sessionKey, fault, options.metricsSessions)
       }

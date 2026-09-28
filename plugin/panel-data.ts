@@ -135,6 +135,15 @@ const BUDGET_SOURCE_LABEL_DEFAULT = "plugin default"
 const BUDGET_SOURCE_LABEL_UNKNOWN = "inactive (no budget)"
 const PANEL_TITLE = "Context Manager"
 const MANUAL_MODE_TITLE_SUFFIX = " (manual)"
+// The /context panel command's registration identity, declared here so the
+// node-loadable data layer pins the name the TUI registers (the .tsx itself
+// only resolves inside the opencode runtime).
+export const PANEL_COMMAND_NAMESPACE = "palette"
+export const PANEL_COMMAND_NAME = "context.panel"
+export const PANEL_COMMAND_TITLE = PANEL_TITLE
+export const PANEL_COMMAND_DESCRIPTION = "Open the Context Manager's session panel"
+export const PANEL_COMMAND_CATEGORY = "Context"
+export const PANEL_COMMAND_SLASH_NAME = "context"
 const COUNTERS_ROW_LABEL = "counters:"
 const LAST_EVICTION_ROW_LABEL = "last evicted:"
 const NO_SESSION_ROW_TEXT = "no active session"

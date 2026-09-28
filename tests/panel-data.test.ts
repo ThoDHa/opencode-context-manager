@@ -738,14 +738,14 @@ test("canRegisterKeymap accepts only an api object whose keymap.registerLayer is
 })
 
 test("the default metrics path matches the plugin's log location", () => {
-  assert.equal(DEFAULT_METRICS_PATH, join(homedir(), ".local", "share", "opencode", "lru-metrics.jsonl"))
+  assert.equal(DEFAULT_METRICS_PATH, join(homedir(), ".local", "share", "opencode", "context-metrics.jsonl"))
 })
 
 type StatsTool = { execute: (args: unknown, context: unknown) => Promise<unknown> }
 
 test("the panel's default metrics path matches the plugin core's resolved metrics path", async () => {
-  const hooks = (await contextManagerFactory({}, { metricsLog: false, liveStateLog: false })) as Record<string, Record<string, StatsTool>>
-  const stats = JSON.parse((await hooks["tool"]["lru_stats"].execute({}, { sessionID: SESSION_A })) as string) as {
+  const hooks = (await contextManagerFactory({}, { metricsLog: false, liveStateLog: false, ingestionHygieneCopy: false })) as Record<string, Record<string, StatsTool>>
+  const stats = JSON.parse((await hooks["tool"]["context_stats"].execute({}, { sessionID: SESSION_A })) as string) as {
     options: { metricsPath: string }
   }
 
@@ -808,7 +808,7 @@ test("readStateSnapshot rejects a genuine read fault instead of swallowing it", 
 test("loadPanelData prefers the live snapshot for the session block and keeps log history for runs and recent evictions", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "metrics.jsonl")
-    const stateDir = join(dir, "lru-state")
+    const stateDir = join(dir, "context-state")
     mkdirSync(stateDir)
     writeFileSync(path, serialize([logLineStaleAgainstSnapshot(), makeLine({ session: SESSION_B })]))
     writeSnapshot(stateDir, SESSION_A, makeSnapshot())
@@ -853,7 +853,7 @@ test("loadPanelData prefers the live snapshot for the session block and keeps lo
 test("loadPanelData lets the session's newer log line win the fields it carries while snapshot-only fields stay", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "metrics.jsonl")
-    const stateDir = join(dir, "lru-state")
+    const stateDir = join(dir, "context-state")
     mkdirSync(stateDir)
     writeFileSync(path, serialize([logLineNewerThanSnapshot()]))
     writeSnapshot(stateDir, SESSION_A, makeSnapshot())
@@ -877,7 +877,7 @@ test("loadPanelData lets the session's newer log line win the fields it carries 
 test("loadPanelData keeps the snapshot's fields when the newest log line shares the snapshot's timestamp", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "metrics.jsonl")
-    const stateDir = join(dir, "lru-state")
+    const stateDir = join(dir, "context-state")
     mkdirSync(stateDir)
     writeFileSync(path, serialize([logLineAgainstSnapshot(SNAPSHOT_TS)]))
     writeSnapshot(stateDir, SESSION_A, makeSnapshot())
@@ -897,7 +897,7 @@ test("loadPanelData keeps the snapshot's fields when the newest log line shares 
 test("loadPanelData renders automatic mode for a snapshot recorded with manualMode false", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "metrics.jsonl")
-    const stateDir = join(dir, "lru-state")
+    const stateDir = join(dir, "context-state")
     mkdirSync(stateDir)
     writeSnapshot(stateDir, SESSION_A, makeSnapshot({ manualMode: false }))
 
@@ -911,7 +911,7 @@ test("loadPanelData renders automatic mode for a snapshot recorded with manualMo
 test("loadPanelData renders the snapshot block with empty history when no metrics log exists yet", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "absent-metrics.jsonl")
-    const stateDir = join(dir, "lru-state")
+    const stateDir = join(dir, "context-state")
     mkdirSync(stateDir)
     writeSnapshot(stateDir, SESSION_A, makeSnapshot({ manualMode: false }))
 
@@ -933,7 +933,7 @@ test("loadPanelData renders the snapshot block with empty history when no metric
 test("loadPanelData falls back to the metrics log when no snapshot exists for the session", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "metrics.jsonl")
-    const stateDir = join(dir, "lru-state")
+    const stateDir = join(dir, "context-state")
     mkdirSync(stateDir)
     writeFileSync(path, serialize([logLineStaleAgainstSnapshot()]))
 
@@ -965,7 +965,7 @@ test("loadPanelData falls back to the metrics log when no snapshot exists for th
 test("loadPanelData degrades to the metrics log when the snapshot is malformed", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "metrics.jsonl")
-    const stateDir = join(dir, "lru-state")
+    const stateDir = join(dir, "context-state")
     mkdirSync(stateDir)
     writeFileSync(path, serialize([logLineStaleAgainstSnapshot()]))
     writeFileSync(join(stateDir, `${SESSION_A}${SNAPSHOT_SUFFIX}`), "{not json")
@@ -983,7 +983,7 @@ test("loadPanelData degrades to the metrics log when the snapshot is malformed",
 test("loadPanelData falls back to the metrics log when the snapshot file cannot be read", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "metrics.jsonl")
-    const stateDir = join(dir, "lru-state")
+    const stateDir = join(dir, "context-state")
     mkdirSync(stateDir)
     mkdirSync(join(stateDir, `${SESSION_A}${SNAPSHOT_SUFFIX}`))
     writeFileSync(path, serialize([logLineStaleAgainstSnapshot()]))
@@ -1002,7 +1002,7 @@ test("loadPanelData serves the snapshot block alongside the log warning when the
   await withTempDir(async (dir) => {
     const directoryPath = join(dir, "metrics-dir")
     mkdirSync(directoryPath)
-    const stateDir = join(dir, "lru-state")
+    const stateDir = join(dir, "context-state")
     mkdirSync(stateDir)
     writeSnapshot(stateDir, SESSION_A, makeSnapshot())
 
@@ -1028,7 +1028,7 @@ test("loadPanelData serves the snapshot block alongside the log warning when the
 test("loadPanelData ignores a snapshot file whose recorded session does not match the requested id", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "metrics.jsonl")
-    const stateDir = join(dir, "lru-state")
+    const stateDir = join(dir, "context-state")
     mkdirSync(stateDir)
     writeFileSync(path, serialize([logLineStaleAgainstSnapshot()]))
     writeSnapshot(stateDir, SESSION_A, makeSnapshot({ session: SESSION_B }))
@@ -1043,12 +1043,12 @@ test("loadPanelData ignores a snapshot file whose recorded session does not matc
 })
 
 test("the default live state dir matches the plugin core's resolved state path", async () => {
-  const hooks = (await contextManagerFactory({}, { metricsLog: false, liveStateLog: false })) as Record<string, Record<string, StatsTool>>
-  const stats = JSON.parse((await hooks["tool"]["lru_stats"].execute({}, { sessionID: SESSION_A })) as string) as {
+  const hooks = (await contextManagerFactory({}, { metricsLog: false, liveStateLog: false, ingestionHygieneCopy: false })) as Record<string, Record<string, StatsTool>>
+  const stats = JSON.parse((await hooks["tool"]["context_stats"].execute({}, { sessionID: SESSION_A })) as string) as {
     options: { liveStatePath: string }
   }
 
-  assert.equal(DEFAULT_LIVE_STATE_DIR, join(homedir(), ".local", "share", "opencode", "lru-state"))
+  assert.equal(DEFAULT_LIVE_STATE_DIR, join(homedir(), ".local", "share", "opencode", "context-state"))
   assert.equal(stats.options.liveStatePath, DEFAULT_LIVE_STATE_DIR)
 })
 
@@ -1057,7 +1057,7 @@ const CHILD_C = "sess-child-c"
 test("loadPanelData resolves each child's panel with the snapshot-preferred logic over one shared log read", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "metrics.jsonl")
-    const stateDir = join(dir, "lru-state")
+    const stateDir = join(dir, "context-state")
     mkdirSync(stateDir)
     writeFileSync(path, serialize([logLineStaleAgainstSnapshot(), makeLine({ session: SESSION_B }), makeLine({ session: CHILD_C })]))
     writeSnapshot(stateDir, SESSION_A, makeSnapshot())
@@ -1109,7 +1109,7 @@ test("loadPanelData serves child snapshots alongside the log warning when the me
   await withTempDir(async (dir) => {
     const directoryPath = join(dir, "metrics-dir")
     mkdirSync(directoryPath)
-    const stateDir = join(dir, "lru-state")
+    const stateDir = join(dir, "context-state")
     mkdirSync(stateDir)
     writeSnapshot(stateDir, SESSION_A, makeSnapshot())
 

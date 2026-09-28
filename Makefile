@@ -86,7 +86,7 @@ uninstall:
 	@echo "Uninstalled plugin files from $(PLUGIN_TARGET_DIR)"
 
 help:
-	@echo "opencode-lru-context"
+	@echo "opencode-context-manager"
 	@echo "===================="
 	@echo ""
 	@echo "  make test      - Run the plugin test suites (node --test)"

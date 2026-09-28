@@ -161,7 +161,7 @@ test("sidebarRows keeps the snapshot-fed session block under the warning group w
   await withTempDir(async (dir) => {
     const directoryPath = join(dir, "metrics-dir")
     mkdirSync(directoryPath)
-    const stateDir = join(dir, "lru-state")
+    const stateDir = join(dir, "context-state")
     mkdirSync(stateDir)
     writeSnapshot(stateDir, SESSION_A, makeSnapshot())
 
@@ -192,7 +192,7 @@ test("sidebarRows keeps the snapshot-fed session block under the warning group w
 test("sidebarRows renders the log-fed fallback session in the spaced groups", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "metrics.jsonl")
-    const stateDir = join(dir, "lru-state")
+    const stateDir = join(dir, "context-state")
     mkdirSync(stateDir)
     writeFileSync(path, serialize([logLineStaleAgainstSnapshot()]))
 

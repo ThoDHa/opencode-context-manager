@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
@@ -11,7 +11,7 @@ import contextManagerFactory, {
   METRICS_CURSOR_KEYS,
   RAW_COUNTER_KEYS,
 } from "../plugin/context-manager.ts"
-import { loadPanelData } from "../plugin/panel-data.ts"
+import { loadPanelData, PANEL_COMMAND_CATEGORY, PANEL_COMMAND_NAME, PANEL_COMMAND_NAMESPACE, PANEL_COMMAND_SLASH_NAME } from "../plugin/panel-data.ts"
 import { TOTALS_KEYS } from "../plugin/schema.ts"
 
 const TRANSFORM_HOOK = "experimental.chat.messages.transform"
@@ -361,10 +361,10 @@ const buildSmallBundle = (): MessageBundle => ({
 })
 
 const loadPluginHooks = async (): Promise<HookMap> =>
-  (await contextManagerFactory({}, { metricsLog: false, liveStateLog: false })) as HookMap
+  (await contextManagerFactory({}, { metricsLog: false, liveStateLog: false, ingestionHygieneCopy: false })) as HookMap
 
 const loadPluginHooksWith = async (options: Record<string, unknown>): Promise<HookMap> =>
-  (await contextManagerFactory({}, { metricsLog: false, liveStateLog: false, ...options })) as HookMap
+  (await contextManagerFactory({}, { metricsLog: false, liveStateLog: false, ingestionHygieneCopy: false, ...options })) as HookMap
 
 type HintPartRef = { messageIndex: number; partIndex: number; text: string }
 
@@ -2444,7 +2444,7 @@ test("transform leaves file dedup results unchanged on a second transform pass",
   assert.deepEqual(bundle.messages[0].parts[0], { type: "text", text: fileDedupTombstoneFor(FILE_FILENAME, 3) })
 })
 
-test("lru_stats counts file attachment dedup tombstones in the deduped counter", async () => {
+test("context_stats counts file attachment dedup tombstones in the deduped counter", async () => {
   const hooks = await loadPluginHooks()
 
   const bundle = buildBundle([
@@ -3161,11 +3161,11 @@ test("read_evicted keeps both same message same subject evictions reloadable ins
   )
 })
 
-const STATS_TOOL_NAME = "lru_stats"
+const STATS_TOOL_NAME = "context_stats"
 const METRICS_DIR_SEGMENTS = [".local", "share", "opencode"]
-const METRICS_LOG_BASENAME = "lru-metrics.jsonl"
+const METRICS_LOG_BASENAME = "context-metrics.jsonl"
 const DEFAULT_METRICS_PATH = join(homedir(), ...METRICS_DIR_SEGMENTS, METRICS_LOG_BASENAME)
-const HYGIENE_LOG_BASENAME = "lru-hygiene.jsonl"
+const HYGIENE_LOG_BASENAME = "context-hygiene.jsonl"
 const DEFAULT_INGESTION_HYGIENE_PATH = join(homedir(), ...METRICS_DIR_SEGMENTS, HYGIENE_LOG_BASENAME)
 const METRICS_TEMP_DIR_PREFIX = "ctx-metrics-test-"
 const METRICS_LOG_FILE_NAME = "metrics.jsonl"
@@ -3339,7 +3339,7 @@ const metricsRotationPanelSeedLine = (session: string = SESSION_ID): Record<stri
   },
 })
 
-test("lru_stats reports zeroed counters unknown budget and empty stash for a session without activity", async () => {
+test("context_stats reports zeroed counters unknown budget and empty stash for a session without activity", async () => {
   const hooks = await loadPluginHooks()
 
   const stats = await readStats(hooks, SESSION_ID)
@@ -3358,7 +3358,7 @@ test("lru_stats reports zeroed counters unknown budget and empty stash for a ses
     metricsRotationMaxBytes: DEFAULT_METRICS_ROTATION_MAX_BYTES,
     metricsMinLineIntervalMs: DEFAULT_METRICS_MIN_LINE_INTERVAL_MS,
     ingestionHygiene: true,
-    ingestionHygieneCopy: true,
+    ingestionHygieneCopy: false,
     ingestionHygienePath: DEFAULT_INGESTION_HYGIENE_PATH,
     ingestionHygieneRotationMaxBytes: DEFAULT_INGESTION_HYGIENE_ROTATION_MAX_BYTES,
     liveStateLog: false,
@@ -3376,7 +3376,7 @@ test("lru_stats reports zeroed counters unknown budget and empty stash for a ses
   assert.equal(Object.hasOwn(stats, "logWriteError"), false)
 })
 
-test("lru_stats reports the explicit defaultContextTokens option as the budget when no limit was captured", async () => {
+test("context_stats reports the explicit defaultContextTokens option as the budget when no limit was captured", async () => {
   const hooks = await loadPluginHooksWith({ defaultContextTokens: EXPLICIT_DEFAULT_CONTEXT_TOKENS })
 
   const stats = await readStats(hooks, SESSION_ID)
@@ -3386,7 +3386,7 @@ test("lru_stats reports the explicit defaultContextTokens option as the budget w
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_DEFAULT)
 })
 
-test("lru_stats records an unknown budget last run with null watermark and deficit after a skip run", async () => {
+test("context_stats records an unknown budget last run with null watermark and deficit after a skip run", async () => {
   const hooks = await loadPluginHooks()
 
   const bundle = buildStandardBundle(SESSION_ID, STATS_SKIP_RUN_SUBJECT)
@@ -3402,7 +3402,7 @@ test("lru_stats records an unknown budget last run with null watermark and defic
   })
 })
 
-test("lru_stats counts the eviction reclaimed bytes stash entry and last run deficit after one eviction run", async () => {
+test("context_stats counts the eviction reclaimed bytes stash entry and last run deficit after one eviction run", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
 
@@ -3426,7 +3426,7 @@ test("lru_stats counts the eviction reclaimed bytes stash entry and last run def
   })
 })
 
-test("lru_stats derives the eviction token-savings estimate from the reclaimed bytes over the default charsPerToken", async () => {
+test("context_stats derives the eviction token-savings estimate from the reclaimed bytes over the default charsPerToken", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
 
@@ -3441,7 +3441,7 @@ test("lru_stats derives the eviction token-savings estimate from the reclaimed b
   })
 })
 
-test("lru_stats scales the eviction token-savings estimate by the resolved charsPerToken", async () => {
+test("context_stats scales the eviction token-savings estimate by the resolved charsPerToken", async () => {
   const hooks = await loadPluginHooksWith({ charsPerToken: SAVINGS_CUSTOM_CHARS_PER_TOKEN })
   await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
 
@@ -3454,7 +3454,7 @@ test("lru_stats scales the eviction token-savings estimate by the resolved chars
   assert.equal(counters.evictionTokensSaved, Math.ceil(MIN_EVICTABLE_BYTES / SAVINGS_CUSTOM_CHARS_PER_TOKEN))
 })
 
-test("lru_stats counts stash hits and misses from read_evicted and leaves invalid subject arguments uncounted", async () => {
+test("context_stats counts stash hits and misses from read_evicted and leaves invalid subject arguments uncounted", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -3492,7 +3492,7 @@ test("lru_stats counts stash hits and misses from read_evicted and leaves invali
   })
 })
 
-test("lru_stats counts a post eviction touch exactly once for a matching later call and never recounts repeated transforms", async () => {
+test("context_stats counts a post eviction touch exactly once for a matching later call and never recounts repeated transforms", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -3508,7 +3508,7 @@ test("lru_stats counts a post eviction touch exactly once for a matching later c
   assert.equal(countersOf(await readStats(hooks, SESSION_ID)).postEvictionTouches, 1)
 })
 
-test("lru_stats leaves post eviction touches at zero when a later call matches nothing evicted", async () => {
+test("context_stats leaves post eviction touches at zero when a later call matches nothing evicted", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -3523,7 +3523,7 @@ test("lru_stats leaves post eviction touches at zero when a later call matches n
   assert.equal(countersOf(await readStats(hooks, SESSION_ID)).postEvictionTouches, 0)
 })
 
-test("lru_stats forgets the oldest evicted subject past the hundred subject cap and stops counting its post eviction touches", async () => {
+test("context_stats forgets the oldest evicted subject past the hundred subject cap and stops counting its post eviction touches", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -3548,7 +3548,7 @@ test("lru_stats forgets the oldest evicted subject past the hundred subject cap 
   assert.equal(countersOf(await readStats(hooks, SESSION_ID)).postEvictionTouches, 1)
 })
 
-test("lru_stats counts dedup tombstones without counting evictions and stays incremental across repeated transforms", async () => {
+test("context_stats counts dedup tombstones without counting evictions and stays incremental across repeated transforms", async () => {
   const hooks = await loadPluginHooks()
 
   const bundle = buildBundle([
@@ -3567,7 +3567,7 @@ test("lru_stats counts dedup tombstones without counting evictions and stays inc
   assert.equal(countersOf(await readStats(hooks, SESSION_ID)).deduped, 1)
 })
 
-test("lru_stats accumulates the dedup token-savings estimate from each superseded duplicate's bytes", async () => {
+test("context_stats accumulates the dedup token-savings estimate from each superseded duplicate's bytes", async () => {
   const hooks = await loadPluginHooks()
   const dedupSavingsParts = (): MessagePart[][] => [
     [pathToolPart(DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
@@ -3600,7 +3600,7 @@ test("lru_stats accumulates the dedup token-savings estimate from each supersede
   assert.equal(counters.dedupTokensSaved, tokensForChars(DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES * REPEATED_STANDING_RUNS))
 })
 
-test("lru_stats counts stash drops when a single run evicts fifty one entries past the stash bound", async () => {
+test("context_stats counts stash drops when a single run evicts fifty one entries past the stash bound", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -3840,7 +3840,7 @@ test("metrics log writes nothing when metricsLog is false while counters still u
   }
 })
 
-test("metrics log records an unwritable path in logWriteError surfaced through lru_stats without throwing", async () => {
+test("metrics log records an unwritable path in logWriteError surfaced through context_stats without throwing", async () => {
   const metricsDir = makeMetricsDir()
   try {
     const hooks = await loadPluginHooksWithMetricsLog(blockedMetricsPathIn(metricsDir))
@@ -3858,7 +3858,7 @@ test("metrics log records an unwritable path in logWriteError surfaced through l
   }
 })
 
-test("lru_stats keeps metrics isolated between two sessions", async () => {
+test("context_stats keeps metrics isolated between two sessions", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
   await setContextLimit(hooks, SESSION_ID_B, contextForDeficit(THREE_ENTRY_BUNDLE_CHARS, TWO_ENTRY_DEFICIT_TOKENS))
@@ -3892,7 +3892,7 @@ test("lru_stats keeps metrics isolated between two sessions", async () => {
   })
 })
 
-test("lru_stats drops the least recently active session metrics when a ninth session transforms", async () => {
+test("context_stats drops the least recently active session metrics when a ninth session transforms", async () => {
   const hooks = await loadPluginHooks()
   for (let index = 0; index < METRICS_SESSION_BOUND; index += 1) await storeMetricsSession(hooks, index)
 
@@ -3918,7 +3918,7 @@ test("read_evicted leaves live session metrics untouched when a never-transforme
   assert.deepEqual(countersOf(await readStats(hooks, METRICS_PROBE_SESSION_ID)), STATS_ZEROED_COUNTERS)
 })
 
-test("lru_stats refreshes a probing session's metrics so it survives when a ninth session transforms", async () => {
+test("context_stats refreshes a probing session's metrics so it survives when a ninth session transforms", async () => {
   const hooks = await loadPluginHooks()
   for (let index = 0; index < METRICS_SESSION_BOUND; index += 1) await storeMetricsSession(hooks, index)
 
@@ -3930,7 +3930,7 @@ test("lru_stats refreshes a probing session's metrics so it survives when a nint
   assert.equal(countersOf(await readStats(hooks, metricsSessionId(METRICS_SESSION_OVERFLOW_COUNT - 1))).evictions, 1)
 })
 
-test("lru_stats leaves live session metrics untouched when a never-transformed session opens the stats tool at the session bound", async () => {
+test("context_stats leaves live session metrics untouched when a never-transformed session opens the stats tool at the session bound", async () => {
   const hooks = await loadPluginHooks()
   for (let index = 0; index < METRICS_SESSION_BOUND; index += 1) await storeMetricsSession(hooks, index)
 
@@ -3939,7 +3939,7 @@ test("lru_stats leaves live session metrics untouched when a never-transformed s
   assert.equal(countersOf(await readStats(hooks, metricsSessionId(METRICS_SESSION_BOUND - 1))).evictions, 1)
 })
 
-test("lru_stats does not refresh a session stash so a stats-only probe leaves it exposed when a ninth session stashes an eviction", async () => {
+test("context_stats does not refresh a session stash so a stats-only probe leaves it exposed when a ninth session stashes an eviction", async () => {
   const hooks = await loadPluginHooks()
   for (let index = 0; index < STASH_SESSION_BOUND; index += 1) await evictStashSession(hooks, index)
 
@@ -3987,7 +3987,7 @@ test("metrics log clears a recorded write failure once a later write succeeds", 
   }
 })
 
-test("lru_stats reports the metrics rotation cap in options defaulting to twenty MiB and falling back on invalid caps", async () => {
+test("context_stats reports the metrics rotation cap in options defaulting to twenty MiB and falling back on invalid caps", async () => {
   assert.equal(
     ((await readStats(await loadPluginHooks(), SESSION_ID)).options as Record<string, unknown>).metricsRotationMaxBytes,
     DEFAULT_METRICS_ROTATION_MAX_BYTES,
@@ -4008,7 +4008,7 @@ test("lru_stats reports the metrics rotation cap in options defaulting to twenty
   }
 })
 
-test("lru_stats reports metricsMinLineIntervalMs defaulting to sixty seconds and falling back on invalid values", async () => {
+test("context_stats reports metricsMinLineIntervalMs defaulting to sixty seconds and falling back on invalid values", async () => {
   assert.equal(
     ((await readStats(await loadPluginHooks(), SESSION_ID)).options as Record<string, unknown>).metricsMinLineIntervalMs,
     DEFAULT_METRICS_MIN_LINE_INTERVAL_MS,
@@ -4159,7 +4159,7 @@ test("panel data parses the post rotation state with the pre rotation line gone 
   }
 })
 
-const LIVE_STATE_DIR_NAME = "lru-state"
+const LIVE_STATE_DIR_NAME = "context-state"
 const DEFAULT_LIVE_STATE_DIR = join(homedir(), ...METRICS_DIR_SEGMENTS, LIVE_STATE_DIR_NAME)
 const LIVE_STATE_TEMP_DIR_PREFIX = "ctx-live-state-test-"
 const LIVE_STATE_FILE_SUFFIX = ".json"
@@ -4512,7 +4512,7 @@ test("live state write records stateWriteError and leaves no temp file behind wh
   }
 })
 
-test("live state write failure records stateWriteError through lru_stats without interrupting the session", async () => {
+test("live state write failure records stateWriteError through context_stats without interrupting the session", async () => {
   const stateDir = makeLiveStateDir()
   try {
     writeFileSync(join(stateDir, LIVE_STATE_BLOCKER_FILE), "not a directory")
@@ -4568,13 +4568,13 @@ test("live state snapshot carries an empty hot subject list when hintSubjects is
   }
 })
 
-test("lru_stats reports the live state options defaulting beside the metrics log and round tripping custom values", async () => {
+test("context_stats reports the live state options defaulting beside the metrics log and round tripping custom values", async () => {
   const defaultOptions = ((await readStats(await loadPluginHooks(), SESSION_ID)).options as Record<string, unknown>)
   assert.equal(defaultOptions.liveStateLog, false)
   assert.equal(defaultOptions.liveStatePath, DEFAULT_LIVE_STATE_DIR)
   assert.equal(defaultOptions.liveStatePruneMaxAgeMs, DEFAULT_LIVE_STATE_PRUNE_MAX_AGE_MS)
   assert.equal(defaultOptions.liveStatePruneMinIntervalMs, DEFAULT_LIVE_STATE_PRUNE_MIN_INTERVAL_MS)
-  assert.equal(DEFAULT_LIVE_STATE_DIR, join(homedir(), ".local", "share", "opencode", "lru-state"))
+  assert.equal(DEFAULT_LIVE_STATE_DIR, join(homedir(), ".local", "share", "opencode", "context-state"))
 
   const customHooks = await loadPluginHooksWith({
     liveStateLog: true,
@@ -4589,7 +4589,7 @@ test("lru_stats reports the live state options defaulting beside the metrics log
   assert.equal(customOptions.liveStatePruneMinIntervalMs, LIVE_STATE_CUSTOM_PRUNE_MIN_INTERVAL_MS)
 })
 
-test("lru_stats counts expired reasoning parts and bytes without counting them as evictions", async () => {
+test("context_stats counts expired reasoning parts and bytes without counting them as evictions", async () => {
   const hooks = await loadPluginHooks()
   const agedReasoningParts = (): MessagePart[][] => [
     [reasoningPart(REASONING_COLD_TEXT), reasoningPart(REASONING_SECOND_COLD_TEXT)],
@@ -4616,7 +4616,7 @@ test("lru_stats counts expired reasoning parts and bytes without counting them a
   assert.equal(counters.reasoningTokensSaved, tokensForChars(EXPIRED_REASONING_PAIR_BYTES * REPEATED_STANDING_RUNS))
 })
 
-test("lru_stats counts two identical-content reasoning parts in distinct messages once in the unique counter", async () => {
+test("context_stats counts two identical-content reasoning parts in distinct messages once in the unique counter", async () => {
   const hooks = await loadPluginHooks()
 
   const bundle = buildBundle([
@@ -4634,7 +4634,7 @@ test("lru_stats counts two identical-content reasoning parts in distinct message
   assert.equal(counters.reasoningTokensSaved, tokensForChars(REASONING_COLD_TEXT.length * REPEATED_STANDING_RUNS))
 })
 
-test("lru_stats leaves reasoning counters at zero when a pressured session has no reasoning parts", async () => {
+test("context_stats leaves reasoning counters at zero when a pressured session has no reasoning parts", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -4832,7 +4832,7 @@ test("composition counts zero escape and attachment bytes once an attachment bea
   }
 })
 
-test("composition fields stay off quiet runs and off lru_stats before any run", async () => {
+test("composition fields stay off quiet runs and off context_stats before any run", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
   try {
@@ -5067,7 +5067,7 @@ test("transform strips attachments from a dedup tombstoned older call while the 
   ])
 })
 
-test("lru_stats counts a superseded duplicate's attachment payload chars in the dedup token-savings estimate", async () => {
+test("context_stats counts a superseded duplicate's attachment payload chars in the dedup token-savings estimate", async () => {
   const hooks = await loadPluginHooks()
 
   const bundle = buildBundle([
@@ -5105,7 +5105,7 @@ test("transform ignores a non array attachments field when deduplicating and lea
   assert.equal(toolPartAt(bundle.messages[3], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
 })
 
-test("lru_stats counts attachment payload characters in bytesReclaimed for an attachment bearing eviction", async () => {
+test("context_stats counts attachment payload characters in bytesReclaimed for an attachment bearing eviction", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
 
@@ -5427,7 +5427,7 @@ test("read_evicted keeps two same subject fence evictions in one part reloadable
   )
 })
 
-test("lru_stats counts fence evictions in a distinct fenceEvicted counter without counting tool evictions", async () => {
+test("context_stats counts fence evictions in a distinct fenceEvicted counter without counting tool evictions", async () => {
   const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
   const block = fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG))
   await runTransform(hooks, userFenceBundle(`${FENCE_PROSE_BEFORE}\n${block}\n${FENCE_PROSE_AFTER}`))
@@ -6064,7 +6064,7 @@ test("the hygiene hook passes a clean output through byte-identical and writes n
 test("the hygiene hook writes the copy with the original preserved before the rewrite lands", async () => {
   const hygieneDir = makeMetricsDir()
   const hygienePath = join(hygieneDir, HYGIENE_LOG_BASENAME)
-  const hooks = await loadPluginHooksWith({ ingestionHygienePath: hygienePath })
+  const hooks = await loadPluginHooksWith({ ingestionHygieneCopy: true, ingestionHygienePath: hygienePath })
 
   const output = await runHygieneHook(hooks, HYGIENE_DIRTY_OUTPUT)
 
@@ -6082,7 +6082,7 @@ test("the hygiene hook writes the copy with the original preserved before the re
 
 test("a hygiene copy write failure degrades to hygieneWriteError with the strip still applied", async () => {
   const hygieneDir = makeMetricsDir()
-  const hooks = await loadPluginHooksWith({ ingestionHygienePath: blockedHygienePathIn(hygieneDir) })
+  const hooks = await loadPluginHooksWith({ ingestionHygieneCopy: true, ingestionHygienePath: blockedHygienePathIn(hygieneDir) })
 
   const output = await runHygieneHook(hooks, HYGIENE_DIRTY_OUTPUT)
 
@@ -6115,7 +6115,7 @@ test("a throwing hygiene hook degrades to the original output with lastFault set
 test("the hygiene hook never touches the title or metadata and records the title in the copy", async () => {
   const hygieneDir = makeMetricsDir()
   const hygienePath = join(hygieneDir, HYGIENE_LOG_BASENAME)
-  const hooks = await loadPluginHooksWith({ ingestionHygienePath: hygienePath })
+  const hooks = await loadPluginHooksWith({ ingestionHygieneCopy: true, ingestionHygienePath: hygienePath })
 
   const output = await runHygieneHook(hooks, HYGIENE_DIRTY_OUTPUT)
 
@@ -6151,6 +6151,16 @@ test("ingestionHygieneCopy false strips the output without writing a copy", asyn
   cleanupMetricsDir(hygieneDir)
 })
 
+test("ingestionHygieneCopy resolves to the enabled production default when the option is unset", async () => {
+  const hygieneDir = makeMetricsDir()
+  const hooks = (await contextManagerFactory({}, { metricsLog: false, liveStateLog: false, ingestionHygienePath: join(hygieneDir, HYGIENE_LOG_BASENAME) })) as HookMap
+
+  const stats = await readStats(hooks, SESSION_ID)
+
+  assert.equal((stats.options as Record<string, unknown>).ingestionHygieneCopy, true)
+  cleanupMetricsDir(hygieneDir)
+})
+
 test("the hygiene hook passes a CRLF-terminated output through byte-identical", async () => {
   const hygieneDir = makeMetricsDir()
   const hygienePath = join(hygieneDir, HYGIENE_LOG_BASENAME)
@@ -6175,7 +6185,7 @@ test("the hygiene hook collapses progress segments before a CRLF terminator whil
 test("ingestionHygieneRotationMaxBytes zero disables the copy but not the strip", async () => {
   const hygieneDir = makeMetricsDir()
   const hygienePath = join(hygieneDir, HYGIENE_LOG_BASENAME)
-  const hooks = await loadPluginHooksWith({ ingestionHygienePath: hygienePath, ingestionHygieneRotationMaxBytes: 0 })
+  const hooks = await loadPluginHooksWith({ ingestionHygieneCopy: true, ingestionHygienePath: hygienePath, ingestionHygieneRotationMaxBytes: 0 })
 
   const output = await runHygieneHook(hooks, HYGIENE_DIRTY_OUTPUT)
 
@@ -6188,12 +6198,12 @@ test("the hygiene log rotates to the .1 sibling when an append would cross inges
   const hygieneDir = makeMetricsDir()
   try {
     const hygienePath = join(hygieneDir, HYGIENE_LOG_BASENAME)
-    const probeHooks = await loadPluginHooksWith({ ingestionHygienePath: hygienePath })
+    const probeHooks = await loadPluginHooksWith({ ingestionHygieneCopy: true, ingestionHygienePath: hygienePath })
     await runHygieneHook(probeHooks, HYGIENE_DIRTY_OUTPUT)
     const capBytes = statSync(hygienePath).size
     rmSync(hygienePath)
 
-    const hooks = await loadPluginHooksWith({ ingestionHygienePath: hygienePath, ingestionHygieneRotationMaxBytes: capBytes })
+    const hooks = await loadPluginHooksWith({ ingestionHygieneCopy: true, ingestionHygienePath: hygienePath, ingestionHygieneRotationMaxBytes: capBytes })
     await runHygieneHook(hooks, HYGIENE_DIRTY_OUTPUT)
 
     assert.equal(existsSync(rotatedHygienePathIn(hygieneDir)), false)
@@ -6754,7 +6764,7 @@ test("transform keeps fence eviction the stash and read_evicted active while man
   assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), `${block}\n`)
 })
 
-test("lru_stats reports the manual state in the options block while the captured budget stays visible", async () => {
+test("context_stats reports the manual state in the options block while the captured budget stays visible", async () => {
   const hooks = await loadPluginHooksWith({ manualMode: true })
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -6800,7 +6810,7 @@ const SUBSTRING_FLOOR_ZERO = 0
 const SUBSTRING_FLOOR_INVALID = -1
 const STASH_LIMIT_OVERRIDE_SUBJECT_PREFIX = "/data/slim-stash"
 
-test("lru_stats reports the default stash capacity of fifty entries when stashLimit is unset", async () => {
+test("context_stats reports the default stash capacity of fifty entries when stashLimit is unset", async () => {
   const stats = await readStats(await loadPluginHooks(), SESSION_ID)
 
   assert.deepEqual(stats.stash, { entries: 0, capacity: STASH_LIMIT })
@@ -6826,7 +6836,7 @@ test("read_evicted applies a custom stashLimit dropping the oldest stashed entry
   assert.equal(await readEvicted(hooks, subjects[2], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
 })
 
-test("lru_stats keeps the default stash capacity when stashLimit is invalid", async () => {
+test("context_stats keeps the default stash capacity when stashLimit is invalid", async () => {
   for (const invalidLimit of STASH_LIMIT_INVALID_VALUES) {
     const hooks = await loadPluginHooksWith({ stashLimit: invalidLimit })
     const stats = await readStats(hooks, SESSION_ID)
@@ -6923,7 +6933,7 @@ test("chat system transform keeps session hints when an invalid hintSessions fal
   assert.equal(hintBlocksIn(await runSystemTransform(hooks, hintSessionId(HINT_SESSION_OVERFLOW_COUNT - 1))).length, 1)
 })
 
-test("lru_stats drops the least recently active session metrics when the metricsSessions bound is exceeded", async () => {
+test("context_stats drops the least recently active session metrics when the metricsSessions bound is exceeded", async () => {
   const hooks = await loadPluginHooksWith({ metricsSessions: SESSION_BOUND_OVERRIDE })
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
   await setContextLimit(hooks, SESSION_ID_B, WATERMARK_PROBE_CONTEXT_LIMIT)
@@ -6936,7 +6946,7 @@ test("lru_stats drops the least recently active session metrics when the metrics
   assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), STATS_ZEROED_COUNTERS)
 })
 
-test("lru_stats keeps session metrics when an invalid metricsSessions falls back to the default bound", async () => {
+test("context_stats keeps session metrics when an invalid metricsSessions falls back to the default bound", async () => {
   const hooks = await loadPluginHooksWith({ metricsSessions: SESSION_BOUND_INVALID_ZERO })
   for (let index = 0; index < METRICS_SESSION_OVERFLOW_COUNT; index += 1) await storeMetricsSession(hooks, index)
 
@@ -6963,11 +6973,11 @@ const rememberedSubjectsTouchCountFor = async (optionValue: number): Promise<num
   return countersOf(await readStats(hooks, SESSION_ID)).postEvictionTouches
 }
 
-test("lru_stats forgets the oldest evicted subject at the rememberedEvictedSubjects bound so its touch goes uncounted", async () => {
+test("context_stats forgets the oldest evicted subject at the rememberedEvictedSubjects bound so its touch goes uncounted", async () => {
   assert.equal(await rememberedSubjectsTouchCountFor(REMEMBERED_SUBJECTS_OVERRIDE), 1)
 })
 
-test("lru_stats keeps both evicted subjects remembered when rememberedEvictedSubjects is invalid", async () => {
+test("context_stats keeps both evicted subjects remembered when rememberedEvictedSubjects is invalid", async () => {
   assert.equal(await rememberedSubjectsTouchCountFor(REMEMBERED_SUBJECTS_INVALID), 2)
 })
 
@@ -7576,7 +7586,7 @@ test("a hostile model key in the persisted record rejects the whole seed", async
   }
 })
 
-test("lru_stats resolves the rehydrated budget once the session entry is hydrated", async () => {
+test("context_stats resolves the rehydrated budget once the session entry is hydrated", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
   try {
@@ -7697,7 +7707,7 @@ test("recreated metrics entry re-seeds lifetime counters after the metricsSessio
   }
 })
 
-test("lru_stats re-counts the standing reasoning set when the metrics LRU evicts and re-seeds the session entry within one process", async () => {
+test("context_stats re-counts the standing reasoning set when the metrics store evicts and re-seeds the session entry within one process", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
   try {
@@ -7788,4 +7798,185 @@ test("a metrics line predating dedupedBytes still seeds the resumed session with
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)
   }
+})
+
+const LEGACY_METRICS_LOG_BASENAME = "lru-metrics.jsonl"
+const LEGACY_LIVE_STATE_DIR_NAME = "lru-state"
+const LEGACY_HYGIENE_LOG_BASENAME = "lru-hygiene.jsonl"
+const MIGRATION_CUSTOM_DIR_NAME = "custom"
+const MIGRATION_BLOCKED_DIR_MODE = 0o555
+const MIGRATION_RESTORED_DIR_MODE = 0o755
+const MIGRATION_LEGACY_STATE_FILE_NAME = "sess-1.json"
+const MIGRATION_STATE_FILE_CONTENT = "{}\n"
+
+// The default-path migration only runs where the defaults actually point,
+// so each test relocates HOME to a fresh temp directory for the duration of
+// one plugin load and restores it afterwards: homedir() re-reads the
+// environment on every call, and the resolved defaults follow it.
+const withScopedHome = async (run: (home: string) => Promise<void>): Promise<void> => {
+  const home = mkdtempSync(join(tmpdir(), METRICS_TEMP_DIR_PREFIX))
+  const previousHome = process.env.HOME
+  process.env.HOME = home
+  try {
+    await run(home)
+  } finally {
+    process.env.HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  }
+}
+
+const scopedDataRootIn = (home: string): string => join(home, ...METRICS_DIR_SEGMENTS)
+
+test("the first default path load renames the legacy metrics log and its rotated sibling to the current names", async () => {
+  await withScopedHome(async (home) => {
+    const root = scopedDataRootIn(home)
+    mkdirSync(root, { recursive: true })
+    writeFileSync(join(root, LEGACY_METRICS_LOG_BASENAME), "legacy newest line\n")
+    writeFileSync(join(root, `${LEGACY_METRICS_LOG_BASENAME}${METRICS_ROTATION_SUFFIX}`), "legacy rotated line\n")
+
+    await loadPluginHooksWith({ metricsLog: true })
+
+    assert.equal(readFileSync(join(root, METRICS_LOG_BASENAME), "utf8"), "legacy newest line\n")
+    assert.equal(readFileSync(join(root, `${METRICS_LOG_BASENAME}${METRICS_ROTATION_SUFFIX}`), "utf8"), "legacy rotated line\n")
+    assert.equal(existsSync(join(root, LEGACY_METRICS_LOG_BASENAME)), false)
+    assert.equal(existsSync(join(root, `${LEGACY_METRICS_LOG_BASENAME}${METRICS_ROTATION_SUFFIX}`)), false)
+  })
+})
+
+test("an existing current-name metrics log wins and the legacy file stays readable beside it", async () => {
+  await withScopedHome(async (home) => {
+    const root = scopedDataRootIn(home)
+    mkdirSync(root, { recursive: true })
+    writeFileSync(join(root, LEGACY_METRICS_LOG_BASENAME), "legacy line\n")
+    writeFileSync(join(root, METRICS_LOG_BASENAME), "current line\n")
+
+    await loadPluginHooksWith({ metricsLog: true })
+
+    assert.equal(readFileSync(join(root, METRICS_LOG_BASENAME), "utf8"), "current line\n")
+    assert.equal(readFileSync(join(root, LEGACY_METRICS_LOG_BASENAME), "utf8"), "legacy line\n")
+  })
+})
+
+test("a later default path load moves a rotated sibling stranded beside an already renamed metrics log", async () => {
+  await withScopedHome(async (home) => {
+    const root = scopedDataRootIn(home)
+    mkdirSync(root, { recursive: true })
+    writeFileSync(join(root, METRICS_LOG_BASENAME), "current line\n")
+    writeFileSync(join(root, `${LEGACY_METRICS_LOG_BASENAME}${METRICS_ROTATION_SUFFIX}`), "legacy rotated line\n")
+
+    await loadPluginHooksWith({ metricsLog: true })
+
+    assert.equal(readFileSync(join(root, `${METRICS_LOG_BASENAME}${METRICS_ROTATION_SUFFIX}`), "utf8"), "legacy rotated line\n")
+    assert.equal(existsSync(join(root, `${LEGACY_METRICS_LOG_BASENAME}${METRICS_ROTATION_SUFFIX}`)), false)
+  })
+})
+
+test("an existing current-name rotated sibling wins and the legacy sibling stays readable beside it", async () => {
+  await withScopedHome(async (home) => {
+    const root = scopedDataRootIn(home)
+    mkdirSync(root, { recursive: true })
+    writeFileSync(join(root, LEGACY_METRICS_LOG_BASENAME), "legacy line\n")
+    writeFileSync(join(root, `${LEGACY_METRICS_LOG_BASENAME}${METRICS_ROTATION_SUFFIX}`), "legacy rotated line\n")
+    writeFileSync(join(root, METRICS_LOG_BASENAME), "current line\n")
+    writeFileSync(join(root, `${METRICS_LOG_BASENAME}${METRICS_ROTATION_SUFFIX}`), "current rotated line\n")
+
+    await loadPluginHooksWith({ metricsLog: true })
+
+    assert.equal(readFileSync(join(root, `${METRICS_LOG_BASENAME}${METRICS_ROTATION_SUFFIX}`), "utf8"), "current rotated line\n")
+    assert.equal(readFileSync(join(root, `${LEGACY_METRICS_LOG_BASENAME}${METRICS_ROTATION_SUFFIX}`), "utf8"), "legacy rotated line\n")
+    assert.equal(readFileSync(join(root, LEGACY_METRICS_LOG_BASENAME), "utf8"), "legacy line\n")
+  })
+})
+
+test("the first default path load renames the legacy live state directory to the current name", async () => {
+  await withScopedHome(async (home) => {
+    const root = scopedDataRootIn(home)
+    const legacyStateDir = join(root, LEGACY_LIVE_STATE_DIR_NAME)
+    mkdirSync(legacyStateDir, { recursive: true })
+    writeFileSync(join(legacyStateDir, MIGRATION_LEGACY_STATE_FILE_NAME), MIGRATION_STATE_FILE_CONTENT)
+
+    await loadPluginHooksWith({ liveStateLog: true })
+
+    assert.equal(readFileSync(join(root, LIVE_STATE_DIR_NAME, MIGRATION_LEGACY_STATE_FILE_NAME), "utf8"), MIGRATION_STATE_FILE_CONTENT)
+    assert.equal(existsSync(legacyStateDir), false)
+  })
+})
+
+test("the first default path load renames the legacy hygiene log and its rotated sibling to the current names", async () => {
+  await withScopedHome(async (home) => {
+    const root = scopedDataRootIn(home)
+    mkdirSync(root, { recursive: true })
+    writeFileSync(join(root, LEGACY_HYGIENE_LOG_BASENAME), "legacy hygiene line\n")
+    writeFileSync(join(root, `${LEGACY_HYGIENE_LOG_BASENAME}${METRICS_ROTATION_SUFFIX}`), "legacy hygiene rotated line\n")
+
+    await loadPluginHooksWith({ ingestionHygieneCopy: true })
+
+    assert.equal(readFileSync(join(root, HYGIENE_LOG_BASENAME), "utf8"), "legacy hygiene line\n")
+    assert.equal(readFileSync(join(root, `${HYGIENE_LOG_BASENAME}${METRICS_ROTATION_SUFFIX}`), "utf8"), "legacy hygiene rotated line\n")
+    assert.equal(existsSync(join(root, LEGACY_HYGIENE_LOG_BASENAME)), false)
+    assert.equal(existsSync(join(root, `${LEGACY_HYGIENE_LOG_BASENAME}${METRICS_ROTATION_SUFFIX}`)), false)
+  })
+})
+
+test("custom path options leave the legacy default locations untouched", async () => {
+  await withScopedHome(async (home) => {
+    const root = scopedDataRootIn(home)
+    mkdirSync(root, { recursive: true })
+    writeFileSync(join(root, LEGACY_METRICS_LOG_BASENAME), "legacy metrics\n")
+    const legacyStateDir = join(root, LEGACY_LIVE_STATE_DIR_NAME)
+    mkdirSync(legacyStateDir, { recursive: true })
+    writeFileSync(join(root, LEGACY_HYGIENE_LOG_BASENAME), "legacy hygiene\n")
+    const customDir = join(home, MIGRATION_CUSTOM_DIR_NAME)
+    mkdirSync(customDir, { recursive: true })
+
+    await loadPluginHooksWith({
+      metricsLog: true,
+      liveStateLog: true,
+      ingestionHygieneCopy: true,
+      metricsPath: join(customDir, "metrics.jsonl"),
+      liveStatePath: join(customDir, "state"),
+      ingestionHygienePath: join(customDir, "hygiene.jsonl"),
+    })
+
+    assert.equal(readFileSync(join(root, LEGACY_METRICS_LOG_BASENAME), "utf8"), "legacy metrics\n")
+    assert.equal(existsSync(legacyStateDir), true)
+    assert.equal(readFileSync(join(root, LEGACY_HYGIENE_LOG_BASENAME), "utf8"), "legacy hygiene\n")
+    assert.equal(existsSync(join(root, METRICS_LOG_BASENAME)), false)
+    assert.equal(existsSync(join(root, LIVE_STATE_DIR_NAME)), false)
+    assert.equal(existsSync(join(root, HYGIENE_LOG_BASENAME)), false)
+  })
+})
+
+test("an unwritable legacy location leaves the old metrics log in place and still loads the plugin", async () => {
+  await withScopedHome(async (home) => {
+    const root = scopedDataRootIn(home)
+    mkdirSync(root, { recursive: true })
+    const legacyMetricsPath = join(root, LEGACY_METRICS_LOG_BASENAME)
+    writeFileSync(legacyMetricsPath, "legacy metrics\n")
+    chmodSync(root, MIGRATION_BLOCKED_DIR_MODE)
+    try {
+      const hooks = await loadPluginHooksWith({ metricsLog: true })
+      const stats = await readStats(hooks, SESSION_ID)
+      assert.equal(typeof stats.options, "object")
+    } finally {
+      chmodSync(root, MIGRATION_RESTORED_DIR_MODE)
+    }
+
+    assert.equal(readFileSync(legacyMetricsPath, "utf8"), "legacy metrics\n")
+  })
+})
+
+test("context_stats is callable and the legacy lru_stats name is no longer registered", async () => {
+  const hooks = await loadPluginHooks()
+
+  assert.equal((hooks as Record<string, Record<string, unknown>>)[RELOAD_TOOL_MAP_KEY]["lru_stats"], undefined)
+  const stats = await readStats(hooks, SESSION_ID)
+  assert.equal(typeof stats.options, "object")
+})
+
+test("the panel command registers under the context slash name and command id", () => {
+  assert.equal(PANEL_COMMAND_SLASH_NAME, "context")
+  assert.equal(PANEL_COMMAND_NAME, "context.panel")
+  assert.equal(PANEL_COMMAND_NAMESPACE, "palette")
+  assert.equal(PANEL_COMMAND_CATEGORY, "Context")
 })
