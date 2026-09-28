@@ -2,8 +2,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { type PanelMetricsLine } from "../plugin/lru-panel-data.ts"
-import { type TotalsKey } from "../plugin/lru-schema.ts"
+import { type PanelMetricsLine } from "../plugin/panel-data.ts"
+import { type TotalsKey } from "../plugin/schema.ts"
 
 const SESSION_A = "sess-panel-a"
 const SESSION_B = "sess-panel-b"
@@ -50,7 +50,7 @@ const TOTALS_COLLAPSED_WINDOWS = 2
 const TOTALS_COLLAPSED_WINDOW_BYTES = 4096
 
 // One value per shared schema totals key: the mapped type forces a fixture
-// value for every key in plugin/lru-schema.ts, so a counter added there
+// value for every key in plugin/schema.ts, so a counter added there
 // fails to compile here until it is given a value.
 const TOTALS_VALUES: Record<TotalsKey, number> = {
   evictions: TOTALS_EVICTIONS,
@@ -110,7 +110,7 @@ const makeLine = (overrides: Partial<PanelMetricsLine> = {}): PanelMetricsLine =
 const serialize = (lines: PanelMetricsLine[]): string => lines.map((line) => JSON.stringify(line)).join("\n") + "\n"
 
 const withTempDir = async (run: (dir: string) => Promise<void>): Promise<void> => {
-  const dir = mkdtempSync(join(tmpdir(), "lru-panel-data-"))
+  const dir = mkdtempSync(join(tmpdir(), "ctx-panel-data-"))
   try {
     await run(dir)
   } finally {

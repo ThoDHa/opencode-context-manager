@@ -4,23 +4,23 @@ import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
 
-import lruContextFactory, {
+import contextManagerFactory, {
   DEFAULT_INGESTION_HYGIENE_ROTATION_MAX_BYTES,
   DEFAULT_METRICS_ROTATION_MAX_BYTES,
   METRIC_NUMBER_KEYS,
   METRICS_CURSOR_KEYS,
   RAW_COUNTER_KEYS,
-} from "../plugin/lru-context.ts"
-import { loadPanelData } from "../plugin/lru-panel-data.ts"
-import { TOTALS_KEYS } from "../plugin/lru-schema.ts"
+} from "../plugin/context-manager.ts"
+import { loadPanelData } from "../plugin/panel-data.ts"
+import { TOTALS_KEYS } from "../plugin/schema.ts"
 
 const TRANSFORM_HOOK = "experimental.chat.messages.transform"
 const CHAT_PARAMS_HOOK = "chat.params"
-const SESSION_ID = "lru-harness-session"
-const SESSION_ID_B = "lru-harness-session-b"
+const SESSION_ID = "ctx-harness-session"
+const SESSION_ID_B = "ctx-harness-session-b"
 const BASH_TOOL = "bash"
 const READ_TOOL = "read"
-const TOMBSTONE_MARKER = "[lru-evicted]"
+const TOMBSTONE_MARKER = "[ctx-evicted]"
 const TOMBSTONE_SUFFIX = " was evicted to reclaim context; re-run the tool to reload its output."
 const SMALL_TEXT_CHARS = 60
 const SMALL_TOOL_OUTPUT_CHARS = 256
@@ -97,7 +97,7 @@ const PATTERN_INPUT_KEY = "pattern"
 const INCLUDE_INPUT_KEY = "include"
 const OFFSET_INPUT_KEY = "offset"
 const LIMIT_INPUT_KEY = "limit"
-const HINT_MARKER = "[lru-hot]"
+const HINT_MARKER = "[ctx-hot]"
 const HINT_LABEL = "recently active:"
 const HINT_SUBJECT_SEPARATOR = ", "
 const HINT_TEST_SUBJECT_CAP = 2
@@ -120,7 +120,7 @@ const SYSTEM_GUARD_NON_ARRAY_VALUE = "not a block array"
 const RELOAD_TOOL_NAME = "read_evicted"
 const RELOAD_TOOL_MAP_KEY = "tool"
 const RELOAD_POINTER_LEAD = " Evicted output stashed; reload it with"
-const STASH_MARKER = "[lru-stash]"
+const STASH_MARKER = "[ctx-stash]"
 const STASH_OLDER_LEAD = "older matches for subject"
 const STASH_MESSAGE_LABEL = "at message"
 const STASH_MATCH_SEPARATOR = "; "
@@ -133,12 +133,12 @@ const STASH_LIMIT = 50
 const STASH_OVERFLOW_COUNT = 51
 const INVALID_SUBJECT_VALUE = 42
 const STASH_ISOLATION_SUBJECT = "/data/shared-stash.txt"
-const STASH_ISOLATION_SESSION_C = "lru-harness-session-c"
-const DEDUP_MARKER = "[lru-deduped]"
-const TOOL_ERROR_PREFIX = "[lru-error] "
+const STASH_ISOLATION_SESSION_C = "ctx-harness-session-c"
+const DEDUP_MARKER = "[ctx-deduped]"
+const TOOL_ERROR_PREFIX = "[ctx-error] "
 const FAULT_SUBJECT = "/data/fault-subject.txt"
 const HINT_RENDERED_SUBJECT = "/data/hint-rendered.txt"
-const COMPACTION_BLOCK_MARKER = "[lru-context]"
+const COMPACTION_BLOCK_MARKER = "[ctx]"
 const STASH_NOTE_SUBJECTS_LEAD = "newest subjects"
 const COMPACTION_SUBJECT_BOUND = 2
 const COMPACTION_BOUND_SUBJECTS = ["/data/comp-bound-a.txt", "/data/comp-bound-b.txt", "/data/comp-bound-c.txt"]
@@ -160,6 +160,10 @@ const AGED_RETOUCH_OFFSET = 100
 const AGED_FILLER_COUNT = 6
 const AGED_BUNDLE_CHARS = MIN_EVICTABLE_BYTES + AGED_FILLER_COUNT * FILLER_TEXT_CHARS
 const AGED_TWO_READ_BUNDLE_CHARS = 2 * MIN_EVICTABLE_BYTES + AGED_FILLER_COUNT * FILLER_TEXT_CHARS
+const LEGACY_EVICTED_MARKER = "[lru-evicted]"
+const LEGACY_DEDUPED_MARKER = "[lru-deduped]"
+const LEGACY_HINT_LINE_PREFIX = "[lru-hot] recently active:"
+const LEGACY_TOMBSTONE_PATH = "/data/legacy-tombstoned.txt"
 const TOOL_FAULT_MESSAGE = "tool getter exploded"
 const DEDUP_SUPERSEDED_LEAD = "identical call superseded by the newer output at message"
 const DEDUP_RANGE_SUPERSEDED_LEAD = "range read superseded by the retained range at message"
@@ -190,8 +194,8 @@ const FILE_MIME_PDF = "application/pdf"
 const FILE_URL = "file:///data/notes.txt"
 const FILE_URL_OTHER = "file:///data/other.txt"
 const FILE_FILENAME = "notes.txt"
-const FILE_PART_ID = "prt_lru_file_fixture"
-const PURGE_MARKER = "[lru-purged-input]"
+const FILE_PART_ID = "prt_ctx_file_fixture"
+const PURGE_MARKER = "[ctx-purged-input]"
 const PURGE_ERROR_PATH = "/data/errored-purge.txt"
 const PURGE_BOUNDARY_PATH = "/data/boundary-purge.txt"
 const PURGE_PENDING_PATH = "/data/pending-purge.txt"
@@ -357,10 +361,10 @@ const buildSmallBundle = (): MessageBundle => ({
 })
 
 const loadPluginHooks = async (): Promise<HookMap> =>
-  (await lruContextFactory({}, { metricsLog: false, liveStateLog: false })) as HookMap
+  (await contextManagerFactory({}, { metricsLog: false, liveStateLog: false })) as HookMap
 
 const loadPluginHooksWith = async (options: Record<string, unknown>): Promise<HookMap> =>
-  (await lruContextFactory({}, { metricsLog: false, liveStateLog: false, ...options })) as HookMap
+  (await contextManagerFactory({}, { metricsLog: false, liveStateLog: false, ...options })) as HookMap
 
 type HintPartRef = { messageIndex: number; partIndex: number; text: string }
 
@@ -1075,7 +1079,7 @@ test("transform keeps the captured limit in charge when an explicit defaultConte
   const bundle = buildStandardBundle(SESSION_ID, "/data/captured-wins.txt")
   await runTransform(hooks, bundle)
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
   assert.equal(stats.modelContextTokens, SMALL_CONTEXT_LIMIT)
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
@@ -1088,7 +1092,7 @@ test("transform lets the per model override beat the model reported limit and la
   const bundle = buildStandardBundle(SESSION_ID, "/data/override-beats-reported.txt")
   await runTransform(hooks, bundle)
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
   assert.equal(stats.modelContextTokens, SMALL_CONTEXT_LIMIT)
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_OVERRIDE)
@@ -1104,7 +1108,7 @@ test("transform lets the per model override beat the explicit defaultContextToke
   const bundle = buildStandardBundle(SESSION_ID, "/data/override-beats-default.txt")
   await runTransform(hooks, bundle)
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
   assert.equal(stats.modelContextTokens, SMALL_CONTEXT_LIMIT)
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_OVERRIDE)
@@ -1117,7 +1121,7 @@ test("transform applies the per model override when chat params carry no reporte
   const bundle = buildStandardBundle(SESSION_ID, "/data/override-without-reported.txt")
   await runTransform(hooks, bundle)
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
   assert.equal(stats.modelContextTokens, SMALL_CONTEXT_LIMIT)
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_OVERRIDE)
@@ -1130,7 +1134,7 @@ test("transform ignores per model map entries for unknown model ids and keeps th
   const bundle = buildStandardBundle(SESSION_ID, "/data/override-unknown-model.txt")
   await runTransform(hooks, bundle)
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
   assert.equal(stats.modelContextTokens, WATERMARK_PROBE_CONTEXT_LIMIT)
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
@@ -1146,7 +1150,7 @@ test("transform ignores non numeric override entries and falls through to the ex
   const bundle = buildStandardBundle(SESSION_ID, "/data/override-invalid-entry.txt")
   await runTransform(hooks, bundle)
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
   assert.equal(stats.modelContextTokens, EXPLICIT_DEFAULT_CONTEXT_TOKENS)
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_DEFAULT)
@@ -1162,7 +1166,7 @@ test("transform ignores infinite override entries and an infinite defaultContext
   const bundle = buildStandardBundle(SESSION_ID, "/data/infinite-values.txt")
   await runTransform(hooks, bundle)
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
   assert.deepEqual(stats.options.modelContextTokens, {})
   assert.equal(stats.options.defaultContextTokens, null)
@@ -1178,7 +1182,7 @@ test("transform ignores an infinite model reported limit and falls through to th
   await runTransform(hooks, bundle)
 
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal(stats.modelContextTokens, EXPLICIT_DEFAULT_CONTEXT_TOKENS)
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_DEFAULT)
 })
@@ -1229,7 +1233,7 @@ test("transform resets a stored budget captured for one model when a later chat 
   await runTransform(hooks, bundle)
 
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal(stats.modelContextTokens, null)
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
   assert.deepEqual(stats.lastRun, {
@@ -1248,7 +1252,7 @@ test("transform retains a stored budget when a later chat params event re-fires 
   await runTransform(hooks, bundle)
 
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal(stats.modelContextTokens, WATERMARK_PROBE_CONTEXT_LIMIT)
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
 })
@@ -1262,7 +1266,7 @@ test("transform retains a stored identity-less budget when a later chat params e
   await runTransform(hooks, bundle)
 
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal(stats.modelContextTokens, WATERMARK_PROBE_CONTEXT_LIMIT)
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
 })
@@ -1276,7 +1280,7 @@ test("transform replaces the stored budget when a later chat params event names 
   await runTransform(hooks, bundle)
 
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal(stats.modelContextTokens, ISOLATION_CONTEXT_LIMIT_B)
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
 })
@@ -2234,7 +2238,7 @@ test("metrics log counts a collapsed range read and its bytes in the savings tot
     assert.equal(lines[0].totals.collapsedWindows, RANGE_COLLAPSE_WINDOW_COUNT)
     assert.equal(lines[0].totals.collapsedWindowBytes, MIN_EVICTABLE_BYTES)
     assert.equal(lines[0].totals.collapsedWindowTokensSaved, tokensForChars(MIN_EVICTABLE_BYTES))
-    assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).collapsedWindows, RANGE_COLLAPSE_WINDOW_COUNT)
+    assert.equal(countersOf(await readStats(hooks, SESSION_ID)).collapsedWindows, RANGE_COLLAPSE_WINDOW_COUNT)
   } finally {
     cleanupMetricsDir(metricsDir)
   }
@@ -2374,7 +2378,7 @@ test("a contained window scrolled into the recent window keeps counting as colla
     type: "text",
     text: rangeTombstoneFor(RANGE_COLLAPSE_PATH, 100, 150, 3, 80, 200),
   })
-  assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).collapsedWindows, RANGE_COLLAPSE_WINDOW_COUNT)
+  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).collapsedWindows, RANGE_COLLAPSE_WINDOW_COUNT)
 })
 
 test("transform leaves a duplicate file attachment inside the recent window untouched", async () => {
@@ -2451,7 +2455,7 @@ test("lru_stats counts file attachment dedup tombstones in the deduped counter",
   ])
   await runTransform(hooks, bundle)
 
-  assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).deduped, 1)
+  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).deduped, 1)
 })
 
 test("transform purges the input of an errored tool part one message outside the recent window while keeping its error output", async () => {
@@ -2918,7 +2922,7 @@ test("transform still dedups a pattern protected older duplicate with the newest
   assert.equal(toolPartAt(bundle.messages[3], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
 })
 
-const stashSessionId = (index: number): string => `lru-stash-session-${index}`
+const stashSessionId = (index: number): string => `ctx-stash-session-${index}`
 
 const stashSessionSubject = (index: number): string => `/data/stash-session-${index}.txt`
 
@@ -3034,7 +3038,7 @@ test("read_evicted does not refresh a session stash on a miss probe so the probi
   )
 })
 
-const limitSessionId = (index: number): string => `lru-limit-session-${index}`
+const limitSessionId = (index: number): string => `ctx-limit-session-${index}`
 
 test("chat params drops the least recently informed session limit when a ninth session stores a context limit", async () => {
   const hooks = await loadPluginHooks()
@@ -3056,7 +3060,7 @@ test("chat params drops the least recently informed session limit when a ninth s
   assert.ok(toolPartAt(newest.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
 })
 
-const hintSessionId = (index: number): string => `lru-hint-session-${index}`
+const hintSessionId = (index: number): string => `ctx-hint-session-${index}`
 
 const hintSessionSubject = (index: number): string => `/data/hint-session-${index}.txt`
 
@@ -3163,7 +3167,7 @@ const METRICS_LOG_BASENAME = "lru-metrics.jsonl"
 const DEFAULT_METRICS_PATH = join(homedir(), ...METRICS_DIR_SEGMENTS, METRICS_LOG_BASENAME)
 const HYGIENE_LOG_BASENAME = "lru-hygiene.jsonl"
 const DEFAULT_INGESTION_HYGIENE_PATH = join(homedir(), ...METRICS_DIR_SEGMENTS, HYGIENE_LOG_BASENAME)
-const METRICS_TEMP_DIR_PREFIX = "lru-metrics-test-"
+const METRICS_TEMP_DIR_PREFIX = "ctx-metrics-test-"
 const METRICS_LOG_FILE_NAME = "metrics.jsonl"
 const METRICS_BLOCKED_DIR_NAME = "missing-subdir"
 const METRICS_LINE_SEPARATOR = "\n"
@@ -3188,7 +3192,7 @@ const STATS_ISOLATION_B_SUBJECTS = ["/data/isolated-b1.txt", "/data/isolated-b2.
 const STATS_ISOLATION_B_EVICTED_COUNT = 2
 const METRICS_SESSION_BOUND = 8
 const METRICS_SESSION_OVERFLOW_COUNT = 9
-const METRICS_PROBE_SESSION_ID = "lru-metrics-probe-session"
+const METRICS_PROBE_SESSION_ID = "ctx-metrics-probe-session"
 const METRICS_PROBE_MISS_SUBJECT = "/data/metrics-probe-miss.txt"
 const METRICS_LINES_AFTER_RELOAD = 2
 const METRICS_LINES_AFTER_RECOVERY = 1
@@ -3226,7 +3230,7 @@ const METRICS_ROTATION_PANEL_SEED_EVICTIONS = 5
 const METRICS_ROTATION_PANEL_SEED_MESSAGES_AGO = 3
 const METRICS_ROTATION_PANEL_SEED_ESTIMATED_TOKENS = 900
 const METRICS_ROTATION_PANEL_SEED_BYTES = METRICS_ROTATION_PANEL_SEED_EVICTIONS * MIN_EVICTABLE_BYTES
-const METRICS_ROTATION_PANEL_SEED_SESSION = "lru-rotation-seed-session"
+const METRICS_ROTATION_PANEL_SEED_SESSION = "ctx-rotation-seed-session"
 const STATS_ZEROED_COUNTERS = {
   evictions: 0,
   bytesReclaimed: 0,
@@ -3268,7 +3272,7 @@ test("the zeroed counters fixture, the totals schema, and the producer's numeric
 
 type StatsToolDefinition = { execute: (args: unknown, context: unknown) => Promise<unknown> }
 
-const lruStats = async (hooks: HookMap, sessionID: string): Promise<Record<string, unknown>> =>
+const readStats = async (hooks: HookMap, sessionID: string): Promise<Record<string, unknown>> =>
   JSON.parse(
     (await (hooks as Record<string, Record<string, StatsToolDefinition>>)[RELOAD_TOOL_MAP_KEY][STATS_TOOL_NAME].execute(
       {},
@@ -3297,7 +3301,7 @@ const metricsLinesIn = (metricsPath: string): Record<string, unknown>[] =>
     .filter((line) => line.length > 0)
     .map((line) => JSON.parse(line) as Record<string, unknown>)
 
-const metricsSessionId = (index: number): string => `lru-metrics-session-${index}`
+const metricsSessionId = (index: number): string => `ctx-metrics-session-${index}`
 
 const metricsSessionSubject = (index: number): string => `/data/metrics-session-${index}.txt`
 
@@ -3338,7 +3342,7 @@ const metricsRotationPanelSeedLine = (session: string = SESSION_ID): Record<stri
 test("lru_stats reports zeroed counters unknown budget and empty stash for a session without activity", async () => {
   const hooks = await loadPluginHooks()
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
 
   assert.equal(stats.session, SESSION_ID)
   assert.deepEqual(stats.options, {
@@ -3375,7 +3379,7 @@ test("lru_stats reports zeroed counters unknown budget and empty stash for a ses
 test("lru_stats reports the explicit defaultContextTokens option as the budget when no limit was captured", async () => {
   const hooks = await loadPluginHooksWith({ defaultContextTokens: EXPLICIT_DEFAULT_CONTEXT_TOKENS })
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
 
   assert.equal(stats.options.defaultContextTokens, EXPLICIT_DEFAULT_CONTEXT_TOKENS)
   assert.equal(stats.modelContextTokens, EXPLICIT_DEFAULT_CONTEXT_TOKENS)
@@ -3388,7 +3392,7 @@ test("lru_stats records an unknown budget last run with null watermark and defic
   const bundle = buildStandardBundle(SESSION_ID, STATS_SKIP_RUN_SUBJECT)
   await runTransform(hooks, bundle)
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal(stats.modelContextTokens, null)
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
   assert.deepEqual(stats.lastRun, {
@@ -3405,7 +3409,7 @@ test("lru_stats counts the eviction reclaimed bytes stash entry and last run def
   const bundle = buildStandardBundle(SESSION_ID, STATS_SINGLE_EVICTION_SUBJECT)
   await runTransform(hooks, bundle)
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal(stats.modelContextTokens, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
   assert.deepEqual(countersOf(stats), {
@@ -3429,7 +3433,7 @@ test("lru_stats derives the eviction token-savings estimate from the reclaimed b
   const bundle = buildStandardBundle(SESSION_ID, STATS_SINGLE_EVICTION_SUBJECT)
   await runTransform(hooks, bundle)
 
-  assert.deepEqual(countersOf(await lruStats(hooks, SESSION_ID)), {
+  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), {
     ...STATS_ZEROED_COUNTERS,
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
@@ -3444,7 +3448,7 @@ test("lru_stats scales the eviction token-savings estimate by the resolved chars
   const bundle = buildStandardBundle(SESSION_ID, STATS_SINGLE_EVICTION_SUBJECT)
   await runTransform(hooks, bundle)
 
-  const counters = countersOf(await lruStats(hooks, SESSION_ID))
+  const counters = countersOf(await readStats(hooks, SESSION_ID))
   assert.equal(counters.evictions, 1)
   assert.equal(counters.bytesReclaimed, MIN_EVICTABLE_BYTES)
   assert.equal(counters.evictionTokensSaved, Math.ceil(MIN_EVICTABLE_BYTES / SAVINGS_CUSTOM_CHARS_PER_TOKEN))
@@ -3455,13 +3459,13 @@ test("lru_stats counts stash hits and misses from read_evicted and leaves invali
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
   assert.equal(await readEvicted(hooks, STATS_MISS_SUBJECT, SESSION_ID), stashMissFor(STATS_MISS_SUBJECT))
-  assert.deepEqual(countersOf(await lruStats(hooks, SESSION_ID)), STATS_ZEROED_COUNTERS)
+  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), STATS_ZEROED_COUNTERS)
 
   const bundle = buildStandardBundle(SESSION_ID, STATS_HIT_SUBJECT)
   await runTransform(hooks, bundle)
 
   assert.equal(await readEvicted(hooks, STATS_MISS_SUBJECT, SESSION_ID), stashMissFor(STATS_MISS_SUBJECT))
-  const afterMiss = await lruStats(hooks, SESSION_ID)
+  const afterMiss = await readStats(hooks, SESSION_ID)
   assert.deepEqual(countersOf(afterMiss), {
     ...STATS_ZEROED_COUNTERS,
     evictions: 1,
@@ -3472,12 +3476,12 @@ test("lru_stats counts stash hits and misses from read_evicted and leaves invali
 
   assert.equal(await readEvicted(hooks, INVALID_SUBJECT_VALUE, SESSION_ID), invalidSubjectMissFor("number"))
   assert.equal(await readEvicted(hooks, "", SESSION_ID), invalidSubjectMissFor("string"))
-  const afterInvalid = await lruStats(hooks, SESSION_ID)
+  const afterInvalid = await readStats(hooks, SESSION_ID)
   assert.equal(countersOf(afterInvalid).stashMisses, 1)
   assert.equal(countersOf(afterInvalid).stashHits, 0)
 
   assert.equal(await readEvicted(hooks, STATS_HIT_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
-  const afterHit = await lruStats(hooks, SESSION_ID)
+  const afterHit = await readStats(hooks, SESSION_ID)
   assert.deepEqual(countersOf(afterHit), {
     ...STATS_ZEROED_COUNTERS,
     evictions: 1,
@@ -3498,10 +3502,10 @@ test("lru_stats counts a post eviction touch exactly once for a matching later c
 
   bundle.messages.push(syntheticMessageFor(SESSION_ID, [pathToolPart(POST_EVICT_TOUCH_PATH, APPEARANCE_ONLY_OUTPUT_BYTES)]))
   await runTransform(hooks, bundle)
-  assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).postEvictionTouches, 1)
+  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).postEvictionTouches, 1)
 
   await runTransform(hooks, bundle)
-  assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).postEvictionTouches, 1)
+  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).postEvictionTouches, 1)
 })
 
 test("lru_stats leaves post eviction touches at zero when a later call matches nothing evicted", async () => {
@@ -3516,7 +3520,7 @@ test("lru_stats leaves post eviction touches at zero when a later call matches n
   )
   await runTransform(hooks, bundle)
 
-  assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).postEvictionTouches, 0)
+  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).postEvictionTouches, 0)
 })
 
 test("lru_stats forgets the oldest evicted subject past the hundred subject cap and stops counting its post eviction touches", async () => {
@@ -3541,7 +3545,7 @@ test("lru_stats forgets the oldest evicted subject past the hundred subject cap 
   )
   await runTransform(hooks, bundle)
 
-  assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).postEvictionTouches, 1)
+  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).postEvictionTouches, 1)
 })
 
 test("lru_stats counts dedup tombstones without counting evictions and stays incremental across repeated transforms", async () => {
@@ -3555,12 +3559,12 @@ test("lru_stats counts dedup tombstones without counting evictions and stays inc
   ])
   await runTransform(hooks, bundle)
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal(countersOf(stats).deduped, 1)
   assert.equal(countersOf(stats).evictions, 0)
 
   await runTransform(hooks, bundle)
-  assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).deduped, 1)
+  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).deduped, 1)
 })
 
 test("lru_stats accumulates the dedup token-savings estimate from each superseded duplicate's bytes", async () => {
@@ -3578,7 +3582,7 @@ test("lru_stats accumulates the dedup token-savings estimate from each supersede
 
   await runTransform(hooks, buildBundle(dedupSavingsParts()))
 
-  assert.deepEqual(countersOf(await lruStats(hooks, SESSION_ID)), {
+  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), {
     ...STATS_ZEROED_COUNTERS,
     deduped: DEDUP_SAVINGS_PAIR_COUNT,
     dedupedBytes: DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES,
@@ -3589,7 +3593,7 @@ test("lru_stats accumulates the dedup token-savings estimate from each supersede
   // The host re-materializes the stored messages on every run, so a standing
   // pair re-tombstones every run: the repeat runs on a fresh identical copy.
   await runTransform(hooks, buildBundle(dedupSavingsParts()))
-  const counters = countersOf(await lruStats(hooks, SESSION_ID))
+  const counters = countersOf(await readStats(hooks, SESSION_ID))
   assert.equal(counters.deduped, DEDUP_SAVINGS_PAIR_COUNT * REPEATED_STANDING_RUNS)
   assert.equal(counters.dedupedUnique, DEDUP_SAVINGS_PAIR_COUNT)
   assert.equal(counters.dedupedBytes, DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES * REPEATED_STANDING_RUNS)
@@ -3609,7 +3613,7 @@ test("lru_stats counts stash drops when a single run evicts fifty one entries pa
   ])
   await runTransform(hooks, bundle)
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal(countersOf(stats).evictions, STASH_OVERFLOW_COUNT)
   assert.equal(countersOf(stats).stashDropped, 1)
   assert.equal(countersOf(stats).bytesReclaimed, STASH_OVERFLOW_COUNT * MIN_EVICTABLE_BYTES)
@@ -3627,7 +3631,7 @@ test("transform drops nothing from a session stash holding exactly the fifty ent
   ])
   await runTransform(hooks, bundle)
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal(countersOf(stats).stashDropped, 0)
   assert.deepEqual(stats.stash, { entries: STASH_LIMIT, capacity: STASH_LIMIT })
   assert.equal(await readEvicted(hooks, subjects[0], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
@@ -3657,7 +3661,7 @@ test("read_evicted drops the earliest runs' entries first when later runs push a
   fillerMessages().forEach((parts) => bundle.messages.push(syntheticMessageFor(SESSION_ID, parts)))
   await runTransform(hooks, bundle)
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal(countersOf(stats).evictions, STASH_CROSS_RUN_FIRST_COUNT + STASH_CROSS_RUN_SECOND_COUNT)
   assert.equal(countersOf(stats).stashDropped, STASH_CROSS_RUN_DROP_COUNT)
   assert.deepEqual(stats.stash, { entries: STASH_LIMIT, capacity: STASH_LIMIT })
@@ -3830,7 +3834,7 @@ test("metrics log writes nothing when metricsLog is false while counters still u
     await runTransform(hooks, bundle)
 
     assert.equal(existsSync(metricsLogPathIn(metricsDir)), false)
-    assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).evictions, 1)
+    assert.equal(countersOf(await readStats(hooks, SESSION_ID)).evictions, 1)
   } finally {
     cleanupMetricsDir(metricsDir)
   }
@@ -3845,7 +3849,7 @@ test("metrics log records an unwritable path in logWriteError surfaced through l
     const bundle = buildStandardBundle(SESSION_ID, STATS_BLOCKED_SUBJECT)
     await runTransform(hooks, bundle)
 
-    const stats = await lruStats(hooks, SESSION_ID)
+    const stats = await readStats(hooks, SESSION_ID)
     assert.equal(typeof stats.logWriteError, "string")
     assert.ok((stats.logWriteError as string).length > 0)
     assert.equal(countersOf(stats).evictions, 1)
@@ -3870,7 +3874,7 @@ test("lru_stats keeps metrics isolated between two sessions", async () => {
   await runTransform(hooks, sessionB)
   await runTransform(hooks, sessionA)
 
-  const statsA = await lruStats(hooks, SESSION_ID)
+  const statsA = await readStats(hooks, SESSION_ID)
   assert.equal(statsA.session, SESSION_ID)
   assert.deepEqual(countersOf(statsA), {
     ...STATS_ZEROED_COUNTERS,
@@ -3878,7 +3882,7 @@ test("lru_stats keeps metrics isolated between two sessions", async () => {
     bytesReclaimed: MIN_EVICTABLE_BYTES,
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
   })
-  const statsB = await lruStats(hooks, SESSION_ID_B)
+  const statsB = await readStats(hooks, SESSION_ID_B)
   assert.equal(statsB.session, SESSION_ID_B)
   assert.deepEqual(countersOf(statsB), {
     ...STATS_ZEROED_COUNTERS,
@@ -3894,10 +3898,10 @@ test("lru_stats drops the least recently active session metrics when a ninth ses
 
   await storeMetricsSession(hooks, METRICS_SESSION_OVERFLOW_COUNT - 1)
 
-  assert.deepEqual(countersOf(await lruStats(hooks, metricsSessionId(0))), STATS_ZEROED_COUNTERS)
-  assert.equal(countersOf(await lruStats(hooks, metricsSessionId(1))).evictions, 1)
-  assert.equal(countersOf(await lruStats(hooks, metricsSessionId(METRICS_SESSION_BOUND - 1))).evictions, 1)
-  assert.equal(countersOf(await lruStats(hooks, metricsSessionId(METRICS_SESSION_OVERFLOW_COUNT - 1))).evictions, 1)
+  assert.deepEqual(countersOf(await readStats(hooks, metricsSessionId(0))), STATS_ZEROED_COUNTERS)
+  assert.equal(countersOf(await readStats(hooks, metricsSessionId(1))).evictions, 1)
+  assert.equal(countersOf(await readStats(hooks, metricsSessionId(METRICS_SESSION_BOUND - 1))).evictions, 1)
+  assert.equal(countersOf(await readStats(hooks, metricsSessionId(METRICS_SESSION_OVERFLOW_COUNT - 1))).evictions, 1)
 })
 
 test("read_evicted leaves live session metrics untouched when a never-transformed session probes a stash miss at the session bound", async () => {
@@ -3909,37 +3913,37 @@ test("read_evicted leaves live session metrics untouched when a never-transforme
     stashMissFor(METRICS_PROBE_MISS_SUBJECT),
   )
 
-  assert.equal(countersOf(await lruStats(hooks, metricsSessionId(0))).evictions, 1)
-  assert.equal(countersOf(await lruStats(hooks, metricsSessionId(METRICS_SESSION_BOUND - 1))).evictions, 1)
-  assert.deepEqual(countersOf(await lruStats(hooks, METRICS_PROBE_SESSION_ID)), STATS_ZEROED_COUNTERS)
+  assert.equal(countersOf(await readStats(hooks, metricsSessionId(0))).evictions, 1)
+  assert.equal(countersOf(await readStats(hooks, metricsSessionId(METRICS_SESSION_BOUND - 1))).evictions, 1)
+  assert.deepEqual(countersOf(await readStats(hooks, METRICS_PROBE_SESSION_ID)), STATS_ZEROED_COUNTERS)
 })
 
 test("lru_stats refreshes a probing session's metrics so it survives when a ninth session transforms", async () => {
   const hooks = await loadPluginHooks()
   for (let index = 0; index < METRICS_SESSION_BOUND; index += 1) await storeMetricsSession(hooks, index)
 
-  await lruStats(hooks, metricsSessionId(0))
+  await readStats(hooks, metricsSessionId(0))
   await storeMetricsSession(hooks, METRICS_SESSION_OVERFLOW_COUNT - 1)
 
-  assert.equal(countersOf(await lruStats(hooks, metricsSessionId(0))).evictions, 1)
-  assert.deepEqual(countersOf(await lruStats(hooks, metricsSessionId(1))), STATS_ZEROED_COUNTERS)
-  assert.equal(countersOf(await lruStats(hooks, metricsSessionId(METRICS_SESSION_OVERFLOW_COUNT - 1))).evictions, 1)
+  assert.equal(countersOf(await readStats(hooks, metricsSessionId(0))).evictions, 1)
+  assert.deepEqual(countersOf(await readStats(hooks, metricsSessionId(1))), STATS_ZEROED_COUNTERS)
+  assert.equal(countersOf(await readStats(hooks, metricsSessionId(METRICS_SESSION_OVERFLOW_COUNT - 1))).evictions, 1)
 })
 
 test("lru_stats leaves live session metrics untouched when a never-transformed session opens the stats tool at the session bound", async () => {
   const hooks = await loadPluginHooks()
   for (let index = 0; index < METRICS_SESSION_BOUND; index += 1) await storeMetricsSession(hooks, index)
 
-  assert.deepEqual(countersOf(await lruStats(hooks, METRICS_PROBE_SESSION_ID)), STATS_ZEROED_COUNTERS)
-  assert.equal(countersOf(await lruStats(hooks, metricsSessionId(0))).evictions, 1)
-  assert.equal(countersOf(await lruStats(hooks, metricsSessionId(METRICS_SESSION_BOUND - 1))).evictions, 1)
+  assert.deepEqual(countersOf(await readStats(hooks, METRICS_PROBE_SESSION_ID)), STATS_ZEROED_COUNTERS)
+  assert.equal(countersOf(await readStats(hooks, metricsSessionId(0))).evictions, 1)
+  assert.equal(countersOf(await readStats(hooks, metricsSessionId(METRICS_SESSION_BOUND - 1))).evictions, 1)
 })
 
 test("lru_stats does not refresh a session stash so a stats-only probe leaves it exposed when a ninth session stashes an eviction", async () => {
   const hooks = await loadPluginHooks()
   for (let index = 0; index < STASH_SESSION_BOUND; index += 1) await evictStashSession(hooks, index)
 
-  await lruStats(hooks, stashSessionId(0))
+  await readStats(hooks, stashSessionId(0))
   await evictStashSession(hooks, STASH_SESSION_OVERFLOW_COUNT - 1)
 
   assert.equal(
@@ -3965,7 +3969,7 @@ test("metrics log clears a recorded write failure once a later write succeeds", 
 
     const bundle = buildStandardBundle(SESSION_ID, STATS_BLOCKED_SUBJECT)
     await runTransform(hooks, bundle)
-    assert.equal(typeof (await lruStats(hooks, SESSION_ID)).logWriteError, "string")
+    assert.equal(typeof (await readStats(hooks, SESSION_ID)).logWriteError, "string")
 
     mkdirSync(join(metricsDir, METRICS_BLOCKED_DIR_NAME), { recursive: true })
     bundle.messages.push(
@@ -3973,7 +3977,7 @@ test("metrics log clears a recorded write failure once a later write succeeds", 
     )
     await runTransform(hooks, bundle)
 
-    const stats = await lruStats(hooks, SESSION_ID)
+    const stats = await readStats(hooks, SESSION_ID)
     assert.equal(Object.hasOwn(stats, "logWriteError"), false)
     assert.equal(countersOf(stats).evictions, 1)
     assert.equal(countersOf(stats).postEvictionTouches, 1)
@@ -3985,20 +3989,20 @@ test("metrics log clears a recorded write failure once a later write succeeds", 
 
 test("lru_stats reports the metrics rotation cap in options defaulting to twenty MiB and falling back on invalid caps", async () => {
   assert.equal(
-    ((await lruStats(await loadPluginHooks(), SESSION_ID)).options as Record<string, unknown>).metricsRotationMaxBytes,
+    ((await readStats(await loadPluginHooks(), SESSION_ID)).options as Record<string, unknown>).metricsRotationMaxBytes,
     DEFAULT_METRICS_ROTATION_MAX_BYTES,
   )
 
   const customHooks = await loadPluginHooksWith({ metricsRotationMaxBytes: METRICS_ROTATION_CUSTOM_CAP })
   assert.equal(
-    ((await lruStats(customHooks, SESSION_ID)).options as Record<string, unknown>).metricsRotationMaxBytes,
+    ((await readStats(customHooks, SESSION_ID)).options as Record<string, unknown>).metricsRotationMaxBytes,
     METRICS_ROTATION_CUSTOM_CAP,
   )
 
   for (const invalidCap of METRICS_ROTATION_INVALID_CAPS) {
     const hooks = await loadPluginHooksWith({ metricsRotationMaxBytes: invalidCap })
     assert.equal(
-      ((await lruStats(hooks, SESSION_ID)).options as Record<string, unknown>).metricsRotationMaxBytes,
+      ((await readStats(hooks, SESSION_ID)).options as Record<string, unknown>).metricsRotationMaxBytes,
       DEFAULT_METRICS_ROTATION_MAX_BYTES,
     )
   }
@@ -4006,20 +4010,20 @@ test("lru_stats reports the metrics rotation cap in options defaulting to twenty
 
 test("lru_stats reports metricsMinLineIntervalMs defaulting to sixty seconds and falling back on invalid values", async () => {
   assert.equal(
-    ((await lruStats(await loadPluginHooks(), SESSION_ID)).options as Record<string, unknown>).metricsMinLineIntervalMs,
+    ((await readStats(await loadPluginHooks(), SESSION_ID)).options as Record<string, unknown>).metricsMinLineIntervalMs,
     DEFAULT_METRICS_MIN_LINE_INTERVAL_MS,
   )
 
   const customHooks = await loadPluginHooksWith({ metricsMinLineIntervalMs: METRICS_COALESCE_TEST_INTERVAL_MS })
   assert.equal(
-    ((await lruStats(customHooks, SESSION_ID)).options as Record<string, unknown>).metricsMinLineIntervalMs,
+    ((await readStats(customHooks, SESSION_ID)).options as Record<string, unknown>).metricsMinLineIntervalMs,
     METRICS_COALESCE_TEST_INTERVAL_MS,
   )
 
   for (const invalidInterval of METRICS_MIN_LINE_INTERVAL_INVALID_VALUES) {
     const hooks = await loadPluginHooksWith({ metricsMinLineIntervalMs: invalidInterval })
     assert.equal(
-      ((await lruStats(hooks, SESSION_ID)).options as Record<string, unknown>).metricsMinLineIntervalMs,
+      ((await readStats(hooks, SESSION_ID)).options as Record<string, unknown>).metricsMinLineIntervalMs,
       DEFAULT_METRICS_MIN_LINE_INTERVAL_MS,
     )
   }
@@ -4057,7 +4061,7 @@ test("metrics log stays byte identical at exactly the rotation cap and rotates w
     assert.equal(freshLines.length, STATS_LOG_FILE_LINES)
     assert.equal(freshLines[0].stashReadsSinceLastLine, 1)
     assert.deepEqual(freshLines[0].evictedThisRun, [])
-    assert.deepEqual(countersOf(await lruStats(hooks, SESSION_ID)), {
+    assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), {
       ...STATS_ZEROED_COUNTERS,
       evictions: 1,
       bytesReclaimed: MIN_EVICTABLE_BYTES,
@@ -4157,7 +4161,7 @@ test("panel data parses the post rotation state with the pre rotation line gone 
 
 const LIVE_STATE_DIR_NAME = "lru-state"
 const DEFAULT_LIVE_STATE_DIR = join(homedir(), ...METRICS_DIR_SEGMENTS, LIVE_STATE_DIR_NAME)
-const LIVE_STATE_TEMP_DIR_PREFIX = "lru-live-state-test-"
+const LIVE_STATE_TEMP_DIR_PREFIX = "ctx-live-state-test-"
 const LIVE_STATE_FILE_SUFFIX = ".json"
 const LIVE_STATE_BLOCKER_FILE = "blocker.txt"
 const DEFAULT_LIVE_STATE_PRUNE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
@@ -4188,19 +4192,19 @@ const fakeClock = (startMs: number = Date.now()): { now: () => number; advanceMs
   }
 }
 
-const LIVE_STATE_STALE_SESSION = "lru-state-stale-session"
-const LIVE_STATE_TMP_ORPHAN_SESSION = "lru-state-tmp-orphan"
+const LIVE_STATE_STALE_SESSION = "ctx-state-stale-session"
+const LIVE_STATE_TMP_ORPHAN_SESSION = "ctx-state-tmp-orphan"
 const LIVE_STATE_TMP_ORPHAN_CONTENT = '{"orphan": true}\n'
 const LIVE_STATE_TEMP_FILE_SUFFIX = ".tmp"
-const LIVE_STATE_THROTTLE_STALE_SESSION_A = "lru-state-throttle-stale-a"
-const LIVE_STATE_THROTTLE_STALE_SESSION_B = "lru-state-throttle-stale-b"
-const LIVE_STATE_STUCK_SESSION = "lru-state-stuck-entry"
-const LIVE_STATE_FRESH_SESSION = "lru-state-fresh-session"
+const LIVE_STATE_THROTTLE_STALE_SESSION_A = "ctx-state-throttle-stale-a"
+const LIVE_STATE_THROTTLE_STALE_SESSION_B = "ctx-state-throttle-stale-b"
+const LIVE_STATE_STUCK_SESSION = "ctx-state-stuck-entry"
+const LIVE_STATE_FRESH_SESSION = "ctx-state-fresh-session"
 const LIVE_STATE_STALE_CONTENT = '{"stale": true}\n'
 const LIVE_STATE_FRESH_CONTENT = '{"fresh": true}\n'
 const LIVE_STATE_QUIET_SUBJECT = "/data/state-quiet.txt"
 const LIVE_STATE_MANUAL_SUBJECT = "/data/state-manual.txt"
-const LIVE_STATE_CUSTOM_STATE_DIR = "/tmp/custom-lru-state"
+const LIVE_STATE_CUSTOM_STATE_DIR = "/tmp/custom-ctx-state"
 const LIVE_STATE_CUSTOM_PRUNE_MAX_AGE_MS = 1000
 const LIVE_STATE_CUSTOM_PRUNE_MIN_INTERVAL_MS = 500
 const LIVE_STATE_ZERO_HINT_SUBJECTS = 0
@@ -4352,7 +4356,7 @@ test("live state write skips an unsafe session key instead of writing outside th
     await runTransform(hooks, escapeBundle)
 
     assert.equal(readdirSync(stateDir).length, 0)
-    const stats = await lruStats(hooks, `${LIVE_STATE_ESCAPE_SEGMENT}/${SESSION_ID}`)
+    const stats = await readStats(hooks, `${LIVE_STATE_ESCAPE_SEGMENT}/${SESSION_ID}`)
     assert.deepEqual(stats.lastRun, {
       estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS),
       watermarkTokens: null,
@@ -4427,7 +4431,7 @@ test("live state pruning skips an undeletable stale entry and still writes the f
 
     assert.equal(existsSync(stuckPath), true)
     assert.equal(existsSync(liveStatePathIn(stateDir, SESSION_ID)), true)
-    const stats = await lruStats(hooks, SESSION_ID)
+    const stats = await readStats(hooks, SESSION_ID)
     assert.equal(Object.hasOwn(stats, "stateWriteError"), false)
   } finally {
     cleanupMetricsDir(stateDir)
@@ -4499,7 +4503,7 @@ test("live state write records stateWriteError and leaves no temp file behind wh
     const hooks = await loadPluginHooksWithLiveState(stateDir)
     await runTransform(hooks, buildStandardBundle(SESSION_ID, LIVE_STATE_QUIET_SUBJECT))
 
-    const stats = await lruStats(hooks, SESSION_ID)
+    const stats = await readStats(hooks, SESSION_ID)
     assert.equal(typeof stats.stateWriteError, "string")
     assert.ok((stats.stateWriteError as string).length > 0)
     assert.deepEqual(readdirSync(stateDir), [`${SESSION_ID}.json`])
@@ -4518,7 +4522,7 @@ test("live state write failure records stateWriteError through lru_stats without
     const bundle = buildStandardBundle(SESSION_ID, STATS_BLOCKED_SUBJECT)
     await runTransform(hooks, bundle)
 
-    const stats = await lruStats(hooks, SESSION_ID)
+    const stats = await readStats(hooks, SESSION_ID)
     assert.equal(typeof stats.stateWriteError, "string")
     assert.ok((stats.stateWriteError as string).length > 0)
     assert.equal(countersOf(stats).evictions, 1)
@@ -4537,12 +4541,12 @@ test("live state clears a recorded write failure once a later write succeeds", a
 
     const bundle = buildStandardBundle(SESSION_ID, STATS_BLOCKED_SUBJECT)
     await runTransform(hooks, bundle)
-    assert.equal(typeof (await lruStats(hooks, SESSION_ID)).stateWriteError, "string")
+    assert.equal(typeof (await readStats(hooks, SESSION_ID)).stateWriteError, "string")
 
     rmSync(join(stateDir, LIVE_STATE_BLOCKER_FILE))
     await runTransform(hooks, bundle)
 
-    const stats = await lruStats(hooks, SESSION_ID)
+    const stats = await readStats(hooks, SESSION_ID)
     assert.equal(Object.hasOwn(stats, "stateWriteError"), false)
     assert.equal(countersOf(stats).evictions, 1)
     assert.equal(existsSync(liveStatePathIn(blockedDir, SESSION_ID)), true)
@@ -4565,7 +4569,7 @@ test("live state snapshot carries an empty hot subject list when hintSubjects is
 })
 
 test("lru_stats reports the live state options defaulting beside the metrics log and round tripping custom values", async () => {
-  const defaultOptions = ((await lruStats(await loadPluginHooks(), SESSION_ID)).options as Record<string, unknown>)
+  const defaultOptions = ((await readStats(await loadPluginHooks(), SESSION_ID)).options as Record<string, unknown>)
   assert.equal(defaultOptions.liveStateLog, false)
   assert.equal(defaultOptions.liveStatePath, DEFAULT_LIVE_STATE_DIR)
   assert.equal(defaultOptions.liveStatePruneMaxAgeMs, DEFAULT_LIVE_STATE_PRUNE_MAX_AGE_MS)
@@ -4578,7 +4582,7 @@ test("lru_stats reports the live state options defaulting beside the metrics log
     liveStatePruneMaxAgeMs: LIVE_STATE_CUSTOM_PRUNE_MAX_AGE_MS,
     liveStatePruneMinIntervalMs: LIVE_STATE_CUSTOM_PRUNE_MIN_INTERVAL_MS,
   })
-  const customOptions = (await lruStats(customHooks, SESSION_ID)).options as Record<string, unknown>
+  const customOptions = (await readStats(customHooks, SESSION_ID)).options as Record<string, unknown>
   assert.equal(customOptions.liveStateLog, true)
   assert.equal(customOptions.liveStatePath, LIVE_STATE_CUSTOM_STATE_DIR)
   assert.equal(customOptions.liveStatePruneMaxAgeMs, LIVE_STATE_CUSTOM_PRUNE_MAX_AGE_MS)
@@ -4594,7 +4598,7 @@ test("lru_stats counts expired reasoning parts and bytes without counting them a
 
   await runTransform(hooks, buildBundle(agedReasoningParts()))
 
-  assert.deepEqual(countersOf(await lruStats(hooks, SESSION_ID)), {
+  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), {
     ...STATS_ZEROED_COUNTERS,
     reasoningExpired: EXPIRED_REASONING_PAIR_COUNT,
     reasoningBytesExpired: EXPIRED_REASONING_PAIR_BYTES,
@@ -4605,7 +4609,7 @@ test("lru_stats counts expired reasoning parts and bytes without counting them a
   // The stored session retains its parts, so the same aged reasoning set is
   // re-expired on every run: the repeat runs on a fresh identical copy.
   await runTransform(hooks, buildBundle(agedReasoningParts()))
-  const counters = countersOf(await lruStats(hooks, SESSION_ID))
+  const counters = countersOf(await readStats(hooks, SESSION_ID))
   assert.equal(counters.reasoningExpired, EXPIRED_REASONING_PAIR_COUNT * REPEATED_STANDING_RUNS)
   assert.equal(counters.reasoningExpiredUnique, EXPIRED_REASONING_PAIR_COUNT)
   assert.equal(counters.reasoningBytesExpired, EXPIRED_REASONING_PAIR_BYTES * REPEATED_STANDING_RUNS)
@@ -4623,7 +4627,7 @@ test("lru_stats counts two identical-content reasoning parts in distinct message
   ])
   await runTransform(hooks, bundle)
 
-  const counters = countersOf(await lruStats(hooks, SESSION_ID))
+  const counters = countersOf(await readStats(hooks, SESSION_ID))
   assert.equal(counters.reasoningExpired, EXPIRED_REASONING_SINGLE_COUNT + EXPIRED_REASONING_SINGLE_COUNT)
   assert.equal(counters.reasoningBytesExpired, REASONING_COLD_TEXT.length * REPEATED_STANDING_RUNS)
   assert.equal(counters.reasoningExpiredUnique, EXPIRED_REASONING_SINGLE_COUNT)
@@ -4638,7 +4642,7 @@ test("lru_stats leaves reasoning counters at zero when a pressured session has n
   await runTransform(hooks, bundle)
 
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
-  assert.deepEqual(countersOf(await lruStats(hooks, SESSION_ID)), {
+  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), {
     ...STATS_ZEROED_COUNTERS,
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
@@ -4729,7 +4733,7 @@ test("metrics line carries the post-transform composition fields on a known bund
     assert.equal(lines[0].dedupedThisRun, DEDUP_TOMBSTONE_SINGLE_COUNT)
     assert.equal(lines[0].reasoningExpiredThisRun, EXPIRED_REASONING_SINGLE_COUNT)
 
-    const stats = await lruStats(hooks, SESSION_ID)
+    const stats = await readStats(hooks, SESSION_ID)
     const composition = stats.composition as Record<string, unknown>
     assert.ok(composition !== undefined)
     assert.equal(composition.toolPoolBytes, lines[0].toolPoolBytes)
@@ -4787,7 +4791,7 @@ test("metrics composition counts escape bytes and live attachment bytes on a kno
       attachmentUrlOf(ATTACHMENT_MIME_PNG, COMPOSITION_FILE_URL_PAYLOAD_CHARS).length
     assert.equal(lines[0].attachmentBytes, expectedAttachmentBytes)
 
-    const stats = await lruStats(hooks, SESSION_ID)
+    const stats = await readStats(hooks, SESSION_ID)
     const composition = stats.composition as Record<string, unknown>
     assert.equal(composition.escapeBytes, COMPOSITION_CSI_SPAN.length)
     assert.equal(composition.attachmentBytes, expectedAttachmentBytes)
@@ -4832,7 +4836,7 @@ test("composition fields stay off quiet runs and off lru_stats before any run", 
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
   try {
-    const stats = await lruStats(await loadPluginHooksWith({ manualMode: true }), SESSION_ID)
+    const stats = await readStats(await loadPluginHooksWith({ manualMode: true }), SESSION_ID)
     assert.equal(Object.hasOwn(stats, "composition"), false)
 
     const metricsPath = metricsLogPathIn(metricsDir)
@@ -4870,7 +4874,7 @@ const ATTACHMENT_CALL_ID_DUAL = "call_dual"
 const ATTACHMENT_CALL_ID_MIXED = "call_mixed"
 const ATTACHMENT_CALL_ID_LOGGED = "call_logged"
 const ATTACHMENT_CALL_ID_COUNTED = "call_counted"
-const ATTACHMENT_MESSAGE_ID = "msg_lru_attachment"
+const ATTACHMENT_MESSAGE_ID = "msg_ctx_attachment"
 const ATTACHED_PATH = "/data/attached.txt"
 const TOMBSTONE_ATTACHMENTS_NOTICE = "attachments dropped"
 const STASH_ATTACHMENTS_LEAD = "attachments evicted with this output"
@@ -4991,7 +4995,7 @@ test("transform ignores a non array attachments field when evicting and leaves t
   assert.ok(output.startsWith(`${TOMBSTONE_MARKER} read ${NON_ARRAY_ATTACHMENTS_PATH} (${MIN_EVICTABLE_BYTES} bytes, ~5 messages ago)`))
   assert.equal(output.includes(TOMBSTONE_ATTACHMENTS_NOTICE), false)
   assert.equal(state[NON_ARRAY_ATTACHMENTS_KEY], NON_ARRAY_ATTACHMENTS_VALUE)
-  assert.deepEqual(countersOf(await lruStats(hooks, SESSION_ID)), {
+  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), {
     ...STATS_ZEROED_COUNTERS,
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
@@ -5074,7 +5078,7 @@ test("lru_stats counts a superseded duplicate's attachment payload chars in the 
   ])
   await runTransform(hooks, bundle)
 
-  assert.deepEqual(countersOf(await lruStats(hooks, SESSION_ID)), {
+  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), {
     ...STATS_ZEROED_COUNTERS,
     deduped: 1,
     dedupedBytes: MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS,
@@ -5108,7 +5112,7 @@ test("lru_stats counts attachment payload characters in bytesReclaimed for an at
   const bundle = buildBundle([[attachedReadPart(ATTACHMENT_CALL_ID_COUNTED, ATTACHMENT_PAYLOAD_CHARS_PRIMARY)], ...fillerMessages()])
   await runTransform(hooks, bundle)
 
-  assert.deepEqual(countersOf(await lruStats(hooks, SESSION_ID)), {
+  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), {
     ...STATS_ZEROED_COUNTERS,
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS,
@@ -5158,7 +5162,7 @@ const FENCE_INDENT_FOUR_SPACES = "    "
 const FENCE_INDENT_THREE_SPACES = "   "
 const FENCE_INDENT_TWO_SPACES = "  "
 const FENCE_INNER_TICK_LINE_INDEX = 1
-const FENCE_EVICTED_MARKER = "[lru-evicted-fence]"
+const FENCE_EVICTED_MARKER = "[ctx-evicted-fence]"
 const FENCE_STASH_TOOL_LABEL = "fence"
 const FENCE_DEFAULT_MIN_BLOCK_LINES = 40
 const FENCE_OVER_LINES = 42
@@ -5339,7 +5343,7 @@ test("read_evicted evicts the oldest stashed entry when fence evictions push a s
   const text = `${FENCE_PROSE_BEFORE}\n${blocks.join(`\n${FENCE_PROSE_MIDDLE}\n`)}\n${FENCE_PROSE_AFTER}`
   await runTransform(hooks, userFenceBundle(text))
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal(countersOf(stats).fenceEvicted, fenceCount)
   assert.equal(countersOf(stats).stashDropped, 1)
   assert.deepEqual(stats.stash, { entries: STASH_LIMIT, capacity: STASH_LIMIT })
@@ -5371,7 +5375,7 @@ test("transform lowers the estimate with fence bytes before the budget decision 
   assert.equal(toolPartAt(bundle.messages[1], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
   assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), `${block}\n`)
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal(countersOf(stats).fenceEvicted, 1)
   assert.equal(countersOf(stats).evictions, 0)
   assert.deepEqual(stats.stash, { entries: 1, capacity: STASH_LIMIT })
@@ -5428,7 +5432,7 @@ test("lru_stats counts fence evictions in a distinct fenceEvicted counter withou
   const block = fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG))
   await runTransform(hooks, userFenceBundle(`${FENCE_PROSE_BEFORE}\n${block}\n${FENCE_PROSE_AFTER}`))
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.deepEqual(countersOf(stats), {
     ...STATS_ZEROED_COUNTERS,
     fenceEvicted: 1,
@@ -5544,7 +5548,7 @@ test("metrics log coalesces a reasoning only run inside the interval and flushes
     assert.equal(lines.length, METRICS_COALESCE_LINES_AFTER_ELAPSED)
     assert.equal(lines[METRICS_COALESCE_LINES_AFTER_ELAPSED - 1].reasoningExpiredThisRun, EXPIRED_REASONING_SINGLE_COUNT)
     assert.equal(lines[METRICS_COALESCE_LINES_AFTER_ELAPSED - 1].reasoningBytesExpiredThisRun, REASONING_COLD_TEXT.length)
-    assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).reasoningExpired, EXPIRED_REASONING_SINGLE_COUNT * METRICS_COALESCE_RUN_COUNT)
+    assert.equal(countersOf(await readStats(hooks, SESSION_ID)).reasoningExpired, EXPIRED_REASONING_SINGLE_COUNT * METRICS_COALESCE_RUN_COUNT)
   } finally {
     cleanupMetricsDir(metricsDir)
   }
@@ -5639,8 +5643,8 @@ test("metrics log keeps stash read accounting correct across a suppressed then f
     assert.equal(flushedLines.length, METRICS_COALESCE_LINES_AFTER_SPAN)
     assert.equal(flushedLines[METRICS_COALESCE_LINES_AFTER_SPAN - 1].stashReadsSinceLastLine, 1)
     assert.deepEqual(flushedLines[METRICS_COALESCE_LINES_AFTER_SPAN - 1].evictedThisRun, [])
-    assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).stashHits, METRICS_COALESCE_STASH_HIT_COUNT)
-    assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).stashMisses, 0)
+    assert.equal(countersOf(await readStats(hooks, SESSION_ID)).stashHits, METRICS_COALESCE_STASH_HIT_COUNT)
+    assert.equal(countersOf(await readStats(hooks, SESSION_ID)).stashMisses, 0)
   } finally {
     cleanupMetricsDir(metricsDir)
   }
@@ -5823,7 +5827,7 @@ test("transform keeps a per model override budget from driving eviction while ma
   const bundle = buildStandardBundle(SESSION_ID, MANUAL_OVERRIDE_BUDGET_SUBJECT)
   await runTransform(hooks, bundle)
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
   assert.equal(stats.modelContextTokens, SMALL_CONTEXT_LIMIT)
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_OVERRIDE)
@@ -5889,7 +5893,7 @@ test("the compacting hook attaches nothing for an unknown session", async () => 
   await runTransform(hooks, buildStandardBundle(SESSION_ID, HINT_RENDERED_SUBJECT))
 
   const output = { context: [] as string[] }
-  await hooks["experimental.session.compacting"]({ sessionID: "lru-never-seen-session" }, output)
+  await hooks["experimental.session.compacting"]({ sessionID: "ctx-never-seen-session" }, output)
 
   assert.equal(output.context.length, 0)
 })
@@ -5914,7 +5918,7 @@ test("a throwing compaction enrichment degrades to an unmodified prompt with las
   await hooks["experimental.session.compacting"]({ sessionID: SESSION_ID }, output)
 
   assert.deepEqual(output.context, ["keep me"])
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal((stats.lastFault as Record<string, unknown>).message, COMPACTION_FAULT_MESSAGE)
 })
 
@@ -5990,7 +5994,7 @@ test("a frozen context array degrades through the fault boundary with the native
   await hooks["experimental.session.compacting"]({ sessionID: SESSION_ID }, output)
 
   assert.equal(output.context.length, 0)
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   const lastFault = stats.lastFault as Record<string, unknown>
   assert.equal(typeof lastFault.message, "string")
   assert.ok((lastFault.message as string).length > 0)
@@ -6004,13 +6008,13 @@ test("the compacting hook returns silently when the output carries no context ar
   await hooks["experimental.session.compacting"]({ sessionID: SESSION_ID }, {})
   await hooks["experimental.session.compacting"]({ sessionID: SESSION_ID }, { context: "not an array" })
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal(stats.lastFault, undefined)
 })
 
 const HYGIENE_HOOK = "tool.execute.after"
 const HYGIENE_TOOL_NAME = "bash"
-const HYGIENE_CALL_ID = "lru-hygiene-call"
+const HYGIENE_CALL_ID = "ctx-hygiene-call"
 const HYGIENE_TITLE = "pytest -q"
 const HYGIENE_CSI_COLOR_SPAN = "\x1b[38;5;196m"
 const HYGIENE_CSI_RESET_SPAN = "\x1b[0m"
@@ -6083,7 +6087,7 @@ test("a hygiene copy write failure degrades to hygieneWriteError with the strip 
   const output = await runHygieneHook(hooks, HYGIENE_DIRTY_OUTPUT)
 
   assert.equal(output.output, HYGIENE_STRIPPED_OUTPUT)
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal(typeof stats.hygieneWriteError, "string")
   assert.ok((stats.hygieneWriteError as string).length > 0)
   cleanupMetricsDir(hygieneDir)
@@ -6103,7 +6107,7 @@ test("a throwing hygiene hook degrades to the original output with lastFault set
 
   assert.equal(output.output, HYGIENE_DIRTY_OUTPUT)
   assert.equal(existsSync(hygienePath), false)
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal((stats.lastFault as Record<string, unknown>).message, HYGIENE_FAULT_MESSAGE)
   cleanupMetricsDir(hygieneDir)
 })
@@ -6217,7 +6221,7 @@ test("a frozen hygiene output object degrades through the fault boundary with th
   await hooks[HYGIENE_HOOK]({ tool: HYGIENE_TOOL_NAME, sessionID: SESSION_ID, callID: HYGIENE_CALL_ID }, output)
 
   assert.equal(output.output, HYGIENE_DIRTY_OUTPUT)
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   const lastFault = stats.lastFault as Record<string, unknown>
   assert.equal(typeof lastFault.message, "string")
   assert.ok((lastFault.message as string).length > 0)
@@ -6234,7 +6238,7 @@ test("an aged read older than the threshold evicts with no budget captured and c
 
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
   assert.equal(await readEvicted(hooks, AGED_READ_PATH, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal(countersOf(stats).evictions, 1)
   assert.equal(countersOf(stats).bytesReclaimed, MIN_EVICTABLE_BYTES)
   assert.equal(countersOf(stats).evictionTokensSaved, tokensForChars(MIN_EVICTABLE_BYTES))
@@ -6269,7 +6273,7 @@ test("a read inside the recent window survives aged eviction despite passing the
   await runTransform(hooks, bundle)
 
   assert.equal(toolPartAt(bundle.messages[2], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
-  assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).evictions, 0)
+  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).evictions, 0)
 })
 
 test("an aged read below minEvictableBytes survives aged eviction", async () => {
@@ -6289,7 +6293,7 @@ test("an aged read matching a protected pattern survives aged eviction", async (
   await runTransform(hooks, bundle)
 
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
-  assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).evictions, 0)
+  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).evictions, 0)
 })
 
 test("manual mode with the aged option reports the aged tier in the dry run without mutating", async () => {
@@ -6299,7 +6303,7 @@ test("manual mode with the aged option reports the aged tier in the dry run with
   const bundle = agedBundle()
   await runTransform(hooks, bundle)
 
-  const dryRun = (await lruStats(hooks, SESSION_ID)).dryRun as Record<string, unknown>
+  const dryRun = (await readStats(hooks, SESSION_ID)).dryRun as Record<string, unknown>
   assert.equal(dryRun.wouldEvictCount, 1)
   assert.equal(dryRun.wouldEvictBytes, MIN_EVICTABLE_BYTES)
   assert.deepEqual(dryRun.wouldEvictSubjects, [AGED_READ_PATH])
@@ -6313,7 +6317,7 @@ test("the default configuration leaves a bundle that would age out intact", asyn
   await runTransform(hooks, bundle)
 
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
-  assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).evictions, 0)
+  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).evictions, 0)
 })
 
 test("the aged tier and the watermark tier evict each output exactly once in a single walk", async () => {
@@ -6329,7 +6333,7 @@ test("the aged tier and the watermark tier evict each output exactly once in a s
 
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
   assert.ok(toolPartAt(bundle.messages[1], 0).state.output.startsWith(TOMBSTONE_MARKER))
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal(countersOf(stats).evictions, 2)
   assert.equal(countersOf(stats).bytesReclaimed, MIN_EVICTABLE_BYTES * 2)
   assert.equal(countersOf(stats).evictionTokensSaved, tokensForChars(MIN_EVICTABLE_BYTES) * 2)
@@ -6349,7 +6353,7 @@ test("an aged output and a not-yet-aged candidate each take one disposition when
 
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
   assert.ok(toolPartAt(bundle.messages[7], 0).state.output.startsWith(TOMBSTONE_MARKER))
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal(countersOf(stats).evictions, 2)
   assert.equal(countersOf(stats).bytesReclaimed, MIN_EVICTABLE_BYTES * 2)
   assert.equal(countersOf(stats).evictionTokensSaved, tokensForChars(MIN_EVICTABLE_BYTES) * 2)
@@ -6363,10 +6367,42 @@ test("invalid agedReadEvictionMessages values drop to unset and echo null", asyn
     await runTransform(hooks, bundle)
 
     assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
-    const stats = await lruStats(hooks, SESSION_ID)
+    const stats = await readStats(hooks, SESSION_ID)
     assert.equal((stats.options as Record<string, unknown>).agedReadEvictionMessages, null)
     assert.equal(countersOf(stats).evictions, 0)
   }
+})
+
+test("old-generation tombstone markers are treated as already-processed outputs", async () => {
+  const hooks = await loadPluginHooksWith({ agedReadEvictionMessages: AGED_EVICTION_MESSAGES })
+  const legacyEvictedOutput = `${LEGACY_EVICTED_MARKER} read ${LEGACY_TOMBSTONE_PATH} (2048 bytes, ~9 messages ago) was evicted to reclaim context; re-run the tool to reload its output.`
+  const legacyDedupedOutput = `${LEGACY_DEDUPED_MARKER} read identical call superseded by the newer output at message 9`
+
+  const bundle = buildBundle([
+    [completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: LEGACY_TOMBSTONE_PATH }, legacyEvictedOutput)],
+    [completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: LEGACY_TOMBSTONE_PATH }, legacyDedupedOutput)],
+    ...fillerMessages(AGED_FILLER_COUNT),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, legacyEvictedOutput)
+  assert.equal(toolPartAt(bundle.messages[1], 0).state.output, legacyDedupedOutput)
+  const stats = await readStats(hooks, SESSION_ID)
+  assert.equal(countersOf(stats).evictions, 0)
+  assert.equal(countersOf(stats).deduped, 0)
+})
+
+test("the hint replacement finds and replaces an old-generation hint line in the system prompt", async () => {
+  const hooks = await loadPluginHooks()
+
+  const bundle = buildBundle([[pathToolPart(AGED_READ_PATH, MIN_EVICTABLE_BYTES)], ...fillerMessages(2)])
+  await runTransform(hooks, bundle)
+
+  const blocks = await runSystemTransform(hooks, SESSION_ID, [`${LEGACY_HINT_LINE_PREFIX} /data/old-subject.txt`, "keep me"])
+
+  assert.equal(blocks.length, 2)
+  assert.equal(blocks[0], hintLineFor([AGED_READ_PATH]))
+  assert.equal(blocks[1], "keep me")
 })
 
 test("transform keeps dedup active under pressure while manualMode is enabled", async () => {
@@ -6398,7 +6434,7 @@ test("a faulting transform run degrades to identity behavior and surfaces lastFa
   // Identity behavior: the output the host delivered comes back unchanged,
   // with no tombstone, dedup marker, or other plugin edit.
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   const lastFault = stats.lastFault as Record<string, unknown>
   assert.ok(lastFault !== undefined)
   assert.equal(lastFault.message, FAULT_MESSAGE)
@@ -6432,9 +6468,9 @@ test("a fault on one session does not leak into another session's run", async ()
   await runTransform(hooks, healthy)
 
   assert.ok(toolPartAt(healthy.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
-  const faultedStats = await lruStats(hooks, SESSION_ID)
+  const faultedStats = await readStats(hooks, SESSION_ID)
   assert.equal((faultedStats.lastFault as Record<string, unknown>).message, FAULT_MESSAGE)
-  const healthyStats = await lruStats(hooks, SESSION_ID_B)
+  const healthyStats = await readStats(hooks, SESSION_ID_B)
   assert.equal(Object.hasOwn(healthyStats, "lastFault"), false)
 })
 
@@ -6452,7 +6488,7 @@ test("a second fault replaces the session's lastFault message", async () => {
   const second = buildStandardBundle(SESSION_ID, FAULT_SUBJECT)
   await runTransform(hooks, second)
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal((stats.lastFault as Record<string, unknown>).message, SECOND_SESSION_FAULT)
 })
 
@@ -6494,7 +6530,7 @@ test("the chat.params handler survives hostile payloads without throwing", async
     await hooks[CHAT_PARAMS_HOOK](payload as { sessionID: string }, {})
   }
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal(stats.modelContextTokens, null)
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
 })
@@ -6523,16 +6559,16 @@ const buildDryRunBundle = (): StrictBundle =>
   ])
 
 test("watermarkTokens resolves as an absolute override over the fractional watermark", async () => {
-  const defaultOptions = ((await lruStats(await loadPluginHooks(), SESSION_ID)).options as Record<string, unknown>)
+  const defaultOptions = ((await readStats(await loadPluginHooks(), SESSION_ID)).options as Record<string, unknown>)
   assert.equal(defaultOptions.watermarkTokens, null)
 
   const customHooks = await loadPluginHooksWith({ watermarkTokens: DRY_RUN_WATERMARK_TOKENS })
-  const customOptions = (await lruStats(customHooks, SESSION_ID)).options as Record<string, unknown>
+  const customOptions = (await readStats(customHooks, SESSION_ID)).options as Record<string, unknown>
   assert.equal(customOptions.watermarkTokens, DRY_RUN_WATERMARK_TOKENS)
 
   for (const invalidWatermarkTokens of [-5, 0, Number.NaN, Number.POSITIVE_INFINITY]) {
     const invalidHooks = await loadPluginHooksWith({ watermarkTokens: invalidWatermarkTokens })
-    const invalidOptions = (await lruStats(invalidHooks, SESSION_ID)).options as Record<string, unknown>
+    const invalidOptions = (await readStats(invalidHooks, SESSION_ID)).options as Record<string, unknown>
     assert.equal(invalidOptions.watermarkTokens, null)
   }
 
@@ -6559,7 +6595,7 @@ test("manual mode with watermarkTokens reports a dry run without tombstoning any
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(DRY_RUN_CANDIDATE_BYTES))
   assert.equal(toolPartAt(bundle.messages[3], 0).state.output, outputOfBytes(DRY_RUN_CANDIDATE_BYTES))
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   const dryRun = stats.dryRun as Record<string, unknown>
   assert.ok(dryRun !== undefined)
   assert.ok((dryRun.deficitTokens as number) > 0)
@@ -6575,7 +6611,7 @@ test("manual mode with watermarkTokens and no captured budget still reports the 
   const bundle = buildDryRunBundle()
   await runTransform(hooks, bundle)
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal(stats.modelContextTokens, null)
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
   const dryRun = stats.dryRun as Record<string, unknown>
@@ -6593,9 +6629,9 @@ test("the same dry-run session evicts for real once manual mode is off", async (
   await runTransform(hooks, bundle)
 
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
-  const evictions = countersOf(await lruStats(hooks, SESSION_ID)).evictions
+  const evictions = countersOf(await readStats(hooks, SESSION_ID)).evictions
   assert.ok(evictions >= DRY_RUN_EXPECTED_COUNT)
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal(Object.hasOwn(stats, "dryRun"), false)
 })
 
@@ -6656,7 +6692,7 @@ test("rehydration ignores run-scoped dry-run fields and seeds only the totals", 
     await setContextLimit(secondSittingHooks, SESSION_ID, LARGE_DEFAULT_CONTEXT_TOKENS)
     await runTransform(secondSittingHooks, reasoningOnlyBundle())
 
-    const stats = await lruStats(secondSittingHooks, SESSION_ID)
+    const stats = await readStats(secondSittingHooks, SESSION_ID)
     assert.equal(Object.hasOwn(stats, "dryRun"), false)
     const lines = metricsLinesForSession(metricsPath, SESSION_ID)
     assert.equal(lines.length, METRICS_COALESCE_LINES_AFTER_FLUSH)
@@ -6725,7 +6761,7 @@ test("lru_stats reports the manual state in the options block while the captured
   const bundle = buildStandardBundle(SESSION_ID, MANUAL_STATS_SUBJECT)
   await runTransform(hooks, bundle)
 
-  const stats = await lruStats(hooks, SESSION_ID)
+  const stats = await readStats(hooks, SESSION_ID)
   assert.equal(stats.options.manualMode, true)
   assert.equal(stats.modelContextTokens, WATERMARK_PROBE_CONTEXT_LIMIT)
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
@@ -6751,7 +6787,7 @@ const STASH_LIMIT_OVERFLOW_COUNT = 3
 const STASH_LIMIT_INVALID_VALUES = [-1, Infinity, Number.NaN, "2"]
 const SESSION_BOUND_OVERRIDE = 2
 const SESSION_BOUND_INVALID_ZERO = 0
-const BOUND_TEST_SESSION_C = "lru-bound-session-c"
+const BOUND_TEST_SESSION_C = "ctx-bound-session-c"
 const REMEMBERED_SUBJECTS_OVERRIDE = 1
 const REMEMBERED_SUBJECTS_INVALID = -1
 const REMEMBERED_FIRST_SUBJECT = "/data/remembered-first.txt"
@@ -6765,7 +6801,7 @@ const SUBSTRING_FLOOR_INVALID = -1
 const STASH_LIMIT_OVERRIDE_SUBJECT_PREFIX = "/data/slim-stash"
 
 test("lru_stats reports the default stash capacity of fifty entries when stashLimit is unset", async () => {
-  const stats = await lruStats(await loadPluginHooks(), SESSION_ID)
+  const stats = await readStats(await loadPluginHooks(), SESSION_ID)
 
   assert.deepEqual(stats.stash, { entries: 0, capacity: STASH_LIMIT })
 })
@@ -6781,7 +6817,7 @@ test("read_evicted applies a custom stashLimit dropping the oldest stashed entry
   ])
   await runTransform(hooks, bundle)
 
-  assert.deepEqual((await lruStats(hooks, SESSION_ID)).stash, {
+  assert.deepEqual((await readStats(hooks, SESSION_ID)).stash, {
     entries: STASH_LIMIT_OVERRIDE,
     capacity: STASH_LIMIT_OVERRIDE,
   })
@@ -6793,7 +6829,7 @@ test("read_evicted applies a custom stashLimit dropping the oldest stashed entry
 test("lru_stats keeps the default stash capacity when stashLimit is invalid", async () => {
   for (const invalidLimit of STASH_LIMIT_INVALID_VALUES) {
     const hooks = await loadPluginHooksWith({ stashLimit: invalidLimit })
-    const stats = await lruStats(hooks, SESSION_ID)
+    const stats = await readStats(hooks, SESSION_ID)
 
     assert.deepEqual(stats.stash, { entries: 0, capacity: STASH_LIMIT })
   }
@@ -6896,17 +6932,17 @@ test("lru_stats drops the least recently active session metrics when the metrics
   await runTransform(hooks, buildStandardBundle(SESSION_ID_B, "/data/metrics-bound-b.txt"))
   await runTransform(hooks, buildStandardBundle(BOUND_TEST_SESSION_C, "/data/metrics-bound-c.txt"))
 
-  assert.equal(countersOf(await lruStats(hooks, SESSION_ID_B)).evictions, 1)
-  assert.deepEqual(countersOf(await lruStats(hooks, SESSION_ID)), STATS_ZEROED_COUNTERS)
+  assert.equal(countersOf(await readStats(hooks, SESSION_ID_B)).evictions, 1)
+  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), STATS_ZEROED_COUNTERS)
 })
 
 test("lru_stats keeps session metrics when an invalid metricsSessions falls back to the default bound", async () => {
   const hooks = await loadPluginHooksWith({ metricsSessions: SESSION_BOUND_INVALID_ZERO })
   for (let index = 0; index < METRICS_SESSION_OVERFLOW_COUNT; index += 1) await storeMetricsSession(hooks, index)
 
-  assert.equal(countersOf(await lruStats(hooks, metricsSessionId(0))).evictions, 0)
-  assert.equal(countersOf(await lruStats(hooks, metricsSessionId(1))).evictions, 1)
-  assert.equal(countersOf(await lruStats(hooks, metricsSessionId(METRICS_SESSION_OVERFLOW_COUNT - 1))).evictions, 1)
+  assert.equal(countersOf(await readStats(hooks, metricsSessionId(0))).evictions, 0)
+  assert.equal(countersOf(await readStats(hooks, metricsSessionId(1))).evictions, 1)
+  assert.equal(countersOf(await readStats(hooks, metricsSessionId(METRICS_SESSION_OVERFLOW_COUNT - 1))).evictions, 1)
 })
 
 const rememberedSubjectsTouchCountFor = async (optionValue: number): Promise<number> => {
@@ -6924,7 +6960,7 @@ const rememberedSubjectsTouchCountFor = async (optionValue: number): Promise<num
   bundle.messages.push(syntheticMessageFor(SESSION_ID, [pathToolPart(REMEMBERED_SECOND_SUBJECT, APPEARANCE_ONLY_OUTPUT_BYTES)]))
   await runTransform(hooks, bundle)
 
-  return countersOf(await lruStats(hooks, SESSION_ID)).postEvictionTouches
+  return countersOf(await readStats(hooks, SESSION_ID)).postEvictionTouches
 }
 
 test("lru_stats forgets the oldest evicted subject at the rememberedEvictedSubjects bound so its touch goes uncounted", async () => {
@@ -7007,8 +7043,8 @@ test("transform keeps the default substring floor when minSubstringMatchChars is
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
 })
 
-const REHYDRA_FRESH_SESSION = "lru-rehydrate-fresh-session"
-const REHYDRA_SECOND_SESSION = "lru-rehydrate-second-session"
+const REHYDRA_FRESH_SESSION = "ctx-rehydrate-fresh-session"
+const REHYDRA_SECOND_SESSION = "ctx-rehydrate-second-session"
 const REHYDRA_EVICTION_SUBJECT_A = "/data/rehydrate-eviction-a.txt"
 const REHYDRA_EVICTION_SUBJECT_B = "/data/rehydrate-eviction-b.txt"
 const REHYDRA_MISS_SUBJECT = "/data/rehydrate-miss.txt"
@@ -7192,9 +7228,9 @@ test("a session without persisted records starts at zeroed counters in a fresh p
     await runFirstSitting(firstSittingHooks)
 
     const secondSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
-    assert.deepEqual(countersOf(await lruStats(secondSittingHooks, REHYDRA_FRESH_SESSION)), STATS_ZEROED_COUNTERS)
+    assert.deepEqual(countersOf(await readStats(secondSittingHooks, REHYDRA_FRESH_SESSION)), STATS_ZEROED_COUNTERS)
     await runQuietProbeTransform(secondSittingHooks, REHYDRA_FRESH_SESSION)
-    assert.deepEqual(countersOf(await lruStats(secondSittingHooks, REHYDRA_FRESH_SESSION)), STATS_ZEROED_COUNTERS)
+    assert.deepEqual(countersOf(await readStats(secondSittingHooks, REHYDRA_FRESH_SESSION)), STATS_ZEROED_COUNTERS)
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)
@@ -7284,8 +7320,8 @@ test("resumed session seeds from the newer of the metrics log and the snapshot w
     await runQuietProbeTransform(hooks, SESSION_ID)
     await runQuietProbeTransform(hooks, REHYDRA_SECOND_SESSION)
 
-    assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).evictions, REHYDRA_NEWER_RECORD_EVICTIONS)
-    assert.equal(countersOf(await lruStats(hooks, REHYDRA_SECOND_SESSION)).evictions, REHYDRA_NEWER_RECORD_EVICTIONS)
+    assert.equal(countersOf(await readStats(hooks, SESSION_ID)).evictions, REHYDRA_NEWER_RECORD_EVICTIONS)
+    assert.equal(countersOf(await readStats(hooks, REHYDRA_SECOND_SESSION)).evictions, REHYDRA_NEWER_RECORD_EVICTIONS)
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)
@@ -7357,7 +7393,7 @@ test("a mid sitting model change without a limit invalidates the rehydrated budg
 
     await setChatParamsForModel(secondSittingHooks, SESSION_ID, OTHER_MODEL_PROVIDER, OTHER_MODEL_ID, undefined)
     assert.equal((await runStandDownProbe(secondSittingHooks)).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
-    const stats = await lruStats(secondSittingHooks, SESSION_ID)
+    const stats = await readStats(secondSittingHooks, SESSION_ID)
     assert.equal(stats.modelContextTokens, null)
     assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
 
@@ -7391,7 +7427,7 @@ test("a model change across a restart suppresses the persisted budget instead of
     assert.equal(lines[0].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
 
     assert.equal((await runStandDownProbe(secondSittingHooks)).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
-    assert.equal(countersOf(await lruStats(secondSittingHooks, SESSION_ID)).evictions, 0)
+    assert.equal(countersOf(await readStats(secondSittingHooks, SESSION_ID)).evictions, 0)
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)
@@ -7442,7 +7478,7 @@ test("a model change across a restart suppresses a budget seeded from the metric
     assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
 
     assert.equal((await runStandDownProbe(secondSittingHooks)).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
-    assert.equal(countersOf(await lruStats(secondSittingHooks, SESSION_ID)).evictions, 0)
+    assert.equal(countersOf(await readStats(secondSittingHooks, SESSION_ID)).evictions, 0)
   } finally {
     cleanupMetricsDir(metricsDir)
   }
@@ -7476,7 +7512,7 @@ test("a removed model override suppresses the persisted override budget across a
     assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
 
     assert.equal((await runStandDownProbe(thirdSittingHooks)).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
-    assert.equal(countersOf(await lruStats(thirdSittingHooks, SESSION_ID)).evictions, 0)
+    assert.equal(countersOf(await readStats(thirdSittingHooks, SESSION_ID)).evictions, 0)
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)
@@ -7509,7 +7545,7 @@ test("a removed defaultContextTokens option suppresses the persisted default bud
     assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
 
     assert.equal((await runStandDownProbe(thirdSittingHooks)).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
-    assert.equal(countersOf(await lruStats(thirdSittingHooks, SESSION_ID)).evictions, 0)
+    assert.equal(countersOf(await readStats(thirdSittingHooks, SESSION_ID)).evictions, 0)
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)
@@ -7552,7 +7588,7 @@ test("lru_stats resolves the rehydrated budget once the session entry is hydrate
 
     const secondSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
     await runTransform(secondSittingHooks, reasoningOnlyBundle())
-    const stats = await lruStats(secondSittingHooks, SESSION_ID)
+    const stats = await readStats(secondSittingHooks, SESSION_ID)
     assert.equal(stats.modelContextTokens, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
     assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
   } finally {
@@ -7575,7 +7611,7 @@ test("eviction engages on a resumed session whose budget rehydrated where a fres
 
     const resumedHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
     assert.ok((await runStandDownProbe(resumedHooks)).state.output.startsWith(TOMBSTONE_MARKER))
-    assert.equal(countersOf(await lruStats(resumedHooks, SESSION_ID)).evictions, 1)
+    assert.equal(countersOf(await readStats(resumedHooks, SESSION_ID)).evictions, 1)
 
     const freshHooks = await loadPluginHooksWithPersistence(metricsLogPathIn(freshMetricsDir), freshStateDir)
     assert.equal((await runStandDownProbe(freshHooks)).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
@@ -7650,7 +7686,7 @@ test("recreated metrics entry re-seeds lifetime counters after the metricsSessio
     await runEvictionTransform(secondSittingHooks, REHYDRA_SECOND_SESSION, "/data/rehydrate-eviction-c.txt")
     await runEvictionTransform(secondSittingHooks, SESSION_ID, "/data/rehydrate-eviction-d.txt")
 
-    const counters = countersOf(await lruStats(secondSittingHooks, SESSION_ID))
+    const counters = countersOf(await readStats(secondSittingHooks, SESSION_ID))
     assert.equal(counters.evictions, 3)
     assert.equal(counters.bytesReclaimed, 3 * MIN_EVICTABLE_BYTES)
     const lines = metricsLinesForSession(metricsPath, SESSION_ID)
@@ -7675,7 +7711,7 @@ test("lru_stats re-counts the standing reasoning set when the metrics LRU evicts
     for (let index = 0; index < METRICS_SESSION_BOUND; index += 1) await storeMetricsSession(hooks, index)
     await runTransform(hooks, buildBundle(agedReasoningParts()))
 
-    const counters = countersOf(await lruStats(hooks, SESSION_ID))
+    const counters = countersOf(await readStats(hooks, SESSION_ID))
     assert.equal(counters.reasoningExpired, EXPIRED_REASONING_PAIR_COUNT * REPEATED_STANDING_RUNS)
     assert.equal(counters.reasoningExpiredUnique, EXPIRED_REASONING_PAIR_COUNT * REPEATED_STANDING_RUNS)
     assert.equal(counters.reasoningBytesExpired, EXPIRED_REASONING_PAIR_BYTES * REPEATED_STANDING_RUNS)
@@ -7702,7 +7738,7 @@ test("a stash miss issued while the session's first hydration is in flight count
     assert.equal(await readEvicted(secondSittingHooks, REHYDRA_MISS_SUBJECT, SESSION_ID), stashMissFor(REHYDRA_MISS_SUBJECT))
     await resumeTransform
 
-    assert.equal(countersOf(await lruStats(secondSittingHooks, SESSION_ID)).stashMisses, 2)
+    assert.equal(countersOf(await readStats(secondSittingHooks, SESSION_ID)).stashMisses, 2)
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)
@@ -7723,7 +7759,7 @@ test("a newest metrics line whose totals carry a non finite named counter is rej
     const hooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
     await runQuietProbeTransform(hooks, SESSION_ID)
 
-    assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).evictions, REHYDRA_STALE_RECORD_EVICTIONS)
+    assert.equal(countersOf(await readStats(hooks, SESSION_ID)).evictions, REHYDRA_STALE_RECORD_EVICTIONS)
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)
@@ -7745,7 +7781,7 @@ test("a metrics line predating dedupedBytes still seeds the resumed session with
     const hooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
     await runQuietProbeTransform(hooks, SESSION_ID)
 
-    const counters = countersOf(await lruStats(hooks, SESSION_ID))
+    const counters = countersOf(await readStats(hooks, SESSION_ID))
     assert.equal(counters.evictions, REHYDRA_NEWER_RECORD_EVICTIONS)
     assert.equal(counters.dedupedBytes, 0)
   } finally {

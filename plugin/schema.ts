@@ -1,6 +1,6 @@
 // Single source of truth for the metrics totals schema shared by the
-// producer (lru-context.ts: SessionMetrics seeding, CumulativeCounters,
-// totalsOf) and the parser (lru-panel-data.ts: PanelTotals, parseTotals),
+// producer (context-manager.ts: SessionMetrics seeding, CumulativeCounters,
+// totalsOf) and the parser (panel-data.ts: PanelTotals, parseTotals),
 // plus the default path constants both files re-declared. Zero imports:
 // both consumers stay dependency-free, and a counter added here reaches
 // both sides in one edit instead of a six-file lockstep.
@@ -34,7 +34,7 @@ export const RAW_COUNTER_KEYS = Object.freeze([
 export type RawCounterKey = (typeof RAW_COUNTER_KEYS)[number]
 
 // Derived counters: the producer computes them from the raw counters over
-// the charsPerToken factor (the totalsOf map in lru-context.ts names each
+// the charsPerToken factor (the totalsOf map in context-manager.ts names each
 // derived key's source byte counter); the parser requires them like raw
 // keys, so the full totals shape is RawCounterKey plus these.
 export const DERIVED_COUNTER_KEYS = Object.freeze([

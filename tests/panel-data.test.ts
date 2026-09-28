@@ -24,9 +24,9 @@ import {
   readStateSnapshot,
   sessionPanelData,
   type PanelMetricsLine,
-} from "../plugin/lru-panel-data.ts"
-import { TOTALS_KEYS } from "../plugin/lru-schema.ts"
-import lruContextFactory from "../plugin/lru-context.ts"
+} from "../plugin/panel-data.ts"
+import { TOTALS_KEYS } from "../plugin/schema.ts"
+import contextManagerFactory from "../plugin/context-manager.ts"
 import {
   BUDGET_TOKENS_MODEL,
   BUDGET_TOKENS_SMALL,
@@ -70,7 +70,7 @@ import {
   serialize,
   withTempDir,
   writeSnapshot,
-} from "./lru-panel-fixtures.ts"
+} from "./panel-fixtures.ts"
 
 const RECENT_LIMIT = 2
 const EVICTION_COUNT_PER_LINE = 3
@@ -744,7 +744,7 @@ test("the default metrics path matches the plugin's log location", () => {
 type StatsTool = { execute: (args: unknown, context: unknown) => Promise<unknown> }
 
 test("the panel's default metrics path matches the plugin core's resolved metrics path", async () => {
-  const hooks = (await lruContextFactory({}, { metricsLog: false, liveStateLog: false })) as Record<string, Record<string, StatsTool>>
+  const hooks = (await contextManagerFactory({}, { metricsLog: false, liveStateLog: false })) as Record<string, Record<string, StatsTool>>
   const stats = JSON.parse((await hooks["tool"]["lru_stats"].execute({}, { sessionID: SESSION_A })) as string) as {
     options: { metricsPath: string }
   }
@@ -836,7 +836,7 @@ test("loadPanelData prefers the live snapshot for the session block and keeps lo
     assert.equal(data.current.recentEvictions[0].subject, "/data/a.txt")
 
     const rows = panelRows(data)
-    assert.equal(rows[0].text, "LRU Context Manager (manual)")
+    assert.equal(rows[0].text, "Context Manager (manual)")
     assert.equal(rows[0].tone, "header")
     assert.ok(
       rows.some(
@@ -870,7 +870,7 @@ test("loadPanelData lets the session's newer log line win the fields it carries 
     assert.deepEqual(data.current.hotSubjects, SNAPSHOT_HOT_SUBJECTS)
     assert.equal(data.current.runs, SESSION_A_LOG_LINE_COUNT)
     assert.equal(data.current.recentEvictions.length, 1)
-    assert.equal(panelRows(data)[0].text, "LRU Context Manager (manual)")
+    assert.equal(panelRows(data)[0].text, "Context Manager (manual)")
   })
 })
 
@@ -904,7 +904,7 @@ test("loadPanelData renders automatic mode for a snapshot recorded with manualMo
     const data = await loadPanelData({ path, stateDir, sessionID: SESSION_A })
 
     assert.equal(data.current?.manualMode, false)
-    assert.equal(panelRows(data)[0].text, "LRU Context Manager")
+    assert.equal(panelRows(data)[0].text, "Context Manager")
   })
 })
 
@@ -926,7 +926,7 @@ test("loadPanelData renders the snapshot block with empty history when no metric
     assert.deepEqual(data.current.stash, { entries: SNAPSHOT_STASH_ENTRIES, capacity: SNAPSHOT_STASH_CAPACITY })
     assert.equal(data.current.runs, 0)
     assert.deepEqual(data.current.recentEvictions, [])
-    assert.equal(panelRows(data)[0].text, "LRU Context Manager")
+    assert.equal(panelRows(data)[0].text, "Context Manager")
   })
 })
 
@@ -949,7 +949,7 @@ test("loadPanelData falls back to the metrics log when no snapshot exists for th
     assert.equal(data.current.runs, SESSION_A_LOG_LINE_COUNT)
 
     const rows = panelRows(data)
-    assert.equal(rows[0].text, "LRU Context Manager")
+    assert.equal(rows[0].text, "Context Manager")
     assert.ok(!rows.some((row) => row.text.includes("occupancy:")))
     assert.ok(!rows.some((row) => row.text.startsWith("hot subjects:")))
     assert.ok(
@@ -1019,7 +1019,7 @@ test("loadPanelData serves the snapshot block alongside the log warning when the
 
     const rows = panelRows(data)
     assert.ok(rows.some((row) => row.text.startsWith("metrics log unreadable:")))
-    assert.equal(rows[0].text, "LRU Context Manager (manual)")
+    assert.equal(rows[0].text, "Context Manager (manual)")
     assert.ok(rows.some((row) => row.text === "budget: ~200k tokens (per-model limit)"))
     assert.ok(!rows.some((row) => row.text.startsWith("history:")))
   })
@@ -1043,7 +1043,7 @@ test("loadPanelData ignores a snapshot file whose recorded session does not matc
 })
 
 test("the default live state dir matches the plugin core's resolved state path", async () => {
-  const hooks = (await lruContextFactory({}, { metricsLog: false, liveStateLog: false })) as Record<string, Record<string, StatsTool>>
+  const hooks = (await contextManagerFactory({}, { metricsLog: false, liveStateLog: false })) as Record<string, Record<string, StatsTool>>
   const stats = JSON.parse((await hooks["tool"]["lru_stats"].execute({}, { sessionID: SESSION_A })) as string) as {
     options: { liveStatePath: string }
   }

@@ -1,7 +1,7 @@
 import { open, readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import { DEFAULT_LIVE_STATE_DIR_BASENAME, DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_METRICS_FILE_BASENAME, TOTALS_KEYS, type TotalsKey } from "./lru-schema.ts"
+import { DEFAULT_LIVE_STATE_DIR_BASENAME, DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_METRICS_FILE_BASENAME, TOTALS_KEYS, type TotalsKey } from "./schema.ts"
 
 export const DEFAULT_METRICS_PATH = join(homedir(), ...DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_METRICS_FILE_BASENAME)
 
@@ -133,7 +133,7 @@ const BUDGET_SOURCE_LABEL_OVERRIDE = "per-model override"
 const BUDGET_SOURCE_LABEL_MODEL = "per-model limit"
 const BUDGET_SOURCE_LABEL_DEFAULT = "plugin default"
 const BUDGET_SOURCE_LABEL_UNKNOWN = "inactive (no budget)"
-const PANEL_TITLE = "LRU Context Manager"
+const PANEL_TITLE = "Context Manager"
 const MANUAL_MODE_TITLE_SUFFIX = " (manual)"
 const COUNTERS_ROW_LABEL = "counters:"
 const LAST_EVICTION_ROW_LABEL = "last evicted:"
@@ -148,7 +148,7 @@ export type PanelEvictedEntry = {
   messagesAgo: number
 }
 
-// Derived from the shared schema key list, so a key added in lru-schema.ts
+// Derived from the shared schema key list, so a key added in schema.ts
 // appears here and in the producer's totals without a second edit.
 export type PanelTotals = { [K in TotalsKey]: number }
 

@@ -11,12 +11,22 @@ import {
   type DerivedCounterKey as TotalsDerivedKey,
   type RawCounterKey as SchemaRawCounterKey,
   type TotalsKey,
-} from "./lru-schema.ts"
+} from "./schema.ts"
 
-const EVICTION_MARKER = "[lru-evicted]"
-const HINT_MARKER = "[lru-hot]"
+const EVICTION_MARKER = "[ctx-evicted]"
+const HINT_MARKER = "[ctx-hot]"
 const HINT_LABEL = "recently active:"
 const HINT_LINE_PREFIX = `${HINT_MARKER} ${HINT_LABEL}`
+// Tombstones, purged-input markers, and hint lines live permanently in
+// users' stored session history, so every detector recognizes the
+// previous marker generation next to the current one; only emissions use
+// the current markers.
+const LEGACY_EVICTION_MARKER = "[lru-evicted]"
+const LEGACY_DEDUP_MARKER = "[lru-deduped]"
+const LEGACY_PURGED_INPUT_MARKER = "[lru-purged-input]"
+const LEGACY_HINT_LINE_PREFIX = `[lru-hot] ${HINT_LABEL}`
+const startsWithEitherGeneration = (text: string, current: string, legacy: string): boolean =>
+  text.startsWith(current) || text.startsWith(legacy)
 const SUBJECT_SEPARATOR = ", "
 const MAX_RENDERED_SUBJECT_CHARS = 160
 const ELLIPSIS_MARKER = "…"
@@ -58,7 +68,7 @@ const DEFAULT_HINT_SESSIONS = 8
 const RELOAD_TOOL_NAME = "read_evicted"
 const RELOAD_ARG_NAME = "subject"
 const RELOAD_TOOL_DESCRIPTION =
-  "Return the full original content of anything the LRU Context Manager evicted and stashed: a tool call output or a fenced code block from an old user message. Pass the subject exactly as it appears in the eviction notice."
+  "Return the full original content of anything the Context Manager evicted and stashed: a tool call output or a fenced code block from an old user message. Pass the subject exactly as it appears in the eviction notice."
 const RELOAD_ARG_DESCRIPTION = "The subject exactly as named in the eviction notice"
 const RELOAD_ARG_SCHEMA_TYPE = "string"
 const RELOAD_ARG_SCHEMA: Record<string, string> = {
@@ -68,7 +78,7 @@ const RELOAD_ARG_SCHEMA: Record<string, string> = {
 const RELOAD_POINTER_LEAD = " Evicted output stashed; reload it with"
 const DIGEST_POINTER_LEAD = " Output digest: "
 const DIGEST_POINTER_TAIL = "."
-const STASH_MARKER = "[lru-stash]"
+const STASH_MARKER = "[ctx-stash]"
 const STASH_OLDER_LEAD = "older matches for subject"
 const STASH_MESSAGE_LABEL = "at message"
 const STASH_MATCH_SEPARATOR = "; "
@@ -77,15 +87,15 @@ const STASH_MISS_HINT = "only outputs evicted during this session are stashed"
 const STASH_INVALID_SUBJECT_LEAD = "requires a non-empty subject string"
 const RECEIVED_LABEL = "received"
 const FALLBACK_SESSION_KEY = "no-session"
-const DEDUP_MARKER = "[lru-deduped]"
-const TOOL_ERROR_PREFIX = "[lru-error] "
+const DEDUP_MARKER = "[ctx-deduped]"
+const TOOL_ERROR_PREFIX = "[ctx-error] "
 const DEDUP_SUPERSEDED_LEAD = "identical call superseded by the newer output at message"
 const DEDUP_RANGE_SUPERSEDED_LEAD = "range read superseded by the retained range at message"
 const DEDUP_FILE_SUPERSEDED_LEAD = "identical attachment superseded by the newer attachment at message"
 const FILE_PART_TYPE = "file"
 const FILE_FILENAME_KEY = "filename"
 const TEXT_PART_TYPE = "text"
-const PURGED_INPUT_MARKER = "[lru-purged-input]"
+const PURGED_INPUT_MARKER = "[ctx-purged-input]"
 const REASONING_PART_TYPE = "reasoning"
 const REASONING_TEXT_KEY = "text"
 const REASONING_METADATA_KEY = "metadata"
@@ -131,7 +141,7 @@ const DEFAULT_METRICS_MIN_LINE_INTERVAL_MS = SECONDS_PER_MINUTE * MS_PER_SECOND
 const METRICS_COALESCING_DISABLED_MS = 0
 const STATS_TOOL_NAME = "lru_stats"
 const STATS_TOOL_DESCRIPTION =
-  "Return live metrics for the LRU Context Manager in this session: eviction counters, expired reasoning counts, post-eviction touches, stash occupancy, the effective context budget, and the most recent transform run's token estimate; also the newest run's post-transform composition (tool outputs, text, windowed reasoning), the manual-mode dry run when armed, and the last transform fault when one occurred."
+  "Return live metrics for the Context Manager in this session: eviction counters, expired reasoning counts, post-eviction touches, stash occupancy, the effective context budget, and the most recent transform run's token estimate; also the newest run's post-transform composition (tool outputs, text, windowed reasoning), the manual-mode dry run when armed, and the last transform fault when one occurred."
 const JSON_INDENT_SPACES = 2
 const CONTEXT_TOKENS_SOURCE_OVERRIDE = "override"
 const CONTEXT_TOKENS_SOURCE_MODEL = "model"
@@ -149,7 +159,7 @@ const DEFAULT_FENCE_EVICTABLE_LINES = 40
 const DEFAULT_USER_FENCE_EVICTION_ENABLED = false
 const DEFAULT_MANUAL_MODE = false
 const DEFAULT_NOW = (): number => Date.now()
-const FENCE_EVICTION_MARKER = "[lru-evicted-fence]"
+const FENCE_EVICTION_MARKER = "[ctx-evicted-fence]"
 const FENCE_BLOCK_NOUN = "code block"
 const FENCE_STASH_TOOL_LABEL = "fence"
 const FENCE_BACKTICK = "`"
@@ -165,7 +175,7 @@ const USER_MESSAGE_ROLE = "user"
 
 type UserFenceEvictionOptions = { enabled: boolean; minBlockLines: number }
 
-type LruContextOptions = {
+type ContextManagerOptions = {
   watermark?: number
   watermarkTokens?: number
   agedReadEvictionMessages?: number
@@ -218,7 +228,7 @@ type LruContextOptions = {
 type CompiledGlob = { regexp: RegExp; matchesSegments: boolean }
 
 type ResolvedOptions = Omit<
-  Required<LruContextOptions>,
+  Required<ContextManagerOptions>,
   "defaultContextTokens" | "agedReadEvictionMessages" | "modelContextTokens" | "protectedPatterns" | "userFenceEviction" | "watermarkTokens"
 > & {
   defaultContextTokens?: number
@@ -362,7 +372,7 @@ type LastFault = { message: string; atMs: number }
 type MetricsStore = Map<string, SessionMetrics>
 
 // The raw counters a session's persisted totals can seed, declared once in
-// lru-schema.ts and anchored to SessionMetrics by the exhaustiveness
+// schema.ts and anchored to SessionMetrics by the exhaustiveness
 // assertion below so a renamed or removed counter fails to compile here
 // instead of silently missing its seed. The runtime seeder iterates this
 // same list.
@@ -391,7 +401,7 @@ type AssertEveryMetricSeeded = UnseededMetricKeys extends never ? true : never
 const everyMetricIsSeeded: AssertEveryMetricSeeded = true
 
 // The persisted totals shape, derived from the shared schema key list so a
-// key added in lru-schema.ts appears here and in the panel parser without a
+// key added in schema.ts appears here and in the panel parser without a
 // second edit.
 type CumulativeCounters = { [K in TotalsKey]: number }
 
@@ -453,7 +463,7 @@ const modelContextTokensOf = (raw: Record<string, number> | undefined): Record<s
   return resolved
 }
 
-const userFenceEvictionOf = (raw: LruContextOptions["userFenceEviction"]): UserFenceEvictionOptions => {
+const userFenceEvictionOf = (raw: ContextManagerOptions["userFenceEviction"]): UserFenceEvictionOptions => {
   const source = typeof raw === "object" && raw !== null ? raw : {}
   return {
     enabled: typeof source.enabled === "boolean" ? source.enabled : DEFAULT_USER_FENCE_EVICTION_ENABLED,
@@ -467,7 +477,7 @@ const userFenceEvictionOf = (raw: LruContextOptions["userFenceEviction"]): UserF
 const boundedIntegerOr = (value: number | undefined, fallback: number, min: number): number =>
   typeof value === "number" && Number.isInteger(value) && value >= min ? value : fallback
 
-const resolveOptions = (raw: LruContextOptions = {}): ResolvedOptions => {
+const resolveOptions = (raw: ContextManagerOptions = {}): ResolvedOptions => {
   const protectedPatterns =
     Array.isArray(raw.protectedPatterns) && raw.protectedPatterns.every((pattern) => typeof pattern === "string" && pattern.length > 0)
       ? raw.protectedPatterns
@@ -720,7 +730,7 @@ const buildDedupTombstone = (tool: string, msgIndex: number): string =>
 const dedupTargetOf = (part: Record<string, unknown>): DedupTarget | undefined => {
   const outputRef = completedOutputOf(part)
   if (outputRef === undefined) return undefined
-  if (outputRef.output.startsWith(EVICTION_MARKER) || outputRef.output.startsWith(DEDUP_MARKER)) return undefined
+  if (startsWithEitherGeneration(outputRef.output, EVICTION_MARKER, LEGACY_EVICTION_MARKER) || startsWithEitherGeneration(outputRef.output, DEDUP_MARKER, LEGACY_DEDUP_MARKER)) return undefined
   const tool = part["tool"]
   if (typeof tool !== "string") return undefined
   const typedState = part["state"] as Record<string, unknown>
@@ -817,7 +827,7 @@ const rangeWindowOf = (part: Record<string, unknown>): { range: SubjectRange; st
   if (typeof state !== "object" || state === null) return undefined
   const typedState = state as Record<string, unknown>
   if (typedState["status"] !== "completed" || typeof typedState["output"] !== "string") return undefined
-  if (typedState["output"].startsWith(EVICTION_MARKER) || typedState["output"].startsWith(DEDUP_MARKER)) return undefined
+  if (startsWithEitherGeneration(typedState["output"], EVICTION_MARKER, LEGACY_EVICTION_MARKER) || startsWithEitherGeneration(typedState["output"], DEDUP_MARKER, LEGACY_DEDUP_MARKER)) return undefined
   const input = typeof typedState["input"] === "object" && typedState["input"] !== null ? (typedState["input"] as Record<string, unknown>) : {}
   // Malformed ranges never become windows: a non-integer, negative, or
   // empty range cannot be compared for containment meaningfully. The guards
@@ -1040,7 +1050,7 @@ const purgeErroredToolInputs = (messages: MessageBundle[], options: ResolvedOpti
       if (typeof state !== "object" || state === null) continue
       const typedState = state as Record<string, unknown>
       if (typedState["status"] !== "error") continue
-      if (typedState["input"] === PURGED_INPUT_MARKER) continue
+      if (typedState["input"] === PURGED_INPUT_MARKER || typedState["input"] === LEGACY_PURGED_INPUT_MARKER) continue
       typedState["input"] = PURGED_INPUT_MARKER
     }
   }
@@ -1085,7 +1095,7 @@ const stripLegacyHintParts = (messages: MessageBundle[]): void => {
     for (let partIndex = message.parts.length - 1; partIndex >= 0; partIndex -= 1) {
       const part = message.parts[partIndex]
       const text = part["text"]
-      if (part["type"] === TEXT_PART_TYPE && typeof text === "string" && text.startsWith(HINT_LINE_PREFIX)) {
+      if (part["type"] === TEXT_PART_TYPE && typeof text === "string" && startsWithEitherGeneration(text, HINT_LINE_PREFIX, LEGACY_HINT_LINE_PREFIX)) {
         message.parts.splice(partIndex, 1)
       }
     }
@@ -1995,7 +2005,7 @@ const sessionBudgetForRun = (
   }
 }
 
-const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
+const executeStatsTool = (source: StatsSource, toolContext: unknown): string => {
   const sessionKey = sessionKeyFromContext(toolContext)
   const sessionID = sessionIDFromContext(toolContext)
   const sessionLimit = sessionID === undefined ? undefined : touchMapEntry(source.limits, sessionID)
@@ -2068,7 +2078,8 @@ const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
 
 const liveSubjectsOf = (entries: EvictableEntry[]): HotSubject[] =>
   entries.flatMap((entry) =>
-    entry.stateRef.output.startsWith(EVICTION_MARKER) || entry.stateRef.output.startsWith(DEDUP_MARKER)
+    startsWithEitherGeneration(entry.stateRef.output, EVICTION_MARKER, LEGACY_EVICTION_MARKER) ||
+    startsWithEitherGeneration(entry.stateRef.output, DEDUP_MARKER, LEGACY_DEDUP_MARKER)
       ? []
       : entry.subjects.map((subject) => ({ subject, lastTouch: entry.lastTouch })),
   )
@@ -2095,7 +2106,7 @@ const scanToolOutputs = (
 
       if (typeof typedState["output"] !== "string") continue
       const output = typedState["output"]
-      if (output.startsWith(EVICTION_MARKER) || output.startsWith(DEDUP_MARKER) || output.length < options.minEvictableBytes) continue
+      if (startsWithEitherGeneration(output, EVICTION_MARKER, LEGACY_EVICTION_MARKER) || startsWithEitherGeneration(output, DEDUP_MARKER, LEGACY_DEDUP_MARKER) || output.length < options.minEvictableBytes) continue
       entries.push({
         stateRef: typedState as { output: string; attachments?: unknown },
         tool,
@@ -2300,7 +2311,7 @@ const storeHint = (hintBySession: Map<string, string>, sessionKey: string, hotSu
 // reloadable outputs, a one-line note naming the newest stashed subjects
 // through read_evicted. Appends context strings only; the native prompt
 // is never replaced, and an unknown session attaches nothing.
-const COMPACTION_BLOCK_MARKER = "[lru-context]"
+const COMPACTION_BLOCK_MARKER = "[ctx]"
 const compactionContextFor = (metricsEntry: SessionMetrics | undefined, stash: SessionStash | undefined, limit: number): string[] => {
   if (metricsEntry === undefined) return []
   const hotSubjects = orderedRenderedSubjectsOf(metricsEntry.evictedSubjects.map((subject, index) => ({ subject, lastTouch: index })), limit)
@@ -2329,7 +2340,7 @@ const deliverHint = (hintBySession: Map<string, string>, input: unknown, output:
   const sessionKey = sessionKeyFromContext(input)
   const hintLine = touchMapEntry(hintBySession, sessionKey)
   if (hintLine === undefined) return
-  const existingIndex = output.system.findIndex((block) => typeof block === "string" && block.startsWith(HINT_LINE_PREFIX))
+  const existingIndex = output.system.findIndex((block) => typeof block === "string" && startsWithEitherGeneration(block, HINT_LINE_PREFIX, LEGACY_HINT_LINE_PREFIX))
   if (existingIndex === -1) output.system.push(hintLine)
   else output.system[existingIndex] = hintLine
 }
@@ -2496,7 +2507,7 @@ const chatParamsHookBody = (
 }
 
 export default (async (_input, rawOptions) => {
-  const options = resolveOptions(rawOptions as LruContextOptions)
+  const options = resolveOptions(rawOptions as ContextManagerOptions)
   const contextTokensBySession = new Map<string, SessionBudgetEntry>()
   const modelKeyBySession = new Map<string, string | undefined>()
   const stashBySession = new Map<string, SessionStash>()
@@ -2535,8 +2546,8 @@ export default (async (_input, rawOptions) => {
   const readEvicted = async (args: unknown, toolContext: unknown): Promise<string> =>
     executeReadEvicted(stashBySession, metricsBySession, metricsHydrationBySession, persistedTotalsForSession, options.metricsSessions, args, toolContext)
 
-  const lruStats = async (_args: unknown, toolContext: unknown): Promise<string> =>
-    executeLruStats({ options, limits: contextTokensBySession, modelKeys: modelKeyBySession, stashes: stashBySession, metrics: metricsBySession }, toolContext)
+  const statsTool = async (_args: unknown, toolContext: unknown): Promise<string> =>
+    executeStatsTool({ options, limits: contextTokensBySession, modelKeys: modelKeyBySession, stashes: stashBySession, metrics: metricsBySession }, toolContext)
 
   return {
     "chat.params": async (input: { sessionID: string; model?: ChatParamsModel }) => {
@@ -2640,7 +2651,7 @@ export default (async (_input, rawOptions) => {
       [STATS_TOOL_NAME]: {
         description: STATS_TOOL_DESCRIPTION,
         args: {},
-        execute: guardTool(lruStats),
+        execute: guardTool(statsTool),
       },
     },
   }

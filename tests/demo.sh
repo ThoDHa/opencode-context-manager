@@ -10,15 +10,15 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.. && pwd)"
-DEMO_MJS="$REPO_ROOT/tests/lru-demo.mjs"
-PLUGIN="$REPO_ROOT/plugin/lru-context.ts"
-DEMO_DIR="${LRU_DEMO_DIR:-/tmp/opencode/lru-demo}"
+DEMO_MJS="$REPO_ROOT/tests/demo.mjs"
+PLUGIN="$REPO_ROOT/plugin/context-manager.ts"
+DEMO_DIR="${CTX_DEMO_DIR:-/tmp/opencode/ctx-demo}"
 OPENCODE_BIN="${OPENCODE_BIN:-$(command -v opencode || true)}"
 PROMPT="Proceed with the task steps; inspect $DEMO_DIR/files as needed."
 SESSION_ENV="XDG_CONFIG_HOME=$DEMO_DIR/xdg/config XDG_DATA_HOME=$DEMO_DIR/xdg/data XDG_CACHE_HOME=$DEMO_DIR/xdg/cache XDG_STATE_HOME=$DEMO_DIR/xdg/state OPENCODE_DISABLE_AUTOCOMPACT=1 OPENCODE_DISABLE_PRUNE=1"
 
-say()  { printf '[lru-demo] %s\n' "$1"; }
-fail() { printf '[lru-demo] FAIL: %s\n' "$1" >&2; exit 1; }
+say()  { printf '[ctx-demo] %s\n' "$1"; }
+fail() { printf '[ctx-demo] FAIL: %s\n' "$1" >&2; exit 1; }
 
 [[ -f "$DEMO_MJS" ]] || fail "demo module not found: $DEMO_MJS"
 [[ -f "$PLUGIN" ]] || fail "plugin not found: $PLUGIN"

@@ -2,7 +2,7 @@
 
 // Neither external specifier below is resolved from node_modules on purpose,
 // because the deployed plugin's realpath sits outside any node_modules up-tree
-// (the same constraint that forced lru-context.ts to register tools as plain
+// (the same constraint that forced context-manager.ts to register tools as plain
 // definitions instead of calling tool() from @opencode-ai/plugin). The
 // TuiPluginApi import is type-only, so the transpiler erases it. The solid-js
 // import (signals and lifecycle for the sidebar entry) and the @opentui/solid
@@ -29,13 +29,13 @@ import {
   type PanelRow,
   type PanelRowTone,
   type SubagentChild,
-} from "./lru-panel-data.ts"
+} from "./panel-data.ts"
 
 const PLUGIN_ID = "lru-context"
 const COMMAND_NAMESPACE = "palette"
 const COMMAND_NAME = "lru.panel"
-const COMMAND_TITLE = "LRU Context Manager"
-const COMMAND_DESCRIPTION = "Open the LRU Context Manager's session panel"
+const COMMAND_TITLE = "Context Manager"
+const COMMAND_DESCRIPTION = "Open the Context Manager's session panel"
 const COMMAND_CATEGORY = "LRU"
 const SLASH_NAME = "lru"
 const DIALOG_SIZE = "large"

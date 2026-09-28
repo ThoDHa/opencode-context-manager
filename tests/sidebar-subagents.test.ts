@@ -16,8 +16,8 @@ import {
   type PanelRow,
   type SessionPanel,
   type SubagentChild,
-} from "../plugin/lru-panel-data.ts"
-import { makeLine, makeTotals, TOTALS_DEDUPED_UNIQUE, TOTALS_REASONING_EXPIRED_UNIQUE, TOTALS_REASONING_TOKENS_SAVED } from "./lru-panel-fixtures.ts"
+} from "../plugin/panel-data.ts"
+import { makeLine, makeTotals, TOTALS_DEDUPED_UNIQUE, TOTALS_REASONING_EXPIRED_UNIQUE, TOTALS_REASONING_TOKENS_SAVED } from "./panel-fixtures.ts"
 
 const MINUTE_MS = 60 * 1000
 const HOUR_MS = 60 * MINUTE_MS
@@ -262,7 +262,7 @@ test("sidebarRows with an absent or empty subagent group stays byte-identical to
   const base = sidebarRows(data)
 
   assert.deepEqual(base, [
-    { text: "LRU Context Manager", tone: "header" },
+    { text: "Context Manager", tone: "header" },
     { text: " ", tone: "normal" },
     { text: "no metrics recorded for this session yet", tone: "muted" },
   ])

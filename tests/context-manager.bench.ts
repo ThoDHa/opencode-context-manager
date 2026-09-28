@@ -1,13 +1,13 @@
-// Out-of-band benchmark: run explicitly with `node lru-context.bench.ts`.
+// Out-of-band benchmark: run explicitly with `node context-manager.bench.ts`.
 // Deliberately NOT named *.test.ts so it never enters default test discovery
 // and `make test` stays zero-skip.
 import { performance } from "node:perf_hooks"
 
-import lruContextFactory from "../plugin/lru-context.ts"
+import contextManagerFactory from "../plugin/context-manager.ts"
 
 const TRANSFORM_HOOK = "experimental.chat.messages.transform"
 const SYSTEM_TRANSFORM_HOOK = "experimental.chat.system.transform"
-const SESSION_ID = "lru-bench-session"
+const SESSION_ID = "ctx-bench-session"
 const READ_TOOL = "read"
 const GREP_TOOL = "grep"
 const BASH_TOOL = "bash"
@@ -34,10 +34,10 @@ const WATERMARK_RATIO = 0.5
 const WARMUP_RUNS = 1
 const MEASURED_RUNS = 5
 const BUDGET_MS = 50
-const EVICTION_MARKER = "[lru-evicted]"
-const DEDUP_MARKER = "[lru-deduped]"
-const PURGE_MARKER = "[lru-purged-input]"
-const HINT_MARKER = "[lru-hot]"
+const EVICTION_MARKER = "[ctx-evicted]"
+const DEDUP_MARKER = "[ctx-deduped]"
+const PURGE_MARKER = "[ctx-purged-input]"
+const HINT_MARKER = "[ctx-hot]"
 const HINT_LABEL = "recently active:"
 const HINT_LINE_PREFIX = `${HINT_MARKER} ${HINT_LABEL}`
 
@@ -129,7 +129,7 @@ const median = (values: number[]): number => {
   return sorted.length % 2 === 1 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2
 }
 
-const hooks = (await lruContextFactory({}, { defaultContextTokens: BENCH_CONTEXT_TOKENS, metricsLog: false })) as Record<
+const hooks = (await contextManagerFactory({}, { defaultContextTokens: BENCH_CONTEXT_TOKENS, metricsLog: false })) as Record<
   string,
   (input: unknown, output: unknown) => Promise<unknown>
 >
@@ -156,7 +156,7 @@ for (let run = 0; run < MEASURED_RUNS; run += 1) {
   last = { bundle: clone, system: systemOutput.system }
 }
 if (last === undefined) {
-  console.error(`lru-context.bench: FAIL: no measured runs executed (MEASURED_RUNS=${MEASURED_RUNS})`)
+  console.error(`context-manager.bench: FAIL: no measured runs executed (MEASURED_RUNS=${MEASURED_RUNS})`)
   process.exit(1)
 }
 
@@ -167,17 +167,17 @@ const messageHints = countWhere(last.bundle, (part) => part["type"] === "text" &
 const systemHints = last.system.filter((block) => typeof block === "string" && block.startsWith(HINT_LINE_PREFIX)).length
 const medianMs = median(samples)
 
-console.log(`lru-context.bench: bundle=${MESSAGE_COUNT} messages, ${baseChars} serialized chars, context=${BENCH_CONTEXT_TOKENS} tokens, watermark=${BENCH_CONTEXT_TOKENS * WATERMARK_RATIO} tokens`)
-console.log(`lru-context.bench: path coverage evicted=${evicted} deduped=${deduped} purged=${purged} messageHints=${messageHints} systemHints=${systemHints}`)
-samples.forEach((sample, index) => console.log(`lru-context.bench: run ${index + 1}: ${sample.toFixed(3)} ms`))
-console.log(`lru-context.bench: median of ${MEASURED_RUNS}: ${medianMs.toFixed(3)} ms (budget ${BUDGET_MS} ms)`)
+console.log(`context-manager.bench: bundle=${MESSAGE_COUNT} messages, ${baseChars} serialized chars, context=${BENCH_CONTEXT_TOKENS} tokens, watermark=${BENCH_CONTEXT_TOKENS * WATERMARK_RATIO} tokens`)
+console.log(`context-manager.bench: path coverage evicted=${evicted} deduped=${deduped} purged=${purged} messageHints=${messageHints} systemHints=${systemHints}`)
+samples.forEach((sample, index) => console.log(`context-manager.bench: run ${index + 1}: ${sample.toFixed(3)} ms`))
+console.log(`context-manager.bench: median of ${MEASURED_RUNS}: ${medianMs.toFixed(3)} ms (budget ${BUDGET_MS} ms)`)
 
 if (evicted === 0 || deduped === 0 || purged === 0 || messageHints !== 0 || systemHints !== 1) {
-  console.error(`lru-context.bench: FAIL: plugin run did not exercise every path (evicted=${evicted} deduped=${deduped} purged=${purged} messageHints=${messageHints} systemHints=${systemHints})`)
+  console.error(`context-manager.bench: FAIL: plugin run did not exercise every path (evicted=${evicted} deduped=${deduped} purged=${purged} messageHints=${messageHints} systemHints=${systemHints})`)
   process.exit(1)
 }
 if (medianMs >= BUDGET_MS) {
-  console.error(`lru-context.bench: FAIL: median ${medianMs.toFixed(3)} ms meets or exceeds the ${BUDGET_MS} ms budget`)
+  console.error(`context-manager.bench: FAIL: median ${medianMs.toFixed(3)} ms meets or exceeds the ${BUDGET_MS} ms budget`)
   process.exit(1)
 }
-console.log("lru-context.bench: PASS")
+console.log("context-manager.bench: PASS")

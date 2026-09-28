@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // LRU-16 wire proof demo: mock OpenAI-compatible provider and verdict report
-// generator for the lru-context plugin. Node core only; no dependencies.
+// generator for the context-manager plugin. Node core only; no dependencies.
 //
 // Modes:
 //   setup  <demoDir> <port> <pluginPath>
@@ -36,12 +36,12 @@ const MODEL_ID = "mock-model"
 const ADVERTISED_CONTEXT_TOKENS = 18000
 const ADVERTISED_OUTPUT_TOKENS = 8000
 const PLUGIN_OPTIONS = { hintSubjects: HINT_SUBJECTS_OPTION }
-const EVICTION_MARKER = "[lru-evicted]"
-const HINT_MARKER = "[lru-hot]"
+const EVICTION_MARKER = "[ctx-evicted]"
+const HINT_MARKER = "[ctx-hot]"
 const HINT_LABEL = "recently active:"
-const DEDUP_MARKER = "[lru-deduped]"
-const PURGED_INPUT_MARKER = "[lru-purged-input]"
-const STASH_MARKER = "[lru-stash]"
+const DEDUP_MARKER = "[ctx-deduped]"
+const PURGED_INPUT_MARKER = "[ctx-purged-input]"
+const STASH_MARKER = "[ctx-stash]"
 const RELOAD_TOOL_NAME = "read_evicted"
 const OFF_FORBIDDEN_STRINGS = [EVICTION_MARKER, HINT_MARKER, DEDUP_MARKER, PURGED_INPUT_MARKER, STASH_MARKER, RELOAD_TOOL_NAME]
 const RELOAD_POINTER_SENTENCE = "re-run the tool to reload its output."
@@ -51,9 +51,9 @@ const WATERMARK_SLACK_TOKENS = 128
 const EXCERPT_MAX_CHARS = 300
 
 const usage = () => {
-  console.error("usage: lru-demo.mjs setup <demoDir> <port> <pluginPath>")
-  console.error("       lru-demo.mjs serve <demoDir> <port> <off|on>")
-  console.error("       lru-demo.mjs report <demoDir> <exitOff> <exitOn> <cmdOff> <cmdOn> <ocVersion> <metaBefore> <metaAfter> <contentBefore> <contentAfter>")
+  console.error("usage: demo.mjs setup <demoDir> <port> <pluginPath>")
+  console.error("       demo.mjs serve <demoDir> <port> <off|on>")
+  console.error("       demo.mjs report <demoDir> <exitOff> <exitOn> <cmdOff> <cmdOn> <ocVersion> <metaBefore> <metaAfter> <contentBefore> <contentAfter>")
   process.exit(2)
 }
 
@@ -438,7 +438,7 @@ const runReport = (args) => {
   const hintSubjects = typeof onHintLine === "string" ? onHintLine.slice(`${HINT_MARKER} ${HINT_LABEL} `.length).split(", ") : []
   const hintOccurrences = countOf(wholeText(on.parsed), HINT_MARKER)
   check(
-    "ON hint: exactly one [lru-hot] line, freshest subject first, at most hintSubjects entries",
+    "ON hint: exactly one [ctx-hot] line, freshest subject first, at most hintSubjects entries",
     hintOccurrences === 1 &&
       typeof onHintLine === "string" &&
       onHintLine.startsWith(`${HINT_MARKER} ${HINT_LABEL} `) &&
@@ -456,7 +456,7 @@ const runReport = (args) => {
   const onDeduped = onCalls.filter((c) => typeof c.result === "string" && c.result.startsWith(DEDUP_MARKER))
   const expectedDeduped = [onDupOlder, onTouchFirst]
   check(
-    "ON dedup: [lru-deduped] on the older member of the substantial pair (the identical re-read also supersedes its first copy), and nothing else",
+    "ON dedup: [ctx-deduped] on the older member of the substantial pair (the identical re-read also supersedes its first copy), and nothing else",
     onDupCalls.length === 2 &&
       typeof onDupOlder?.result === "string" &&
       onDupOlder.result.startsWith(DEDUP_MARKER) &&
@@ -542,7 +542,7 @@ const runReport = (args) => {
   const contentUntouched = contentBefore === contentAfter ? "yes" : "NO"
 
   const lines = []
-  lines.push("# LRU Context Plugin Wire Proof Demo Report")
+  lines.push("# Context Manager Wire Proof Demo Report")
   lines.push("")
   lines.push(`- Date (UTC): ${new Date().toISOString()}`)
   lines.push(`- opencode: ${ocVersion}`)
