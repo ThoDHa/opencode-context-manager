@@ -168,6 +168,7 @@ type UserFenceEvictionOptions = { enabled: boolean; minBlockLines: number }
 type LruContextOptions = {
   watermark?: number
   watermarkTokens?: number
+  agedReadEvictionMessages?: number
   recentWindow?: number
   minEvictableBytes?: number
   defaultContextTokens?: number
@@ -216,8 +217,12 @@ type LruContextOptions = {
 
 type CompiledGlob = { regexp: RegExp; matchesSegments: boolean }
 
-type ResolvedOptions = Omit<Required<LruContextOptions>, "defaultContextTokens" | "modelContextTokens" | "protectedPatterns" | "userFenceEviction" | "watermarkTokens"> & {
+type ResolvedOptions = Omit<
+  Required<LruContextOptions>,
+  "defaultContextTokens" | "agedReadEvictionMessages" | "modelContextTokens" | "protectedPatterns" | "userFenceEviction" | "watermarkTokens"
+> & {
   defaultContextTokens?: number
+  agedReadEvictionMessages?: number
   watermarkTokens?: number
   modelContextTokens: Record<string, number>
   protectedPatterns: CompiledGlob[]
@@ -477,6 +482,14 @@ const resolveOptions = (raw: LruContextOptions = {}): ResolvedOptions => {
     watermarkTokens:
       typeof raw.watermarkTokens === "number" && Number.isFinite(raw.watermarkTokens) && raw.watermarkTokens > 0
         ? raw.watermarkTokens
+        : undefined,
+    // The aged read tier's age threshold in messages from the list tail.
+    // Unset disables the tier entirely; a set value must be a positive
+    // integer, anything else falling back to unset (the same
+    // drop-on-invalid discipline as the other staged levers).
+    agedReadEvictionMessages:
+      typeof raw.agedReadEvictionMessages === "number" && Number.isInteger(raw.agedReadEvictionMessages) && raw.agedReadEvictionMessages > 0
+        ? raw.agedReadEvictionMessages
         : undefined,
     recentWindow: typeof raw.recentWindow === "number" && raw.recentWindow >= 0 ? Math.floor(raw.recentWindow) : DEFAULT_RECENT_WINDOW_MESSAGES,
     minEvictableBytes: typeof raw.minEvictableBytes === "number" && raw.minEvictableBytes >= 0 ? raw.minEvictableBytes : DEFAULT_MIN_EVICTABLE_BYTES,
@@ -1997,6 +2010,7 @@ const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
       recentWindow: source.options.recentWindow,
       minEvictableBytes: source.options.minEvictableBytes,
       defaultContextTokens: source.options.defaultContextTokens ?? null,
+      agedReadEvictionMessages: source.options.agedReadEvictionMessages ?? null,
       modelContextTokens: source.options.modelContextTokens,
       metricsLog: source.options.metricsLog,
       metricsPath: source.options.metricsPath,
@@ -2123,6 +2137,39 @@ const evictionCandidatesOf = (messages: MessageBundle[], options: ResolvedOption
   return { appearances, entries, evictable, estimatedTokens: estimateTokens(messages, options.charsPerToken) }
 }
 
+// The aged read tier (agedReadEvictionMessages): read-family outputs,
+// defined as the tools whose subjects the touch tracker refreshes by
+// exact path equality (every non-bash tool carrying a path or pattern
+// subject; bash is the substring-refresh command channel and is
+// excluded), whose birth position sits strictly older than the threshold
+// from the list tail. Birth position, not lastTouch: a re-touched read
+// is protected by the recent-window filter upstream of the tier, so a
+// re-read keeps its output however ancient its original message is. The
+// age compares against the list tail, so it is a deterministic function
+// of the message list and the per-request view stays stable under the
+// re-run-per-request contract. The tier adds no candidate of its own: it
+// arms a second disposition inside the single shared walk (below), so
+// aged entries ride the same tombstone, stash, and counter machinery as
+// budget-driven evictions.
+const isAgedReadEntry = (entry: EvictableEntry, listLength: number, options: ResolvedOptions): boolean =>
+  options.agedReadEvictionMessages !== undefined &&
+  entry.tool !== BASH_TOOL_NAME &&
+  entry.subjects.length > 0 &&
+  listLength - entry.msgIndex > options.agedReadEvictionMessages
+
+// The one-disposition decision the evictor walk and the dry-run walk
+// share, so the two sites cannot drift: an entry is evicted when the aged
+// read tier claims it, or when the watermark tier still has deficit left
+// to cover. A null deficit (no effective watermark) disarms the watermark
+// tier entirely and leaves the aged tier unaffected.
+const isEvictedByWalkPolicy = (
+  entry: EvictableEntry,
+  listLength: number,
+  options: ResolvedOptions,
+  deficitTokens: number | null,
+  reclaimedTokens: number,
+): boolean => isAgedReadEntry(entry, listLength, options) || (deficitTokens !== null && reclaimedTokens < deficitTokens)
+
 const measureWithoutEvicting = (candidates: EvictionCandidates): EvictionResult => {
   return {
     hotSubjects: liveSubjectsOf(candidates.entries),
@@ -2139,21 +2186,25 @@ type DryRunResult = { deficitTokens: number; wouldEvictCount: number; wouldEvict
 
 // Manual-mode dry run: with an effective watermark in hand, compute what
 // the evictor WOULD reclaim (the shared candidate list, the same
-// reclaim-until-deficit walk) without touching any output. Consumes the
-// already-computed candidates, so the message list is unchanged when it
-// returns and no second scan runs.
-const measureDryRun = (candidates: EvictionCandidates, options: ResolvedOptions, watermarkTokens: number): DryRunResult => {
+// reclaim-until-deficit walk with the aged read tier's dispositions
+// included) without touching any output. Consumes the already-computed
+// candidates, so the message list is unchanged when it returns and no
+// second scan runs.
+const measureDryRun = (
+  messages: MessageBundle[],
+  candidates: EvictionCandidates,
+  options: ResolvedOptions,
+  watermarkTokens: number,
+): DryRunResult => {
   const deficitTokens = candidates.estimatedTokens - watermarkTokens
   const subjects: string[] = []
   let wouldEvictBytes = 0
   let reclaimedTokens = 0
-  if (deficitTokens > 0) {
-    for (const entry of candidates.evictable) {
-      if (reclaimedTokens >= deficitTokens) break
-      reclaimedTokens += entry.bytes / options.charsPerToken
-      wouldEvictBytes += entry.bytes
-      subjects.push(entry.subjects.length > 0 ? renderSubject(entry.subjects[0]) : UNKNOWN_TARGET_LABEL)
-    }
+  for (const entry of candidates.evictable) {
+    if (!isEvictedByWalkPolicy(entry, messages.length, options, deficitTokens, reclaimedTokens)) continue
+    reclaimedTokens += entry.bytes / options.charsPerToken
+    wouldEvictBytes += entry.bytes
+    subjects.push(entry.subjects.length > 0 ? renderSubject(entry.subjects[0]) : UNKNOWN_TARGET_LABEL)
   }
   return { deficitTokens, wouldEvictCount: subjects.length, wouldEvictBytes, wouldEvictSubjects: subjects }
 }
@@ -2162,44 +2213,46 @@ const evictLeastRecentlyUsed = (
   messages: MessageBundle[],
   candidates: EvictionCandidates,
   options: ResolvedOptions,
-  watermarkTokens: number,
+  watermarkTokens: number | null,
   stash: SessionStash,
 ): EvictionResult => {
   const { evictable } = candidates
 
-  const deficitTokens = candidates.estimatedTokens - watermarkTokens
+  const deficitTokens = watermarkTokens === null ? null : candidates.estimatedTokens - watermarkTokens
   const evicted: EvictedEntryInfo[] = []
   let stashDropped = 0
-  if (deficitTokens > 0 && evictable.length > 0) {
-    let reclaimedTokens = 0
-    for (const entry of evictable) {
-      if (reclaimedTokens >= deficitTokens) break
-      const subject = entry.subjects.length > 0 ? renderSubject(entry.subjects[0]) : UNKNOWN_TARGET_LABEL
-      const messagesAgo = messages.length - entry.lastTouch
-      const droppedAttachments = nonEmptyAttachmentsOf(entry.stateRef)
-      const digest = buildOutputDigest(entry.tool, subject, entry.stateRef.output)
-      const tombstone = buildTombstone(entry.tool, subject, entry.bytes, messagesAgo, droppedAttachments !== undefined, digest)
-      const stashed: StashEntry = {
-        output: entry.stateRef.output,
-        tool: entry.tool,
-        subject,
-        msgIndex: entry.msgIndex,
-        partIndex: entry.partIndex,
-      }
-      if (droppedAttachments !== undefined) stashed.attachments = droppedAttachments
-      stashDropped += stashEvictedOutput(stash, stashed, options.stashLimit)
-      stripStateAttachments(entry.stateRef)
-      entry.stateRef.output = `${tombstone}${buildReloadPointer(subject)}`
-      reclaimedTokens += entry.bytes / options.charsPerToken
-      evicted.push({
-        tool: entry.tool,
-        subject,
-        subjects: entry.subjects,
-        bytes: entry.bytes,
-        attachmentBytes: entry.attachmentBytes,
-        messagesAgo,
-      })
+  let reclaimedTokens = 0
+  // One walk, one disposition per candidate: the aged read tier evicts
+  // its entries whatever the budget says, and the watermark tier evicts
+  // the rest only while the deficit is unmet, so no entry is touched
+  // twice and the aged tier cannot double-count against the budget pass.
+  for (const entry of evictable) {
+    if (!isEvictedByWalkPolicy(entry, messages.length, options, deficitTokens, reclaimedTokens)) continue
+    const subject = entry.subjects.length > 0 ? renderSubject(entry.subjects[0]) : UNKNOWN_TARGET_LABEL
+    const messagesAgo = messages.length - entry.lastTouch
+    const droppedAttachments = nonEmptyAttachmentsOf(entry.stateRef)
+    const digest = buildOutputDigest(entry.tool, subject, entry.stateRef.output)
+    const tombstone = buildTombstone(entry.tool, subject, entry.bytes, messagesAgo, droppedAttachments !== undefined, digest)
+    const stashed: StashEntry = {
+      output: entry.stateRef.output,
+      tool: entry.tool,
+      subject,
+      msgIndex: entry.msgIndex,
+      partIndex: entry.partIndex,
     }
+    if (droppedAttachments !== undefined) stashed.attachments = droppedAttachments
+    stashDropped += stashEvictedOutput(stash, stashed, options.stashLimit)
+    stripStateAttachments(entry.stateRef)
+    entry.stateRef.output = `${tombstone}${buildReloadPointer(subject)}`
+    reclaimedTokens += entry.bytes / options.charsPerToken
+    evicted.push({
+      tool: entry.tool,
+      subject,
+      subjects: entry.subjects,
+      bytes: entry.bytes,
+      attachmentBytes: entry.attachmentBytes,
+      messagesAgo,
+    })
   }
   return {
     hotSubjects: liveSubjectsOf(candidates.entries),
@@ -2327,24 +2380,24 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
   const fenceEvictedThisRun = evictLargeUserFences(messages, options, sessionStash)
   const effectiveWatermarkTokens = effectiveWatermarkTokensOf(budget.tokens, options)
   // One scan and one candidate walk feed whichever path runs: the
-  // manual-mode pair (stand-down measurement plus dry run) shares a
-  // single candidates computation, halving manual-mode diagnostic
-  // cost versus scanning twice.
-  const candidates =
-    options.manualMode || effectiveWatermarkTokens === null
-      ? evictionCandidatesOf(messages, options)
-      : undefined
-  const eviction =
-    candidates === undefined
-      ? evictLeastRecentlyUsed(messages, evictionCandidatesOf(messages, options), options, effectiveWatermarkTokens as number, sessionStash)
-      : measureWithoutEvicting(candidates)
+  // stand-downs (manual mode, or no watermark with the aged read tier
+  // disarmed) share this candidates computation with the real evictor.
+  // The aged read tier arms the evictor even without a budget, since its
+  // evictions are budget-independent; with the tier unset the old
+  // stand-down holds and an unknown budget still suspends eviction.
+  const candidates = evictionCandidatesOf(messages, options)
+  const standDown = options.manualMode || (effectiveWatermarkTokens === null && options.agedReadEvictionMessages === undefined)
+  const eviction = standDown
+    ? measureWithoutEvicting(candidates)
+    : evictLeastRecentlyUsed(messages, candidates, options, effectiveWatermarkTokens, sessionStash)
   // The manual-mode dry run: with an effective watermark set, report
-  // what the evictor would reclaim so a staged watermark can be
+  // what the evictor would reclaim (the combined watermark and aged
+  // read policy) so a staged watermark or staged age threshold can be
   // evaluated before manual mode is ever turned off. Never mutates
   // the message list.
   const dryRun =
-    candidates !== undefined && effectiveWatermarkTokens !== null
-      ? measureDryRun(candidates, options, effectiveWatermarkTokens)
+    options.manualMode && effectiveWatermarkTokens !== null
+      ? measureDryRun(messages, candidates, options, effectiveWatermarkTokens)
       : undefined
   const touchesThisRun = countPostEvictionTouches(sessionMetrics, eviction.appearances, options.minSubstringMatchChars)
   // Composition reads the final post-transform list: every pass above has

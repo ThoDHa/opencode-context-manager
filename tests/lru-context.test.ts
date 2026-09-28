@@ -146,6 +146,20 @@ const COMPACTION_FAULT_MESSAGE = "compaction enrichment exploded"
 const COMPACTION_STASH_NEWEST_SUBJECT = "/data/comp-stash-newest.txt"
 const COMPACTION_STASH_DUP_SUBJECT = "/data/comp-stash-dup.txt"
 const COMPACTION_STASH_HELD_SUBJECT = "/data/comp-stash-held.txt"
+const AGED_EVICTION_MESSAGES = 3
+const AGED_THRESHOLD_ABOVE_WINDOW = 8
+const AGED_MID_AGE_FILLER_COUNT = 6
+const AGED_THRESHOLD_INVALID_FLOAT = 3.5
+const AGED_THRESHOLD_INVALID_ZERO = 0
+const AGED_THRESHOLD_INVALID_NEGATIVE = -1
+const AGED_READ_PATH = "/data/aged-read.txt"
+const AGED_RETOUCHED_PATH = "/data/aged-retouched.txt"
+const AGED_PROTECTED_PATH = "/data/aged-protected.txt"
+const AGED_PROTECTED_GLOB = "**/aged-protected.txt"
+const AGED_RETOUCH_OFFSET = 100
+const AGED_FILLER_COUNT = 6
+const AGED_BUNDLE_CHARS = MIN_EVICTABLE_BYTES + AGED_FILLER_COUNT * FILLER_TEXT_CHARS
+const AGED_TWO_READ_BUNDLE_CHARS = 2 * MIN_EVICTABLE_BYTES + AGED_FILLER_COUNT * FILLER_TEXT_CHARS
 const TOOL_FAULT_MESSAGE = "tool getter exploded"
 const DEDUP_SUPERSEDED_LEAD = "identical call superseded by the newer output at message"
 const DEDUP_RANGE_SUPERSEDED_LEAD = "range read superseded by the retained range at message"
@@ -3333,6 +3347,7 @@ test("lru_stats reports zeroed counters unknown budget and empty stash for a ses
     recentWindow: RECENT_WINDOW_MESSAGES,
     minEvictableBytes: MIN_EVICTABLE_BYTES,
     defaultContextTokens: null,
+    agedReadEvictionMessages: null,
     modelContextTokens: {},
     metricsLog: false,
     metricsPath: DEFAULT_METRICS_PATH,
@@ -6207,6 +6222,151 @@ test("a frozen hygiene output object degrades through the fault boundary with th
   assert.equal(typeof lastFault.message, "string")
   assert.ok((lastFault.message as string).length > 0)
   cleanupMetricsDir(hygieneDir)
+})
+
+const agedBundle = (): StrictBundle => buildBundle([[pathToolPart(AGED_READ_PATH, MIN_EVICTABLE_BYTES)], ...fillerMessages(AGED_FILLER_COUNT)])
+
+test("an aged read older than the threshold evicts with no budget captured and credits the counters", async () => {
+  const hooks = await loadPluginHooksWith({ agedReadEvictionMessages: AGED_EVICTION_MESSAGES })
+
+  const bundle = agedBundle()
+  await runTransform(hooks, bundle)
+
+  assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  assert.equal(await readEvicted(hooks, AGED_READ_PATH, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.equal(countersOf(stats).evictions, 1)
+  assert.equal(countersOf(stats).bytesReclaimed, MIN_EVICTABLE_BYTES)
+  assert.equal(countersOf(stats).evictionTokensSaved, tokensForChars(MIN_EVICTABLE_BYTES))
+  const lastRun = stats.lastRun as Record<string, unknown>
+  assert.equal(lastRun.watermarkTokens, null)
+  assert.equal(lastRun.deficitTokens, null)
+})
+
+test("a re-touched aged read survives aged eviction while its message index is ancient", async () => {
+  const hooks = await loadPluginHooksWith({ agedReadEvictionMessages: AGED_EVICTION_MESSAGES })
+
+  const bundle = buildBundle([
+    [rangeReadPart(AGED_RETOUCHED_PATH, 0, 10, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(AGED_FILLER_COUNT - 1),
+    [rangeReadPart(AGED_RETOUCHED_PATH, AGED_RETOUCH_OFFSET, 10, MIN_EVICTABLE_BYTES)],
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(toolPartAt(bundle.messages[6], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(await readEvicted(hooks, AGED_RETOUCHED_PATH, SESSION_ID), stashMissFor(AGED_RETOUCHED_PATH))
+})
+
+test("a read inside the recent window survives aged eviction despite passing the age threshold", async () => {
+  const hooks = await loadPluginHooksWith({ agedReadEvictionMessages: AGED_EVICTION_MESSAGES })
+
+  const bundle = buildBundle([
+    ...textMessages(2, FILLER_TEXT_CHARS),
+    [pathToolPart(AGED_READ_PATH, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(3),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[2], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).evictions, 0)
+})
+
+test("an aged read below minEvictableBytes survives aged eviction", async () => {
+  const hooks = await loadPluginHooksWith({ agedReadEvictionMessages: AGED_EVICTION_MESSAGES })
+
+  const bundle = buildBundle([[pathToolPart(AGED_READ_PATH, MIN_EVICTABLE_BYTES - 1)], ...fillerMessages(AGED_FILLER_COUNT)])
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES - 1))
+  assert.equal(await readEvicted(hooks, AGED_READ_PATH, SESSION_ID), stashMissFor(AGED_READ_PATH))
+})
+
+test("an aged read matching a protected pattern survives aged eviction", async () => {
+  const hooks = await loadPluginHooksWith({ agedReadEvictionMessages: AGED_EVICTION_MESSAGES, protectedPatterns: [AGED_PROTECTED_GLOB] })
+
+  const bundle = buildBundle([[pathToolPart(AGED_PROTECTED_PATH, MIN_EVICTABLE_BYTES)], ...fillerMessages(AGED_FILLER_COUNT)])
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).evictions, 0)
+})
+
+test("manual mode with the aged option reports the aged tier in the dry run without mutating", async () => {
+  const hooks = await loadPluginHooksWith({ manualMode: true, agedReadEvictionMessages: AGED_EVICTION_MESSAGES })
+  await setContextLimit(hooks, SESSION_ID, contextForWatermarkTokens(tokensForChars(AGED_BUNDLE_CHARS) + HEADROOM_TOKENS))
+
+  const bundle = agedBundle()
+  await runTransform(hooks, bundle)
+
+  const dryRun = (await lruStats(hooks, SESSION_ID)).dryRun as Record<string, unknown>
+  assert.equal(dryRun.wouldEvictCount, 1)
+  assert.equal(dryRun.wouldEvictBytes, MIN_EVICTABLE_BYTES)
+  assert.deepEqual(dryRun.wouldEvictSubjects, [AGED_READ_PATH])
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+})
+
+test("the default configuration leaves a bundle that would age out intact", async () => {
+  const hooks = await loadPluginHooks()
+
+  const bundle = agedBundle()
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(countersOf(await lruStats(hooks, SESSION_ID)).evictions, 0)
+})
+
+test("the aged tier and the watermark tier evict each output exactly once in a single walk", async () => {
+  const hooks = await loadPluginHooksWith({ agedReadEvictionMessages: AGED_EVICTION_MESSAGES })
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(AGED_TWO_READ_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+  const bundle = buildBundle([
+    [pathToolPart(AGED_READ_PATH, MIN_EVICTABLE_BYTES)],
+    [pathToolPart(AGED_RETOUCHED_PATH, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(AGED_FILLER_COUNT),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  assert.ok(toolPartAt(bundle.messages[1], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.equal(countersOf(stats).evictions, 2)
+  assert.equal(countersOf(stats).bytesReclaimed, MIN_EVICTABLE_BYTES * 2)
+  assert.equal(countersOf(stats).evictionTokensSaved, tokensForChars(MIN_EVICTABLE_BYTES) * 2)
+})
+
+test("an aged output and a not-yet-aged candidate each take one disposition when the threshold exceeds the recent window", async () => {
+  const hooks = await loadPluginHooksWith({ agedReadEvictionMessages: AGED_THRESHOLD_ABOVE_WINDOW })
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(AGED_TWO_READ_BUNDLE_CHARS, tokensForChars(MIN_EVICTABLE_BYTES) + OVER_BY_ONE_TOKENS))
+
+  const bundle = buildBundle([
+    [pathToolPart(AGED_READ_PATH, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(AGED_MID_AGE_FILLER_COUNT),
+    [pathToolPart(AGED_RETOUCHED_PATH, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(4),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  assert.ok(toolPartAt(bundle.messages[7], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.equal(countersOf(stats).evictions, 2)
+  assert.equal(countersOf(stats).bytesReclaimed, MIN_EVICTABLE_BYTES * 2)
+  assert.equal(countersOf(stats).evictionTokensSaved, tokensForChars(MIN_EVICTABLE_BYTES) * 2)
+})
+
+test("invalid agedReadEvictionMessages values drop to unset and echo null", async () => {
+  for (const invalidValue of [AGED_THRESHOLD_INVALID_FLOAT, AGED_THRESHOLD_INVALID_ZERO, AGED_THRESHOLD_INVALID_NEGATIVE]) {
+    const hooks = await loadPluginHooksWith({ agedReadEvictionMessages: invalidValue })
+
+    const bundle = agedBundle()
+    await runTransform(hooks, bundle)
+
+    assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+    const stats = await lruStats(hooks, SESSION_ID)
+    assert.equal((stats.options as Record<string, unknown>).agedReadEvictionMessages, null)
+    assert.equal(countersOf(stats).evictions, 0)
+  }
 })
 
 test("transform keeps dedup active under pressure while manualMode is enabled", async () => {
