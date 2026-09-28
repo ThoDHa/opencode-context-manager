@@ -872,7 +872,26 @@ const estimateTokens = (messages: MessageBundle[], charsPerToken: number): numbe
   return estimateTokensFromBytes(chars, charsPerToken)
 }
 
-type RunComposition = { toolPoolBytes: number; textChars: number; reasoningInWindowBytes: number }
+type RunComposition = {
+  toolPoolBytes: number
+  textChars: number
+  reasoningInWindowBytes: number
+  escapeBytes: number
+  attachmentBytes: number
+}
+
+// Terminal escape sequences counted for escapeBytes: CSI sequences
+// (ESC [ ... final byte) and OSC sequences (ESC ] ... BEL or ST
+// terminator). Matched spans count their whole length; a truncated CSI
+// without a final byte, an unterminated OSC, and a lone ESC without an
+// introducer are not counted. Deterministic single pass.
+const ESCAPE_SPAN_PATTERN = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)/g
+
+const escapeBytesOf = (output: string): number => {
+  let bytes = 0
+  for (const span of output.match(ESCAPE_SPAN_PATTERN) ?? []) bytes += span.length
+  return bytes
+}
 
 // The post-transform composition of one run's message list: live tool
 // outputs, text parts, and the reasoning still inside the recent window.
@@ -880,13 +899,20 @@ type RunComposition = { toolPoolBytes: number; textChars: number; reasoningInWin
 // view the model actually receives. The estimate relation is exact for
 // the two sums the estimate counts: estimatedTokens equals
 // ceil((toolPoolBytes + textChars) / charsPerToken) over this same list,
-// while reasoningInWindowBytes and attachment payloads are bill
-// components the estimate omits.
+// while reasoningInWindowBytes and attachmentBytes are bill components
+// the estimate omits. attachmentBytes reuses the evictor's own
+// attachment accounting (tool-state attachment url payloads via
+// attachmentPayloadCharsOf) — a superset of eviction's tool-state
+// attachment accounting, extended with file-part url lengths; embedded
+// images inside file parts, data-URI text outputs, and non-attachment
+// host content are the known gaps, not a second measure.
 const runCompositionOf = (messages: MessageBundle[], options: ResolvedOptions): RunComposition => {
   const hotFromIndex = hotFromIndexOf(messages, options)
   let toolPoolBytes = 0
   let textChars = 0
   let reasoningInWindowBytes = 0
+  let escapeBytes = 0
+  let attachmentBytes = 0
   for (let msgIndex = 0; msgIndex < messages.length; msgIndex += 1) {
     const inHotWindow = msgIndex >= hotFromIndex
     for (const part of messages[msgIndex].parts) {
@@ -900,11 +926,20 @@ const runCompositionOf = (messages: MessageBundle[], options: ResolvedOptions): 
         if (inHotWindow && typeof text === "string") reasoningInWindowBytes += text.length
         continue
       }
+      if (part["type"] === FILE_PART_TYPE) {
+        const file = filePartOf(part)
+        if (file !== undefined) attachmentBytes += file.url.length
+        continue
+      }
       const outputRef = completedOutputOf(part)
-      if (outputRef) toolPoolBytes += outputRef.output.length
+      if (outputRef) {
+        toolPoolBytes += outputRef.output.length
+        escapeBytes += escapeBytesOf(outputRef.output)
+        attachmentBytes += attachmentPayloadCharsOf(outputRef)
+      }
     }
   }
-  return { toolPoolBytes, textChars, reasoningInWindowBytes }
+  return { toolPoolBytes, textChars, reasoningInWindowBytes, escapeBytes, attachmentBytes }
 }
 
 const purgeErroredToolInputs = (messages: MessageBundle[], options: ResolvedOptions): void => {
@@ -1595,6 +1630,8 @@ const recordMetricsLine = async (
     toolPoolBytes: run.composition.toolPoolBytes,
     textChars: run.composition.textChars,
     reasoningInWindowBytes: run.composition.reasoningInWindowBytes,
+    escapeBytes: run.composition.escapeBytes,
+    attachmentBytes: run.composition.attachmentBytes,
     watermarkTokens: eviction.watermarkTokens,
     deficitTokens: eviction.deficitTokens,
     evictedThisRun: eviction.evicted.map((entry) => ({
@@ -1886,6 +1923,8 @@ const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
             toolPoolBytes: metrics.lastComposition.toolPoolBytes,
             textChars: metrics.lastComposition.textChars,
             reasoningInWindowBytes: metrics.lastComposition.reasoningInWindowBytes,
+            escapeBytes: metrics.lastComposition.escapeBytes,
+            attachmentBytes: metrics.lastComposition.attachmentBytes,
           },
         }),
     ...(metrics.lastFault === undefined

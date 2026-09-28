@@ -485,6 +485,8 @@ test("parseMetricsLine consumes the line's ts and accepts the plugin's remaining
     toolPoolBytes: 9500,
     textChars: 1800,
     reasoningInWindowBytes: 512,
+    escapeBytes: 96,
+    attachmentBytes: 20480,
   })
 
   const line = parseMetricsLine(raw)

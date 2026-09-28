@@ -4706,6 +4706,94 @@ test("metrics line carries the post-transform composition fields on a known bund
   }
 })
 
+test("metrics composition counts escape bytes and live attachment bytes on a known bundle", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const hooks = await loadPluginHooksWith({ metricsLog: true, metricsPath, manualMode: true })
+
+    // Two reads of the same path with identical inputs: the older output
+    // carries a CSI span and an OSC span, and the newer output's length
+    // clears the dedup floor, so dedup supersedes the older output and
+    // its escape spans leave the post-transform view. escapeBytes counts
+    // only the newer output's CSI span, and attachmentBytes counts the
+    // live attachment url payloads (tool-state attachment plus file-part
+    // url). The dedup tombstone makes the run eventful, so the line
+    // lands.
+    const olderOutput = `${COMPOSITION_CSI_SPAN}${outputOfBytes(COMPOSITION_ESCAPE_TAIL_BYTES)}${COMPOSITION_OSC_SPAN}`
+    const newerOutput = `${COMPOSITION_CSI_SPAN}${outputOfBytes(COMPOSITION_ESCAPE_NEWER_PLAIN_BYTES)}`
+    const textMessages = (count: number): MessagePart[][] => Array.from({ length: count }, () => [textPart(textOfChars(COMPOSITION_TEXT_CHARS))])
+    const bundle = buildBundle([
+      [completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: COMPOSITION_ESCAPE_PATH }, olderOutput)],
+      ...textMessages(1),
+      ...fillerMessages(2),
+      ...textMessages(1),
+      ...fillerMessages(2),
+      ...textMessages(1),
+      ...fillerMessages(2),
+      [
+        completedToolPartWithAttachments(READ_TOOL, { [PATH_INPUT_KEY]: COMPOSITION_ESCAPE_PATH }, newerOutput, [
+          attachmentItemOf(ATTACHMENT_MIME_PNG, COMPOSITION_ATTACHMENT_PAYLOAD_CHARS, "comp"),
+        ]),
+        fileAttachmentPart(ATTACHMENT_MIME_PNG, attachmentUrlOf(ATTACHMENT_MIME_PNG, COMPOSITION_FILE_URL_PAYLOAD_CHARS), COMPOSITION_FILE_FILENAME),
+        reasoningPart(COMPOSITION_WINDOWED_REASONING_TEXT),
+      ],
+      ...fillerMessages(3),
+    ])
+    await runTransform(hooks, bundle)
+
+    const lines = metricsLinesIn(metricsPath)
+    assert.equal(lines.length, STATS_LOG_FILE_LINES)
+    assert.equal(lines[0].dedupedThisRun, DEDUP_TOMBSTONE_SINGLE_COUNT)
+    // The older output (CSI + OSC spans) left with its tombstone; only
+    // the newer output's CSI span remains in the post-transform view.
+    assert.equal(lines[0].escapeBytes, COMPOSITION_CSI_SPAN.length)
+    const expectedAttachmentBytes =
+      attachmentUrlOf(ATTACHMENT_MIME_PNG, COMPOSITION_ATTACHMENT_PAYLOAD_CHARS).length +
+      attachmentUrlOf(ATTACHMENT_MIME_PNG, COMPOSITION_FILE_URL_PAYLOAD_CHARS).length
+    assert.equal(lines[0].attachmentBytes, expectedAttachmentBytes)
+
+    const stats = await lruStats(hooks, SESSION_ID)
+    const composition = stats.composition as Record<string, unknown>
+    assert.equal(composition.escapeBytes, COMPOSITION_CSI_SPAN.length)
+    assert.equal(composition.attachmentBytes, expectedAttachmentBytes)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("composition counts zero escape and attachment bytes once an attachment bearing output is evicted", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const hooks = await loadPluginHooksWith({ metricsLog: true, metricsPath })
+    await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+    const bundle = buildBundle([
+      [
+        completedToolPartWithAttachments(READ_TOOL, { [PATH_INPUT_KEY]: COMPOSITION_ESCAPE_PATH }, outputOfBytes(MIN_EVICTABLE_BYTES), [
+          attachmentItemOf(ATTACHMENT_MIME_PNG, COMPOSITION_ATTACHMENT_PAYLOAD_CHARS, "comp"),
+        ]),
+      ],
+      ...fillerMessages(),
+    ])
+    await runTransform(hooks, bundle)
+
+    const lines = metricsLinesIn(metricsPath)
+    assert.equal(lines.length, STATS_LOG_FILE_LINES)
+    assert.equal(lines[0].totals.evictions, COMPOSITION_EVICTED_RUN_COUNT)
+    // Eviction replaced the output with a tombstone and stripped the state
+    // attachments: with no escape sequences anywhere in the bundle, both
+    // counts read zero on the post-transform view (an escape-carrying
+    // output would keep its span bytes inside the tombstone's digest
+    // preview, which the composition pass counts faithfully).
+    assert.equal(lines[0].escapeBytes, 0)
+    assert.equal(lines[0].attachmentBytes, 0)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
 test("composition fields stay off quiet runs and off lru_stats before any run", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
@@ -5651,6 +5739,15 @@ const COMPOSITION_TOOL_RETAINED_BYTES = 3500
 const COMPOSITION_TOOL_CONTAINED_BYTES = 3000
 const COMPOSITION_PATH_A = "/data/composition-a.txt"
 const COMPOSITION_PATH_B = "/data/composition-b.txt"
+const COMPOSITION_ESCAPE_PATH = "/data/composition-escape.txt"
+const COMPOSITION_ATTACHMENT_PAYLOAD_CHARS = 1200
+const COMPOSITION_FILE_URL_PAYLOAD_CHARS = 900
+const COMPOSITION_FILE_FILENAME = "composition-image.png"
+const COMPOSITION_CSI_SPAN = "\x1b[38;5;196m"
+const COMPOSITION_OSC_SPAN = "\x1b]0;composition\x07"
+const COMPOSITION_ESCAPE_TAIL_BYTES = 2100
+const COMPOSITION_ESCAPE_NEWER_PLAIN_BYTES = 2200
+const COMPOSITION_EVICTED_RUN_COUNT = 1
 const COMPOSITION_RETAINED_MSG_INDEX = 4
 const DEDUP_TOMBSTONE_SINGLE_COUNT = 1
 const COMPOSITION_COLLAPSE_TOMBSTONE_CHARS = 141
