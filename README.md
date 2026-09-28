@@ -1,6 +1,6 @@
 # opencode-lru-context
 
-An [opencode](https://opencode.ai) plugin that manages context windows with LRU eviction: it transforms chat requests to evict the least recently used tool outputs, reasoning blocks, duplicated attachments, and oversized fenced blocks, replaces evicted content with tombstones that can be restored through the `read_evicted` tool, reports live counters through `lru_stats`, and serves a `/lru` panel plus a persistent session-sidebar summary over the same data. [Installation](#installation) covers setup, updates, and removal; [Configuration](#configuration) covers the option surface.
+An [opencode](https://opencode.ai) plugin that manages context windows with LRU eviction: it transforms chat requests to evict the least recently used tool outputs, reasoning blocks, duplicated attachments, and oversized fenced blocks, strips terminal escape noise from tool outputs as they complete so storage keeps the clean version, replaces evicted content with tombstones that can be restored through the `read_evicted` tool, reports live counters through `lru_stats`, and serves a `/lru` panel plus a persistent session-sidebar summary over the same data. [Installation](#installation) covers setup, updates, and removal; [Configuration](#configuration) covers the option surface.
 
 ## Contents
 
@@ -28,6 +28,7 @@ An [opencode](https://opencode.ai) plugin that manages context windows with LRU 
     - [User-fence eviction](#user-fence-eviction)
     - [Observability](#observability)
     - [Compaction enrichment](#compaction-enrichment)
+    - [Ingestion hygiene](#ingestion-hygiene)
   - [Why it works: the token economics](#why-it-works-the-token-economics)
   - [When it fires and when it never does](#when-it-fires-and-when-it-never-does)
   - [Honest limits](#honest-limits)
@@ -128,6 +129,10 @@ However they arrive, options follow a drop-on-invalid discipline: a value failin
 | `metricsPath` | `string` | `~/.local/share/opencode/lru-metrics.jsonl` | non-empty string | Metrics log location |
 | `metricsRotationMaxBytes` | `number` | `20971520` (20 MiB) | finite, 0 or more (0 disables rotation) | Metrics log rotation cap |
 | `metricsMinLineIntervalMs` | `number` | `60000` (60 seconds) | finite, 0 or more (0 disables coalescing) | Minimum interval between metrics lines for reasoning-only runs |
+| `ingestionHygiene` | `boolean` | `true` | boolean; anything else falls back to true | Strips terminal escape spans, carriage-return progress lines, and trailing runs of spaces and tabs from tool outputs as they complete |
+| `ingestionHygieneCopy` | `boolean` | `true` | boolean; anything else falls back to true | Writes the original output to the hygiene log before a rewrite lands |
+| `ingestionHygienePath` | `string` | `~/.local/share/opencode/lru-hygiene.jsonl` | non-empty string | Hygiene log location |
+| `ingestionHygieneRotationMaxBytes` | `number` | `5242880` (5 MiB) | finite, 0 or more (0 disables the copy, not the strip) | Hygiene log rotation cap |
 | `liveStateLog` | `boolean` | `true` | boolean | Live snapshot writes on or off |
 | `liveStatePath` | `string` | `~/.local/share/opencode/lru-state` | non-empty string | Snapshot directory |
 | `liveStatePruneMaxAgeMs` | `number` | `604800000` (7 days) | finite, 0 or more (0 disables pruning) | Snapshot max age before prune |
@@ -166,6 +171,10 @@ The two plugin files take separate registrations: the core entry (`lru-context.t
         "metricsPath": "~/.local/share/opencode/lru-metrics.jsonl",
         "metricsRotationMaxBytes": 20971520,
         "metricsMinLineIntervalMs": 60000,
+        "ingestionHygiene": true,
+        "ingestionHygieneCopy": true,
+        "ingestionHygienePath": "~/.local/share/opencode/lru-hygiene.jsonl",
+        "ingestionHygieneRotationMaxBytes": 5242880,
         "liveStateLog": true,
         "liveStatePath": "~/.local/share/opencode/lru-state",
         "liveStatePruneMaxAgeMs": 604800000,
@@ -270,6 +279,14 @@ Degradation is explicit and identical in both builders: "no active session" outs
 #### Compaction enrichment
 
 When the host's native compaction fires (the SDK's `experimental.session.compacting` hook), the plugin appends context strings to the native compaction prompt so the summary it produces names what the session can still reload: a `[lru-hot]` hint line in the same shape the system prompt carries (the session's remembered evicted subjects rendered newest first and bounded by `hintSubjects`) and, when the session stash holds reloadable outputs, a one-line `[lru-context]` note stating that tombstoned outputs remain reloadable via `read_evicted` and naming the newest stashed subjects. The hook appends only; it never sets the SDK's `prompt` field, so the host's default compaction prompt is never replaced. It stays silent for a session with no recorded evictions (an unknown session attaches nothing and creates no state), contributes only the stash note when a stash exists but no subjects are remembered, and a `hintSubjects` of 0 silences the enrichment entirely (both lines are subject renderings, and 0 disables subject rendering everywhere else). The body runs behind the same fault boundary as every other hook: a throw leaves the native prompt unmodified and records the failure as `lastFault` on the session's diagnostics, so compaction proceeds without the enrichment.
+
+#### Ingestion hygiene
+
+Tool outputs are cleaned at birth rather than per request: the SDK's `tool.execute.after` hook rewrites a completed output before it reaches session storage, so the stripped version is what the session file keeps and what every later request sends, and the transform never re-pays the scan. Three passes run in order: CSI and OSC escape spans are removed (the same span pattern the composition walk counts for `escapeBytes`, with a non-greedy OSC payload so consecutive OSC hyperlink spans each end at their own terminator and the link text between them survives), carriage-return progress lines collapse to their final segment within each newline-delimited line (`10%\r20%\rdone` keeps only `done`, while a `\r` that closes a line as CRLF or sits at end of output is a line ending and is carried through untouched), and trailing runs of spaces and tabs are trimmed from each line with leading whitespace left alone. A rewrite happens only when it changes something: a clean output costs one scan and zero writes, and a byte-identical result passes through as the original string.
+
+`ingestionHygiene` (default `true`; a non-boolean falls back to the default) turns the strip off entirely. `ingestionHygieneCopy` (default `true`) controls the disk-copy escape hatch: when a rewrite changes an output, the original lands as one JSONL line in `ingestionHygienePath` (default `~/.local/share/opencode/lru-hygiene.jsonl`) before the rewrite is applied, carrying the tool name, the title when available, the original and stripped lengths, and the full original output, mirroring the host's own full-text-to-disk discipline for the paranoid case. `ingestionHygieneRotationMaxBytes` (default 5 MiB, `0` disables the copy but not the strip) rotates the file to a `.1` sibling before an append that would exceed the cap, the same two-generation scheme as the metrics log. The title, metadata, and any attachments are never touched, only the output text.
+
+Degradation is explicit in both directions: a failed copy write surfaces as `hygieneWriteError` through `lru_stats` and the stripped rewrite still lands, while any other throw in the hook leaves the tool result with its original text and records `lastFault` on the session's diagnostics, so a hygiene bug can never block or corrupt a tool result.
 
 ### Why it works: the token economics
 

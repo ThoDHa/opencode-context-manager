@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { test } from "node:test"
 
 import lruContextFactory, {
+  DEFAULT_INGESTION_HYGIENE_ROTATION_MAX_BYTES,
   DEFAULT_METRICS_ROTATION_MAX_BYTES,
   METRIC_NUMBER_KEYS,
   METRICS_CURSOR_KEYS,
@@ -3146,6 +3147,8 @@ const STATS_TOOL_NAME = "lru_stats"
 const METRICS_DIR_SEGMENTS = [".local", "share", "opencode"]
 const METRICS_LOG_BASENAME = "lru-metrics.jsonl"
 const DEFAULT_METRICS_PATH = join(homedir(), ...METRICS_DIR_SEGMENTS, METRICS_LOG_BASENAME)
+const HYGIENE_LOG_BASENAME = "lru-hygiene.jsonl"
+const DEFAULT_INGESTION_HYGIENE_PATH = join(homedir(), ...METRICS_DIR_SEGMENTS, HYGIENE_LOG_BASENAME)
 const METRICS_TEMP_DIR_PREFIX = "lru-metrics-test-"
 const METRICS_LOG_FILE_NAME = "metrics.jsonl"
 const METRICS_BLOCKED_DIR_NAME = "missing-subdir"
@@ -3335,6 +3338,10 @@ test("lru_stats reports zeroed counters unknown budget and empty stash for a ses
     metricsPath: DEFAULT_METRICS_PATH,
     metricsRotationMaxBytes: DEFAULT_METRICS_ROTATION_MAX_BYTES,
     metricsMinLineIntervalMs: DEFAULT_METRICS_MIN_LINE_INTERVAL_MS,
+    ingestionHygiene: true,
+    ingestionHygieneCopy: true,
+    ingestionHygienePath: DEFAULT_INGESTION_HYGIENE_PATH,
+    ingestionHygieneRotationMaxBytes: DEFAULT_INGESTION_HYGIENE_ROTATION_MAX_BYTES,
     liveStateLog: false,
     liveStatePath: DEFAULT_LIVE_STATE_DIR,
     liveStatePruneMaxAgeMs: DEFAULT_LIVE_STATE_PRUNE_MAX_AGE_MS,
@@ -5984,6 +5991,222 @@ test("the compacting hook returns silently when the output carries no context ar
 
   const stats = await lruStats(hooks, SESSION_ID)
   assert.equal(stats.lastFault, undefined)
+})
+
+const HYGIENE_HOOK = "tool.execute.after"
+const HYGIENE_TOOL_NAME = "bash"
+const HYGIENE_CALL_ID = "lru-hygiene-call"
+const HYGIENE_TITLE = "pytest -q"
+const HYGIENE_CSI_COLOR_SPAN = "\x1b[38;5;196m"
+const HYGIENE_CSI_RESET_SPAN = "\x1b[0m"
+const HYGIENE_OSC_TITLE_SPAN = "\x1b]0;building\x07"
+const HYGIENE_OSC_LINK_OPEN_SPAN = "\x1b]8;;http://example.com\x1b\\"
+const HYGIENE_OSC_LINK_CLOSE_SPAN = "\x1b]8;;\x1b\\"
+const HYGIENE_LINK_TEXT = "click here"
+const HYGIENE_DIRTY_OUTPUT = [
+  `${HYGIENE_CSI_COLOR_SPAN}ERR${HYGIENE_CSI_RESET_SPAN} 10%\r20%\rdone  `,
+  `${HYGIENE_OSC_TITLE_SPAN}next`,
+  "  padded   ",
+  `${HYGIENE_OSC_LINK_OPEN_SPAN}${HYGIENE_LINK_TEXT}${HYGIENE_OSC_LINK_CLOSE_SPAN}`,
+  "",
+].join("\n")
+const HYGIENE_STRIPPED_OUTPUT = ["done", "next", "  padded", HYGIENE_LINK_TEXT, ""].join("\n")
+const HYGIENE_FAULT_MESSAGE = "hygiene hook exploded"
+const HYGIENE_METADATA = { attachments: [{ type: "file", url: "file:///tmp/report.png" }], exitCode: 0 }
+const blockedHygienePathIn = (dir: string): string => join(dir, METRICS_BLOCKED_DIR_NAME, HYGIENE_LOG_BASENAME)
+const rotatedHygienePathIn = (dir: string): string => join(dir, `${HYGIENE_LOG_BASENAME}${METRICS_ROTATION_SUFFIX}`)
+
+const runHygieneHook = async (hooks: HookMap, outputText: string): Promise<{ title: string; output: string; metadata: Record<string, unknown> }> => {
+  const output = { title: HYGIENE_TITLE, output: outputText, metadata: HYGIENE_METADATA }
+  await hooks[HYGIENE_HOOK]({ tool: HYGIENE_TOOL_NAME, sessionID: SESSION_ID, callID: HYGIENE_CALL_ID }, output)
+  return output
+}
+
+test("the hygiene hook strips CSI and OSC spans collapses CR progress lines and trims trailing whitespace runs", async () => {
+  const hooks = await loadPluginHooksWith({ ingestionHygieneCopy: false })
+
+  const output = await runHygieneHook(hooks, HYGIENE_DIRTY_OUTPUT)
+
+  assert.equal(output.output, HYGIENE_STRIPPED_OUTPUT)
+})
+
+test("the hygiene hook passes a clean output through byte-identical and writes no copy", async () => {
+  const hygieneDir = makeMetricsDir()
+  const hygienePath = join(hygieneDir, HYGIENE_LOG_BASENAME)
+  const hooks = await loadPluginHooksWith({ ingestionHygienePath: hygienePath })
+
+  const output = await runHygieneHook(hooks, HYGIENE_STRIPPED_OUTPUT)
+
+  assert.equal(output.output, HYGIENE_STRIPPED_OUTPUT)
+  assert.equal(existsSync(hygienePath), false)
+  cleanupMetricsDir(hygieneDir)
+})
+
+test("the hygiene hook writes the copy with the original preserved before the rewrite lands", async () => {
+  const hygieneDir = makeMetricsDir()
+  const hygienePath = join(hygieneDir, HYGIENE_LOG_BASENAME)
+  const hooks = await loadPluginHooksWith({ ingestionHygienePath: hygienePath })
+
+  const output = await runHygieneHook(hooks, HYGIENE_DIRTY_OUTPUT)
+
+  assert.equal(output.output, HYGIENE_STRIPPED_OUTPUT)
+  const [copyLine] = readFileSync(hygienePath, "utf8").split(METRICS_LINE_SEPARATOR)
+  const copy = JSON.parse(copyLine) as Record<string, unknown>
+  assert.equal(copy.tool, HYGIENE_TOOL_NAME)
+  assert.equal(copy.title, HYGIENE_TITLE)
+  assert.equal(copy.session, SESSION_ID)
+  assert.equal(copy.originalChars, HYGIENE_DIRTY_OUTPUT.length)
+  assert.equal(copy.strippedChars, HYGIENE_STRIPPED_OUTPUT.length)
+  assert.equal(copy.output, HYGIENE_DIRTY_OUTPUT)
+  cleanupMetricsDir(hygieneDir)
+})
+
+test("a hygiene copy write failure degrades to hygieneWriteError with the strip still applied", async () => {
+  const hygieneDir = makeMetricsDir()
+  const hooks = await loadPluginHooksWith({ ingestionHygienePath: blockedHygienePathIn(hygieneDir) })
+
+  const output = await runHygieneHook(hooks, HYGIENE_DIRTY_OUTPUT)
+
+  assert.equal(output.output, HYGIENE_STRIPPED_OUTPUT)
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.equal(typeof stats.hygieneWriteError, "string")
+  assert.ok((stats.hygieneWriteError as string).length > 0)
+  cleanupMetricsDir(hygieneDir)
+})
+
+test("a throwing hygiene hook degrades to the original output with lastFault set", async () => {
+  const hygieneDir = makeMetricsDir()
+  const hygienePath = join(hygieneDir, HYGIENE_LOG_BASENAME)
+  const hooks = await loadPluginHooksWith({
+    faultHygiene: () => {
+      throw new Error(HYGIENE_FAULT_MESSAGE)
+    },
+    ingestionHygienePath: hygienePath,
+  })
+
+  const output = await runHygieneHook(hooks, HYGIENE_DIRTY_OUTPUT)
+
+  assert.equal(output.output, HYGIENE_DIRTY_OUTPUT)
+  assert.equal(existsSync(hygienePath), false)
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.equal((stats.lastFault as Record<string, unknown>).message, HYGIENE_FAULT_MESSAGE)
+  cleanupMetricsDir(hygieneDir)
+})
+
+test("the hygiene hook never touches the title or metadata and records the title in the copy", async () => {
+  const hygieneDir = makeMetricsDir()
+  const hygienePath = join(hygieneDir, HYGIENE_LOG_BASENAME)
+  const hooks = await loadPluginHooksWith({ ingestionHygienePath: hygienePath })
+
+  const output = await runHygieneHook(hooks, HYGIENE_DIRTY_OUTPUT)
+
+  assert.equal(output.title, HYGIENE_TITLE)
+  assert.equal(output.metadata, HYGIENE_METADATA)
+  const copy = JSON.parse(readFileSync(hygienePath, "utf8").split(METRICS_LINE_SEPARATOR)[0]) as Record<string, unknown>
+  assert.deepEqual(copy.title, HYGIENE_TITLE)
+  assert.deepEqual((copy as { metadata?: unknown }).metadata, undefined)
+  cleanupMetricsDir(hygieneDir)
+})
+
+test("the ingestionHygiene opt-out leaves a dirty output unchanged and writes no copy", async () => {
+  const hygieneDir = makeMetricsDir()
+  const hygienePath = join(hygieneDir, HYGIENE_LOG_BASENAME)
+  const hooks = await loadPluginHooksWith({ ingestionHygiene: false, ingestionHygienePath: hygienePath })
+
+  const output = await runHygieneHook(hooks, HYGIENE_DIRTY_OUTPUT)
+
+  assert.equal(output.output, HYGIENE_DIRTY_OUTPUT)
+  assert.equal(existsSync(hygienePath), false)
+  cleanupMetricsDir(hygieneDir)
+})
+
+test("ingestionHygieneCopy false strips the output without writing a copy", async () => {
+  const hygieneDir = makeMetricsDir()
+  const hygienePath = join(hygieneDir, HYGIENE_LOG_BASENAME)
+  const hooks = await loadPluginHooksWith({ ingestionHygieneCopy: false, ingestionHygienePath: hygienePath })
+
+  const output = await runHygieneHook(hooks, HYGIENE_DIRTY_OUTPUT)
+
+  assert.equal(output.output, HYGIENE_STRIPPED_OUTPUT)
+  assert.equal(existsSync(hygienePath), false)
+  cleanupMetricsDir(hygieneDir)
+})
+
+test("the hygiene hook passes a CRLF-terminated output through byte-identical", async () => {
+  const hygieneDir = makeMetricsDir()
+  const hygienePath = join(hygieneDir, HYGIENE_LOG_BASENAME)
+  const hooks = await loadPluginHooksWith({ ingestionHygienePath: hygienePath })
+  const crlfOutput = "line one\r\nline two\r\n"
+
+  const output = await runHygieneHook(hooks, crlfOutput)
+
+  assert.equal(output.output, crlfOutput)
+  assert.equal(existsSync(hygienePath), false)
+  cleanupMetricsDir(hygieneDir)
+})
+
+test("the hygiene hook collapses progress segments before a CRLF terminator while keeping the terminator", async () => {
+  const hooks = await loadPluginHooksWith({ ingestionHygieneCopy: false })
+
+  const output = await runHygieneHook(hooks, `10%\r20%\rdone\r\nnext\n`)
+
+  assert.equal(output.output, "done\r\nnext\n")
+})
+
+test("ingestionHygieneRotationMaxBytes zero disables the copy but not the strip", async () => {
+  const hygieneDir = makeMetricsDir()
+  const hygienePath = join(hygieneDir, HYGIENE_LOG_BASENAME)
+  const hooks = await loadPluginHooksWith({ ingestionHygienePath: hygienePath, ingestionHygieneRotationMaxBytes: 0 })
+
+  const output = await runHygieneHook(hooks, HYGIENE_DIRTY_OUTPUT)
+
+  assert.equal(output.output, HYGIENE_STRIPPED_OUTPUT)
+  assert.equal(existsSync(hygienePath), false)
+  cleanupMetricsDir(hygieneDir)
+})
+
+test("the hygiene log rotates to the .1 sibling when an append would cross ingestionHygieneRotationMaxBytes", async () => {
+  const hygieneDir = makeMetricsDir()
+  try {
+    const hygienePath = join(hygieneDir, HYGIENE_LOG_BASENAME)
+    const probeHooks = await loadPluginHooksWith({ ingestionHygienePath: hygienePath })
+    await runHygieneHook(probeHooks, HYGIENE_DIRTY_OUTPUT)
+    const capBytes = statSync(hygienePath).size
+    rmSync(hygienePath)
+
+    const hooks = await loadPluginHooksWith({ ingestionHygienePath: hygienePath, ingestionHygieneRotationMaxBytes: capBytes })
+    await runHygieneHook(hooks, HYGIENE_DIRTY_OUTPUT)
+
+    assert.equal(existsSync(rotatedHygienePathIn(hygieneDir)), false)
+    assert.equal(statSync(hygienePath).size, capBytes)
+
+    await runHygieneHook(hooks, HYGIENE_DIRTY_OUTPUT)
+
+    const rotatedLines = readFileSync(rotatedHygienePathIn(hygieneDir), "utf8").split(METRICS_LINE_SEPARATOR)
+    assert.equal(rotatedLines.length, 2)
+    assert.equal((JSON.parse(rotatedLines[0]) as Record<string, unknown>).output, HYGIENE_DIRTY_OUTPUT)
+    const freshLines = readFileSync(hygienePath, "utf8").split(METRICS_LINE_SEPARATOR)
+    assert.equal(freshLines.length, 2)
+    assert.equal((JSON.parse(freshLines[0]) as Record<string, unknown>).output, HYGIENE_DIRTY_OUTPUT)
+  } finally {
+    cleanupMetricsDir(hygieneDir)
+  }
+})
+
+test("a frozen hygiene output object degrades through the fault boundary with the output intact", async () => {
+  const hygieneDir = makeMetricsDir()
+  const hygienePath = join(hygieneDir, HYGIENE_LOG_BASENAME)
+  const hooks = await loadPluginHooksWith({ ingestionHygienePath: hygienePath })
+
+  const output = Object.freeze({ title: HYGIENE_TITLE, output: HYGIENE_DIRTY_OUTPUT, metadata: HYGIENE_METADATA })
+  await hooks[HYGIENE_HOOK]({ tool: HYGIENE_TOOL_NAME, sessionID: SESSION_ID, callID: HYGIENE_CALL_ID }, output)
+
+  assert.equal(output.output, HYGIENE_DIRTY_OUTPUT)
+  const stats = await lruStats(hooks, SESSION_ID)
+  const lastFault = stats.lastFault as Record<string, unknown>
+  assert.equal(typeof lastFault.message, "string")
+  assert.ok((lastFault.message as string).length > 0)
+  cleanupMetricsDir(hygieneDir)
 })
 
 test("transform keeps dedup active under pressure while manualMode is enabled", async () => {

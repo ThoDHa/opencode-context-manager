@@ -98,6 +98,15 @@ const DEFAULT_METRICS_LOG_ENABLED = true
 const DEFAULT_METRICS_PATH = join(homedir(), ...DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_METRICS_FILE_BASENAME)
 const DEFAULT_LIVE_STATE_LOG_ENABLED = true
 const DEFAULT_LIVE_STATE_DIR = join(homedir(), ...DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_LIVE_STATE_DIR_BASENAME)
+const DEFAULT_INGESTION_HYGIENE = true
+const DEFAULT_INGESTION_HYGIENE_COPY = true
+const DEFAULT_INGESTION_HYGIENE_FILE_BASENAME = "lru-hygiene.jsonl"
+const DEFAULT_INGESTION_HYGIENE_PATH = join(homedir(), ...DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_INGESTION_HYGIENE_FILE_BASENAME)
+// 5 MiB: hygiene lines carry the full original output, the fattest lines
+// the plugin writes, and the copy is a paranoid escape hatch rather than
+// a standing record, so its cap sits well under the metrics log's 20 MiB.
+export const DEFAULT_INGESTION_HYGIENE_ROTATION_MAX_BYTES = 5 * 1024 * 1024
+const HYGIENE_COPY_DISABLED_MAX_BYTES = 0
 const LIVE_STATE_FILE_SUFFIX = ".json"
 const MS_PER_SECOND = 1000
 const SECONDS_PER_MINUTE = 60
@@ -178,6 +187,10 @@ type LruContextOptions = {
   metricsPath?: string
   metricsRotationMaxBytes?: number
   metricsMinLineIntervalMs?: number
+  ingestionHygiene?: boolean
+  ingestionHygieneCopy?: boolean
+  ingestionHygienePath?: string
+  ingestionHygieneRotationMaxBytes?: number
   liveStateLog?: boolean
   liveStatePath?: string
   liveStatePruneMaxAgeMs?: number
@@ -189,6 +202,10 @@ type LruContextOptions = {
   // function throws, the compacting hook's fault boundary exercises its
   // degradation path. Never documented as a user option.
   faultCompaction?: () => never
+  // Test-only fault injection for the hygiene hook: when the injected
+  // function throws, the tool.execute.after fault boundary exercises its
+  // degradation path. Never documented as a user option.
+  faultHygiene?: () => never
   // Test-only fault injection: when the injected function returns a
   // message, the transform hook's fault boundary treats the run as if the
   // body threw that message (identity behavior plus lastFault). Never
@@ -332,6 +349,7 @@ type SessionMetrics = {
   lastRun?: LastRunMetrics
   logWriteError?: string
   stateWriteError?: string
+  hygieneWriteError?: string
 }
 
 type LastFault = { message: string; atMs: number }
@@ -500,6 +518,18 @@ const resolveOptions = (raw: LruContextOptions = {}): ResolvedOptions => {
       typeof raw.metricsMinLineIntervalMs === "number" && Number.isFinite(raw.metricsMinLineIntervalMs) && raw.metricsMinLineIntervalMs >= 0
         ? raw.metricsMinLineIntervalMs
         : DEFAULT_METRICS_MIN_LINE_INTERVAL_MS,
+    ingestionHygiene: typeof raw.ingestionHygiene === "boolean" ? raw.ingestionHygiene : DEFAULT_INGESTION_HYGIENE,
+    ingestionHygieneCopy: typeof raw.ingestionHygieneCopy === "boolean" ? raw.ingestionHygieneCopy : DEFAULT_INGESTION_HYGIENE_COPY,
+    ingestionHygienePath:
+      typeof raw.ingestionHygienePath === "string" && raw.ingestionHygienePath.length > 0
+        ? raw.ingestionHygienePath
+        : DEFAULT_INGESTION_HYGIENE_PATH,
+    ingestionHygieneRotationMaxBytes:
+      typeof raw.ingestionHygieneRotationMaxBytes === "number" &&
+      Number.isFinite(raw.ingestionHygieneRotationMaxBytes) &&
+      raw.ingestionHygieneRotationMaxBytes >= 0
+        ? raw.ingestionHygieneRotationMaxBytes
+        : DEFAULT_INGESTION_HYGIENE_ROTATION_MAX_BYTES,
     liveStateLog: typeof raw.liveStateLog === "boolean" ? raw.liveStateLog : DEFAULT_LIVE_STATE_LOG_ENABLED,
     liveStatePath: typeof raw.liveStatePath === "string" && raw.liveStatePath.length > 0 ? raw.liveStatePath : DEFAULT_LIVE_STATE_DIR,
     liveStatePruneMaxAgeMs:
@@ -521,6 +551,7 @@ const resolveOptions = (raw: LruContextOptions = {}): ResolvedOptions => {
     now: typeof raw.now === "function" ? raw.now : DEFAULT_NOW,
     faultTransform: typeof raw.faultTransform === "function" ? raw.faultTransform : undefined,
     faultCompaction: typeof raw.faultCompaction === "function" ? raw.faultCompaction : undefined,
+    faultHygiene: typeof raw.faultHygiene === "function" ? raw.faultHygiene : undefined,
   }
 }
 
@@ -885,17 +916,57 @@ type RunComposition = {
   attachmentBytes: number
 }
 
-// Terminal escape sequences counted for escapeBytes: CSI sequences
-// (ESC [ ... final byte) and OSC sequences (ESC ] ... BEL or ST
-// terminator). Matched spans count their whole length; a truncated CSI
-// without a final byte, an unterminated OSC, and a lone ESC without an
-// introducer are not counted. Deterministic single pass.
-const ESCAPE_SPAN_PATTERN = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)/g
+// Terminal escape sequences counted for escapeBytes and stripped by
+// ingestion hygiene: CSI sequences (ESC [ ... final byte) and OSC
+// sequences (ESC ] ... BEL or ST terminator). Matched spans count their
+// whole length; a truncated CSI without a final byte, an unterminated
+// OSC, and a lone ESC without an introducer are not counted. The OSC
+// payload is non-greedy, so consecutive OSC spans each end at their own
+// terminator instead of swallowing the text between them. Deterministic
+// single pass.
+const ESCAPE_SPAN_PATTERN = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*?(?:\x07|\x1b\\)/g
 
 const escapeBytesOf = (output: string): number => {
   let bytes = 0
   for (const span of output.match(ESCAPE_SPAN_PATTERN) ?? []) bytes += span.length
   return bytes
+}
+
+// At-birth tool-output hygiene, applied by tool.execute.after so the
+// rewrite persists into session storage: strips the same CSI/OSC spans
+// the composition walk counts (the shared ESCAPE_SPAN_PATTERN), collapses
+// carriage-return progress lines to their final segment within each
+// newline-delimited line (a \r that closes a line as CRLF, or sits at end
+// of output, is a line ending and is carried through untouched), and
+// trims trailing whitespace runs per line (leading whitespace stays). The
+// candidate scan over-approximates what the three passes can change (any
+// escape introducer, any carriage return, any trimmable line-ending
+// whitespace), so nothing strippable is missed; a clean output costs one
+// scan and zero writes, and the original string reference passes through
+// when the pipeline would be a no-op.
+const HYGIENE_CANDIDATE_PATTERN = /\x1b|\r|[ \t](?=\n|$)/
+const TRAILING_WHITESPACE_RUN_PATTERN = /[ \t]+$/
+const stripTerminalNoiseFrom = (output: string): string => {
+  if (HYGIENE_CANDIDATE_PATTERN.test(output) === false) return output
+  const lines = output.replace(ESCAPE_SPAN_PATTERN, "").split("\n")
+  for (let index = 0; index < lines.length; index += 1) {
+    // A trailing \r on a split line was followed by \n (a CRLF terminator)
+    // or sat at end of output; both are line endings rather than progress
+    // markers, so they are carried through untouched. Splitting on \n
+    // erases the lookahead that would distinguish them, hence the
+    // endswith check.
+    let line = lines[index]
+    let carriageReturnTerminator = ""
+    if (line.endsWith("\r")) {
+      carriageReturnTerminator = "\r"
+      line = line.slice(0, -1)
+    }
+    const latestCarriageReturn = line.lastIndexOf("\r")
+    const collapsed = latestCarriageReturn === -1 ? line : line.slice(latestCarriageReturn + 1)
+    lines[index] = collapsed.replace(TRAILING_WHITESPACE_RUN_PATTERN, "") + carriageReturnTerminator
+  }
+  const stripped = lines.join("\n")
+  return stripped === output ? output : stripped
 }
 
 // The post-transform composition of one run's message list: live tool
@@ -1592,6 +1663,41 @@ const rotateMetricsLogPastCap = async (path: string, incomingBytes: number, capB
   await rename(path, `${path}${METRICS_ROTATION_SUFFIX}`)
 }
 
+// The disk-copy escape hatch for ingestion hygiene: before a rewritten
+// output lands, one JSONL line carries the tool name, the title when
+// available, both lengths, and the full original, mirroring the host's
+// own full-text-to-disk discipline. A cap of 0 disables the copy entirely
+// (the strip still applies); a failed write degrades to hygieneWriteError
+// on the session's diagnostics and never blocks the tool result.
+const appendHygieneCopy = async (
+  options: ResolvedOptions,
+  metrics: MetricsStore,
+  sessionKey: string,
+  rewrite: { tool: string; title: string | undefined; original: string; stripped: string },
+): Promise<void> => {
+  if (options.ingestionHygieneRotationMaxBytes === HYGIENE_COPY_DISABLED_MAX_BYTES) return
+  const line = {
+    ts: new Date(options.now()).toISOString(),
+    session: sessionKey,
+    tool: rewrite.tool,
+    ...(rewrite.title === undefined ? {} : { title: rewrite.title }),
+    originalChars: rewrite.original.length,
+    strippedChars: rewrite.stripped.length,
+    output: rewrite.original,
+  }
+  try {
+    const hygieneJsonLine = `${JSON.stringify(line)}\n`
+    await rotateMetricsLogPastCap(options.ingestionHygienePath, Buffer.byteLength(hygieneJsonLine), options.ingestionHygieneRotationMaxBytes)
+    await appendFile(options.ingestionHygienePath, hygieneJsonLine)
+    const entry = touchMapEntry(metrics, sessionKey)
+    if (entry !== undefined) delete entry.hygieneWriteError
+  } catch (error) {
+    withSessionMetricsEntry(metrics, sessionKey, options.metricsSessions, (target) => {
+      target.hygieneWriteError = error instanceof Error ? error.message : String(error)
+    })
+  }
+}
+
 const recordMetricsLine = async (
   options: ResolvedOptions,
   metrics: SessionMetrics,
@@ -1896,6 +2002,10 @@ const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
       metricsPath: source.options.metricsPath,
       metricsRotationMaxBytes: source.options.metricsRotationMaxBytes,
       metricsMinLineIntervalMs: source.options.metricsMinLineIntervalMs,
+      ingestionHygiene: source.options.ingestionHygiene,
+      ingestionHygieneCopy: source.options.ingestionHygieneCopy,
+      ingestionHygienePath: source.options.ingestionHygienePath,
+      ingestionHygieneRotationMaxBytes: source.options.ingestionHygieneRotationMaxBytes,
       liveStateLog: source.options.liveStateLog,
       liveStatePath: source.options.liveStatePath,
       liveStatePruneMaxAgeMs: source.options.liveStatePruneMaxAgeMs,
@@ -1937,6 +2047,7 @@ const executeLruStats = (source: StatsSource, toolContext: unknown): string => {
       : { lastFault: { message: metrics.lastFault.message, at: new Date(metrics.lastFault.atMs).toISOString() } }),
     ...(metrics.logWriteError === undefined ? {} : { logWriteError: metrics.logWriteError }),
     ...(metrics.stateWriteError === undefined ? {} : { stateWriteError: metrics.stateWriteError }),
+    ...(metrics.hygieneWriteError === undefined ? {} : { hygieneWriteError: metrics.hygieneWriteError }),
   }
   return JSON.stringify(report, null, JSON_INDENT_SPACES)
 }
@@ -2273,24 +2384,36 @@ const guardTool = (tool: (args: unknown, toolContext: unknown) => Promise<string
   }
 }
 
-// Records the transform fault on the session's metrics entry, creating a
-// fresh entry when none exists (an early fault can land before hydration
-// created one). An existing entry is updated in place and must not be
-// trimmed or refreshed, so its counters and LRU position survive. Edge:
-// the fresh entry is keyed by the fault's session, not seeded from any
-// persisted record, so a reseed overwriting it later is accepted (the
-// fault is run-scoped diagnostics).
-const rememberFault = (metrics: MetricsStore, sessionKey: string, fault: LastFault, sessionBound: number): void => {
-  const existing = metrics.get(sessionKey)
+// Create-or-update on the session metrics LRU: the shared shape behind
+// rememberFault and the hygiene copy's error surfacing, so a diagnostic
+// recorded for a session with no entry yet (a fault, compaction event, or
+// hygiene write error before the first transform) still lands on a
+// created entry that respects the session bound. An existing entry is
+// refreshed to most-recent recency: a session emitting diagnostics is an
+// active session. The fresh entry is keyed by the diagnostic's session,
+// not seeded from any persisted record, so a later reseed overwriting it
+// is accepted (faults and write errors are run-scoped diagnostics).
+const withSessionMetricsEntry = (
+  metrics: MetricsStore,
+  sessionKey: string,
+  sessionBound: number,
+  apply: (entry: SessionMetrics) => void,
+): void => {
+  const existing = touchMapEntry(metrics, sessionKey)
   if (existing !== undefined) {
-    existing.lastFault = fault
+    apply(existing)
     return
   }
   trimMapToBound(metrics, sessionBound)
   const entry = createSessionMetrics()
-  entry.lastFault = fault
+  apply(entry)
   metrics.set(sessionKey, entry)
 }
+
+const rememberFault = (metrics: MetricsStore, sessionKey: string, fault: LastFault, sessionBound: number): void =>
+  withSessionMetricsEntry(metrics, sessionKey, sessionBound, (entry) => {
+    entry.lastFault = fault
+  })
 
 const chatParamsHookBody = (
   input: { sessionID: string; model?: ChatParamsModel },
@@ -2422,6 +2545,37 @@ export default (async (_input, rawOptions) => {
       } catch {
         // A hint failure degrades to returning the prompt unchanged: the
         // hint is advisory, never worth blocking a model call over.
+      }
+    },
+    "tool.execute.after": async (
+      input: { tool: string; sessionID?: string },
+      output: { title: string; output: string; metadata: unknown },
+    ) => {
+      let sessionKey = FALLBACK_SESSION_KEY
+      try {
+        if (!options.ingestionHygiene) return
+        if (typeof output.output !== "string") return
+        sessionKey = sessionKeyFromContext(input)
+        if (options.faultHygiene !== undefined) options.faultHygiene()
+        const original = output.output
+        const stripped = stripTerminalNoiseFrom(original)
+        if (stripped === original) return
+        // The copy precedes the rewrite: if the copy path ever threw, the
+        // output would reach the boundary untouched instead of half-applied.
+        if (options.ingestionHygieneCopy) {
+          await appendHygieneCopy(options, metricsBySession, sessionKey, {
+            tool: input.tool,
+            title: typeof output.title === "string" ? output.title : undefined,
+            original,
+            stripped,
+          })
+        }
+        output.output = stripped
+      } catch (error) {
+        // Fault isolation: the tool result proceeds with its original text
+        // and the failure surfaces through the diagnostics channel.
+        const fault = { message: error instanceof Error ? error.message : String(error), atMs: options.now() }
+        rememberFault(metricsBySession, sessionKey, fault, options.metricsSessions)
       }
     },
     tool: {
