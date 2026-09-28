@@ -185,6 +185,10 @@ type LruContextOptions = {
   manualMode?: boolean
   userFenceEviction?: { enabled?: boolean; minBlockLines?: number }
   now?: () => number
+  // Test-only fault injection for the compaction hook: when the injected
+  // function throws, the compacting hook's fault boundary exercises its
+  // degradation path. Never documented as a user option.
+  faultCompaction?: () => never
   // Test-only fault injection: when the injected function returns a
   // message, the transform hook's fault boundary treats the run as if the
   // body threw that message (identity behavior plus lastFault). Never
@@ -516,6 +520,7 @@ const resolveOptions = (raw: LruContextOptions = {}): ResolvedOptions => {
     // deliberately absent from the README's option surface and lru_stats.
     now: typeof raw.now === "function" ? raw.now : DEFAULT_NOW,
     faultTransform: typeof raw.faultTransform === "function" ? raw.faultTransform : undefined,
+    faultCompaction: typeof raw.faultCompaction === "function" ? raw.faultCompaction : undefined,
   }
 }
 
@@ -2123,6 +2128,38 @@ const storeHint = (hintBySession: Map<string, string>, sessionKey: string, hotSu
   if (hintLine !== undefined) rememberSessionValue(hintBySession, sessionKey, hintLine, sessionBound)
 }
 
+// The compaction-prompt enrichment: when the host's native compaction
+// fires, append a compact block carrying the session's remembered evicted
+// subjects (sharing the hint line's newest-first order and hintSubjects
+// bound, not its membership: the hint renders live subjects, this renders
+// remembered evicted subjects) and, when the session stash holds
+// reloadable outputs, a one-line note naming the newest stashed subjects
+// through read_evicted. Appends context strings only; the native prompt
+// is never replaced, and an unknown session attaches nothing.
+const COMPACTION_BLOCK_MARKER = "[lru-context]"
+const compactionContextFor = (metricsEntry: SessionMetrics | undefined, stash: SessionStash | undefined, limit: number): string[] => {
+  if (metricsEntry === undefined) return []
+  const hotSubjects = orderedRenderedSubjectsOf(metricsEntry.evictedSubjects.map((subject, index) => ({ subject, lastTouch: index })), limit)
+  const context: string[] = []
+  if (hotSubjects.length > 0) context.push(`${HINT_LINE_PREFIX} ${hotSubjects.join(SUBJECT_SEPARATOR)}`)
+  // slice(-0) is slice(0), the whole stash, so the bound must be checked
+  // here instead of trusted to slice; 0 disables subject rendering for the
+  // hint line and disables the stash note with it.
+  if (limit > 0 && stash !== undefined && stash.size > 0) {
+    const entries = [...stash.values()]
+    const newestSubjects: string[] = []
+    const seenSubjects = new Set<string>()
+    for (let index = entries.length - 1; index >= 0 && newestSubjects.length < limit; index -= 1) {
+      const subject = entries[index].subject
+      if (seenSubjects.has(subject)) continue
+      seenSubjects.add(subject)
+      newestSubjects.push(subject)
+    }
+    context.push(`${COMPACTION_BLOCK_MARKER} tombstoned outputs remain reloadable via the ${RELOAD_TOOL_NAME} tool; newest subjects: ${newestSubjects.join(SUBJECT_SEPARATOR)}`)
+  }
+  return context
+}
+
 const deliverHint = (hintBySession: Map<string, string>, input: unknown, output: { system: string[] }): void => {
   if (!Array.isArray(output.system)) return
   const sessionKey = sessionKeyFromContext(input)
@@ -2354,6 +2391,27 @@ export default (async (_input, rawOptions) => {
         // normal edits (same references, subset of healthy edits) —
         // either way never a corrupted structure — and the failure
         // surfaces through lru_stats.
+        const fault = { message: error instanceof Error ? error.message : String(error), atMs: options.now() }
+        rememberFault(metricsBySession, sessionKey, fault, options.metricsSessions)
+      }
+    },
+    "experimental.session.compacting": async (input: { sessionID?: string }, output: { context?: string[] }) => {
+      let sessionKey = FALLBACK_SESSION_KEY
+      try {
+        if (!Array.isArray(output.context)) return
+        sessionKey = sessionKeyFromContext(input)
+        if (options.faultCompaction !== undefined) options.faultCompaction()
+        const context = compactionContextFor(
+          touchMapEntry(metricsBySession, sessionKey),
+          stashBySession.get(sessionKey),
+          options.hintSubjects,
+        )
+        if (context.length === 0) return
+        output.context.push(...context)
+      } catch (error) {
+        // Fault isolation: compaction proceeds with the native prompt
+        // unmodified and the failure surfaces through the diagnostics
+        // channel.
         const fault = { message: error instanceof Error ? error.message : String(error), atMs: options.now() }
         rememberFault(metricsBySession, sessionKey, fault, options.metricsSessions)
       }

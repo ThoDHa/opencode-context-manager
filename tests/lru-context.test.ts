@@ -79,6 +79,9 @@ const INVALID_OVERRIDE_ENTRY = "50%"
 const INFINITE_OVERRIDE_ENTRY = Infinity
 const STANDARD_BUNDLE_CHARS = MIN_EVICTABLE_BYTES + RECENT_WINDOW_FILLER_MESSAGES * FILLER_TEXT_CHARS
 const THREE_ENTRY_BUNDLE_CHARS = THREE_ENTRY_COUNT * THREE_ENTRY_OUTPUT_BYTES + RECENT_WINDOW_FILLER_MESSAGES * FILLER_TEXT_CHARS
+const COMPACTION_STASH_CANDIDATE_COUNT = 4
+const COMPACTION_STASH_BUNDLE_CHARS =
+  COMPACTION_STASH_CANDIDATE_COUNT * THREE_ENTRY_OUTPUT_BYTES + RECENT_WINDOW_FILLER_MESSAGES * FILLER_TEXT_CHARS
 const COLD_NEW_BUNDLE_CHARS = COLD_OUTPUT_BYTES + NEW_OUTPUT_BYTES + RECENT_WINDOW_FILLER_MESSAGES * FILLER_TEXT_CHARS
 const GREP_TOOL = "grep"
 const RANGE_PATH = "/data/range.txt"
@@ -133,6 +136,15 @@ const STASH_ISOLATION_SESSION_C = "lru-harness-session-c"
 const DEDUP_MARKER = "[lru-deduped]"
 const TOOL_ERROR_PREFIX = "[lru-error] "
 const FAULT_SUBJECT = "/data/fault-subject.txt"
+const HINT_RENDERED_SUBJECT = "/data/hint-rendered.txt"
+const COMPACTION_BLOCK_MARKER = "[lru-context]"
+const STASH_NOTE_SUBJECTS_LEAD = "newest subjects"
+const COMPACTION_SUBJECT_BOUND = 2
+const COMPACTION_BOUND_SUBJECTS = ["/data/comp-bound-a.txt", "/data/comp-bound-b.txt", "/data/comp-bound-c.txt"]
+const COMPACTION_FAULT_MESSAGE = "compaction enrichment exploded"
+const COMPACTION_STASH_NEWEST_SUBJECT = "/data/comp-stash-newest.txt"
+const COMPACTION_STASH_DUP_SUBJECT = "/data/comp-stash-dup.txt"
+const COMPACTION_STASH_HELD_SUBJECT = "/data/comp-stash-held.txt"
 const TOOL_FAULT_MESSAGE = "tool getter exploded"
 const DEDUP_SUPERSEDED_LEAD = "identical call superseded by the newer output at message"
 const DEDUP_RANGE_SUPERSEDED_LEAD = "range read superseded by the retained range at message"
@@ -5833,6 +5845,145 @@ test("transform behaves byte-identically with manualMode false configured and wi
 
   assert.deepEqual(explicitBundle, defaultBundle)
   assert.ok(toolPartAt(defaultBundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+})
+
+test("the compacting hook appends hot subjects and the stash note for a session with recorded evictions", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+  await runTransform(hooks, buildStandardBundle(SESSION_ID, HINT_RENDERED_SUBJECT))
+
+  const output = { context: [] as string[] }
+  await hooks["experimental.session.compacting"]({ sessionID: SESSION_ID }, output)
+
+  assert.equal(output.context.length, 2)
+  assert.equal(output.context[0], hintLineFor([HINT_RENDERED_SUBJECT]))
+  assert.ok(output.context[1].startsWith(COMPACTION_BLOCK_MARKER))
+  assert.ok(output.context[1].includes(RELOAD_TOOL_NAME))
+  assert.ok(output.context[1].includes(HINT_RENDERED_SUBJECT))
+})
+
+test("the compacting hook attaches nothing for an unknown session", async () => {
+  const hooks = await loadPluginHooks()
+  await runTransform(hooks, buildStandardBundle(SESSION_ID, HINT_RENDERED_SUBJECT))
+
+  const output = { context: [] as string[] }
+  await hooks["experimental.session.compacting"]({ sessionID: "lru-never-seen-session" }, output)
+
+  assert.equal(output.context.length, 0)
+})
+
+test("the compacting hook attaches nothing when the metrics entry carries no subjects", async () => {
+  const hooks = await loadPluginHooks()
+
+  const output = { context: [] as string[] }
+  await hooks["experimental.session.compacting"]({ sessionID: SESSION_ID }, output)
+
+  assert.equal(output.context.length, 0)
+})
+
+test("a throwing compaction enrichment degrades to an unmodified prompt with lastFault set", async () => {
+  const hooks = await loadPluginHooksWith({
+    faultCompaction: () => { throw new Error(COMPACTION_FAULT_MESSAGE) },
+  })
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+  await runTransform(hooks, buildStandardBundle(SESSION_ID, HINT_RENDERED_SUBJECT))
+
+  const output = { context: ["keep me"] }
+  await hooks["experimental.session.compacting"]({ sessionID: SESSION_ID }, output)
+
+  assert.deepEqual(output.context, ["keep me"])
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.equal((stats.lastFault as Record<string, unknown>).message, COMPACTION_FAULT_MESSAGE)
+})
+
+test("the compaction block respects the subject bound", async () => {
+  const hooks = await loadPluginHooksWith({ hintSubjects: COMPACTION_SUBJECT_BOUND })
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+  for (const subject of COMPACTION_BOUND_SUBJECTS) {
+    await runTransform(hooks, buildStandardBundle(SESSION_ID, subject))
+  }
+
+  const output = { context: [] as string[] }
+  await hooks["experimental.session.compacting"]({ sessionID: SESSION_ID }, output)
+
+  const hotLine = output.context.find((entry) => entry.startsWith(HINT_MARKER))
+  assert.ok(hotLine !== undefined)
+  const listedSubjects = hotLine.slice(HINT_MARKER.length + HINT_LABEL.length + 2).split(HINT_SUBJECT_SEPARATOR)
+  assert.equal(listedSubjects.length, COMPACTION_SUBJECT_BOUND)
+})
+
+test("the compacting hook attaches nothing when hintSubjects is 0 even with a populated stash", async () => {
+  const hooks = await loadPluginHooksWith({ hintSubjects: 0 })
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+  await runTransform(hooks, buildStandardBundle(SESSION_ID, HINT_RENDERED_SUBJECT))
+
+  const output = { context: [] as string[] }
+  await hooks["experimental.session.compacting"]({ sessionID: SESSION_ID }, output)
+
+  assert.equal(output.context.length, 0)
+})
+
+test("the compacting hook attaches only the stash note when the session remembers no evicted subjects but holds stashed outputs", async () => {
+  const hooks = await loadPluginHooksWith({ rememberedEvictedSubjects: 0 })
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+  await runTransform(hooks, buildStandardBundle(SESSION_ID, HINT_RENDERED_SUBJECT))
+
+  const output = { context: [] as string[] }
+  await hooks["experimental.session.compacting"]({ sessionID: SESSION_ID }, output)
+
+  assert.equal(output.context.length, 1)
+  assert.ok(output.context[0].startsWith(COMPACTION_BLOCK_MARKER))
+  assert.ok(output.context[0].includes(RELOAD_TOOL_NAME))
+})
+
+test("the stash note dedupes repeated subjects and caps at the subject bound, newest first", async () => {
+  const hooks = await loadPluginHooksWith({ hintSubjects: COMPACTION_SUBJECT_BOUND })
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(COMPACTION_STASH_BUNDLE_CHARS, tokensForChars(THREE_ENTRY_OUTPUT_BYTES) * 2 + 1))
+
+  const bundle = buildBundle([
+    [pathToolPart(COMPACTION_STASH_DUP_SUBJECT, THREE_ENTRY_OUTPUT_BYTES)],
+    [pathToolPart(COMPACTION_STASH_DUP_SUBJECT, THREE_ENTRY_OUTPUT_BYTES)],
+    [pathToolPart(COMPACTION_STASH_NEWEST_SUBJECT, THREE_ENTRY_OUTPUT_BYTES)],
+    [pathToolPart(COMPACTION_STASH_HELD_SUBJECT, THREE_ENTRY_OUTPUT_BYTES)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  const output = { context: [] as string[] }
+  await hooks["experimental.session.compacting"]({ sessionID: SESSION_ID }, output)
+
+  const note = output.context.find((entry) => entry.startsWith(COMPACTION_BLOCK_MARKER))
+  assert.ok(note !== undefined)
+  const listedSubjects = note.slice(note.indexOf(`${STASH_NOTE_SUBJECTS_LEAD}: `) + STASH_NOTE_SUBJECTS_LEAD.length + 2).split(HINT_SUBJECT_SEPARATOR)
+  assert.deepEqual(listedSubjects, [COMPACTION_STASH_NEWEST_SUBJECT, COMPACTION_STASH_DUP_SUBJECT])
+  assert.equal(toolPartAt(bundle.messages[3], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
+})
+
+test("a frozen context array degrades through the fault boundary with the native prompt left unmodified", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+  await runTransform(hooks, buildStandardBundle(SESSION_ID, HINT_RENDERED_SUBJECT))
+
+  const output = { context: Object.freeze([] as string[]) }
+  await hooks["experimental.session.compacting"]({ sessionID: SESSION_ID }, output)
+
+  assert.equal(output.context.length, 0)
+  const stats = await lruStats(hooks, SESSION_ID)
+  const lastFault = stats.lastFault as Record<string, unknown>
+  assert.equal(typeof lastFault.message, "string")
+  assert.ok((lastFault.message as string).length > 0)
+})
+
+test("the compacting hook returns silently when the output carries no context array", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+  await runTransform(hooks, buildStandardBundle(SESSION_ID, HINT_RENDERED_SUBJECT))
+
+  await hooks["experimental.session.compacting"]({ sessionID: SESSION_ID }, {})
+  await hooks["experimental.session.compacting"]({ sessionID: SESSION_ID }, { context: "not an array" })
+
+  const stats = await lruStats(hooks, SESSION_ID)
+  assert.equal(stats.lastFault, undefined)
 })
 
 test("transform keeps dedup active under pressure while manualMode is enabled", async () => {

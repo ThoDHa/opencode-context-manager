@@ -27,6 +27,7 @@ An [opencode](https://opencode.ai) plugin that manages context windows with LRU 
     - [The stash and read_evicted](#the-stash-and-read_evicted)
     - [User-fence eviction](#user-fence-eviction)
     - [Observability](#observability)
+    - [Compaction enrichment](#compaction-enrichment)
   - [Why it works: the token economics](#why-it-works-the-token-economics)
   - [When it fires and when it never does](#when-it-fires-and-when-it-never-does)
   - [Honest limits](#honest-limits)
@@ -265,6 +266,10 @@ With `sidebarSubagents` enabled the sidebar appends one last blank-line-separate
 The sidebar entry registers through the TUI plugin API's `sidebar_content` slot when `sidebarEnabled` is true (the default; a non-boolean value falls back to true, and `false` skips only that slot registration while the `/lru` command stays registered; the same registration reads `sidebarSubagents`, default false, which adds nothing on its own while the slot itself is off) and re-renders on a five-second poll of the same two files, visible only while the session has recorded data: a tick whose log read fails with no snapshot to fall back on hides it for that tick (startup and log rotation produce such transient failures), and the next poll repaints. The poll's timer and its post-await writes are dispose-guarded, so a route change or plugin shutdown cannot write through a disposed component.
 
 Degradation is explicit and identical in both builders: "no active session" outside a session, "no metrics recorded for this session yet" for a session with no runs, malformed lines skipped at parse, and an unreadable log leaving the snapshot-fed session block under a warning row when a snapshot serves the session, header and warning row alone otherwise.
+
+#### Compaction enrichment
+
+When the host's native compaction fires (the SDK's `experimental.session.compacting` hook), the plugin appends context strings to the native compaction prompt so the summary it produces names what the session can still reload: a `[lru-hot]` hint line in the same shape the system prompt carries (the session's remembered evicted subjects rendered newest first and bounded by `hintSubjects`) and, when the session stash holds reloadable outputs, a one-line `[lru-context]` note stating that tombstoned outputs remain reloadable via `read_evicted` and naming the newest stashed subjects. The hook appends only; it never sets the SDK's `prompt` field, so the host's default compaction prompt is never replaced. It stays silent for a session with no recorded evictions (an unknown session attaches nothing and creates no state), contributes only the stash note when a stash exists but no subjects are remembered, and a `hintSubjects` of 0 silences the enrichment entirely (both lines are subject renderings, and 0 disables subject rendering everywhere else). The body runs behind the same fault boundary as every other hook: a throw leaves the native prompt unmodified and records the failure as `lastFault` on the session's diagnostics, so compaction proceeds without the enrichment.
 
 ### Why it works: the token economics
 
