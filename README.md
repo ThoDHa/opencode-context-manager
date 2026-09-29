@@ -9,6 +9,7 @@ An [opencode](https://opencode.ai) plugin that manages context windows with leas
   - [Install](#install)
   - [How it runs](#how-it-runs)
   - [Staying updated](#staying-updated)
+  - [Upgrading from the plugin directory](#upgrading-from-the-plugin-directory)
   - [Manual install](#manual-install)
   - [Uninstall](#uninstall)
 - [Configuration](#configuration)
@@ -35,7 +36,7 @@ An [opencode](https://opencode.ai) plugin that manages context windows with leas
 
 ## Installation
 
-Installing the plugin means placing its four source files (`context-manager.ts`, `context-manager.tui.tsx`, `panel-data.ts`, `schema.ts`) in `~/.config/opencode/plugin/`, the directory the `Makefile` calls opencode's plugin directory. The `Makefile` automates the placement with symlinks and reverses it cleanly.
+Installing the plugin means placing its four source files (`context-manager.ts`, `context-manager.tui.tsx`, `panel-data.ts`, `schema.ts`) in `~/.config/opencode/context-manager/` and registering them in `opencode.json` and `tui.json` ([Configuration](#configuration) documents both entries). The directory sits under the opencode config dir but must not be named `plugin` or `plugins`: from 1.18.29 on, opencode scans every `.ts` and `.js` file directly inside a directory with either name as a plugin, and when a scan turns up a file that a config entry also names, the optionless scanned copy silently wins and the entry's options are dropped; the scan also tries to load every non-plugin helper module it finds there as a pseudo-plugin, logging a "failed to load plugin" error for each. Outside the scan, each config entry is the sole origin for its file, and the entry's options are delivered. The `Makefile` automates the placement with symlinks and reverses it cleanly; the two config entries are the one manual step.
 
 ### Requirements
 
@@ -53,39 +54,43 @@ make test
 make install
 ```
 
-`make install` creates `~/.config/opencode/plugin/` when it is missing and symlinks the four plugin files into it. The install is idempotent: a rerun replaces existing symlinks in place. It never overwrites anything else: when a regular file or directory occupies a target path, the install aborts with an error naming the path, and the file must be removed by hand before the install can succeed.
+`make install` creates `~/.config/opencode/context-manager/` when it is missing and symlinks the four plugin files into it. The install is idempotent: a rerun replaces existing symlinks in place. It never overwrites anything else: when a regular file or directory occupies a target path, the install aborts with an error naming the path, and the file must be removed by hand before the install can succeed. The install places the files only; the two config entries in [Configuration](#configuration) load them, and without the `opencode.json` entry the plugin does not run, since nothing scans the install directory.
 
 ### How it runs
 
-The install is the whole deployment: the four symlinked files sit in opencode's plugin directory, so every opencode session, interactive and subagent alike, runs the plugin with no config file entry required; [Configuration](#configuration) documents the option surface and the wiring that delivers it. In a session, the surfaces to check are the ones [What the plugin does](#what-the-plugin-does) documents: `context_stats` reports the live counters, the `/context` panel and the session sidebar surface the same session data over the live-state snapshot and metrics log, eventful flushes append one line each to `~/.local/share/opencode/context-metrics.jsonl` (reasoning-only runs coalesce within `metricsMinLineIntervalMs`), and every run with a last-run record rewrites the session's snapshot under `~/.local/share/opencode/context-state/`; an install updating from the previous `lru-*` names migrates its stored data automatically ([Metrics and live state](#metrics-and-live-state) documents the move).
+The install plus the two config entries are the whole deployment: the four symlinked files sit in `~/.config/opencode/context-manager/`, where no scan finds them; the `opencode.json` tuple runs the core plugin in every opencode session, interactive and subagent alike, and delivers its options; the `tui.json` tuple serves the `/context` panel and the session sidebar. [Configuration](#configuration) documents both entries. In a session, the surfaces to check are the ones [What the plugin does](#what-the-plugin-does) documents: `context_stats` reports the live counters, the `/context` panel and the session sidebar surface the same session data over the live-state snapshot and metrics log, eventful flushes append one line each to `~/.local/share/opencode/context-metrics.jsonl` (reasoning-only runs coalesce within `metricsMinLineIntervalMs`), and every run with a last-run record rewrites the session's snapshot under `~/.local/share/opencode/context-state/`; an install updating from the previous `lru-*` names migrates its stored data automatically ([Metrics and live state](#metrics-and-live-state) documents the move).
 
 ### Staying updated
 
 The installed entries are symlinks into the clone, so an update is `git pull` in the repository: the links resolve into the working tree, and the code the plugin runs is whatever the pull left there. `make test` re-runs the five suites against the pulled tree.
+
+### Upgrading from the plugin directory
+
+An install made under the previous layout left the four files in `~/.config/opencode/plugin/`, and they must be removed during an upgrade: opencode's scan still reads that directory, and a scanned copy silently wins the dedup against the `opencode.json` tuple and drops its options, recreating the bug the new layout exists to fix. Delete the four files there (`context-manager.ts`, `context-manager.tui.tsx`, `panel-data.ts`, `schema.ts`), run `make install` for the new directory, and add the two config entries from [Configuration](#configuration), since nothing loads the plugin from the install directory alone.
 
 ### Manual install
 
 On a machine without make, the same layout is a handful of commands from the repository root:
 
 ```sh
-mkdir -p ~/.config/opencode/plugin
-ln -sfn "$PWD/plugin/context-manager.ts" ~/.config/opencode/plugin/context-manager.ts
-ln -sfn "$PWD/plugin/context-manager.tui.tsx" ~/.config/opencode/plugin/context-manager.tui.tsx
-ln -sfn "$PWD/plugin/panel-data.ts" ~/.config/opencode/plugin/panel-data.ts
-ln -sfn "$PWD/plugin/schema.ts" ~/.config/opencode/plugin/schema.ts
+mkdir -p ~/.config/opencode/context-manager
+ln -sfn "$PWD/plugin/context-manager.ts" ~/.config/opencode/context-manager/context-manager.ts
+ln -sfn "$PWD/plugin/context-manager.tui.tsx" ~/.config/opencode/context-manager/context-manager.tui.tsx
+ln -sfn "$PWD/plugin/panel-data.ts" ~/.config/opencode/context-manager/panel-data.ts
+ln -sfn "$PWD/plugin/schema.ts" ~/.config/opencode/context-manager/schema.ts
 ```
 
-Copying the files instead of linking them works too. Unlike `make install`, these commands carry no non-symlink guard: `ln -sfn` silently replaces whatever regular file sits at a target path where the install target would abort with an error naming it.
+Copying the files instead of linking them works too. Unlike `make install`, these commands carry no non-symlink guard: `ln -sfn` silently replaces whatever regular file sits at a target path where the install target would abort with an error naming it. The two config entries from [Configuration](#configuration) are still needed either way.
 
 ### Uninstall
 
-`make uninstall` removes the four plugin symlinks from `~/.config/opencode/plugin/`. Only symlinks are removed: a regular file left at a target path by a manual copy is untouched and must be removed by hand, and the repository checkout is unaffected.
+`make uninstall` removes the four plugin symlinks from `~/.config/opencode/context-manager/`. Only symlinks are removed: a regular file left at a target path by a manual copy is untouched and must be removed by hand, and the repository checkout is unaffected. Removing the symlinks alone leaves the two config entries pointing at missing files, and those load failures surface only on the console, so remove the `opencode.json` tuple and the `tui.json` entry to finish a full uninstall.
 
 ## Configuration
 
-The plugin reads its options from the second argument opencode passes to the plugin's `server` function (the callable property of the module object the entry exports). In `opencode.json`'s `plugin` array an entry may be a plain string or a two-element tuple naming the plugin plus an options object; the tuple form is confirmed against the `@opencode-ai/plugin` type surface (version 1.18.5: `plugin?: Array<string | [string, PluginOptions]>`, with the object delivered as the server function's second parameter), while the official plugin and config pages document string entries only and are silent on options, so the tuple form is a type-surface fact, not a documented one. Two adjacent gaps are stated rather than papered over: the docs do not say how or whether options reach a plugin loaded from the plugin directory that `make install` populates, and they do not say what a plain string entry passes as options; the tuple entry is the only options channel verifiable today.
+The plugin reads its options from the second argument opencode passes to the plugin's `server` function (the callable property of the module object the entry exports). In a config file's `plugin` array an entry may be a plain string or a two-element tuple naming the plugin plus an options object, and the object is delivered verbatim as that second parameter. Delivery has one precondition, and the install layout is built around it: an entry's options reach the plugin only while the entry's file is not scan-discoverable, meaning it does not sit directly inside a directory named `plugin` or `plugins` under an opencode config dir (the global config dir, a project `.opencode/`, or `~/.opencode`), where opencode scans every `.ts` and `.js` file directly inside either name on top of the config lists; when the scan finds the same file the entry names, the optionless scanned copy silently wins and the options are dropped, with no error or warning on either side. With the files in `~/.config/opencode/context-manager/` ([Installation](#installation)), the entries below are the options channel.
 
-However they arrive, options follow a drop-on-invalid discipline: a value failing the validation below is discarded and the documented default applies, so a mistyped option degrades to default behavior instead of blocking a session. One consequence is worth naming: `charsPerToken` accepts any finite number above zero, so extreme-but-valid values are not rejected either; a tenth or a ten-thousand-fold factor is accepted and the token estimate degrades gracefully with it (eviction starts implausibly early or late while the zero-loss passes and the budget resolution stay correct).
+Options follow a drop-on-invalid discipline: a value failing the validation below is discarded and the documented default applies, so a mistyped option degrades to default behavior instead of blocking a session. One consequence is worth naming: `charsPerToken` accepts any finite number above zero, so extreme-but-valid values are not rejected either; a tenth or a ten-thousand-fold factor is accepted and the token estimate degrades gracefully with it (eviction starts implausibly early or late while the zero-loss passes and the budget resolution stay correct).
 
 ### Budget and eviction
 
@@ -145,13 +150,15 @@ Updating from the previous `lru-*` data names is self-migrating: the plugin's fi
 
 ### Full sample configuration
 
-The two plugin files take separate registrations: the core entry (`context-manager.ts`) takes every option above except `sidebarEnabled` and `sidebarSubagents`, and the TUI entry (`context-manager.tui.tsx`) reads only `sidebarEnabled` and `sidebarSubagents` through its own registration. Each first element below is the installed plugin file's path, so point it wherever your copies live.
+The two plugin files take separate registrations in separate config files: the core entry (`context-manager.ts`) goes in `opencode.json`'s `plugin` array and takes every option above except `sidebarEnabled` and `sidebarSubagents`, and the TUI entry (`context-manager.tui.tsx`) goes in `tui.json`'s `plugin` array, which is its only load path: the TUI reads plugins from the `tui.json` config list alone, never from a directory scan, so an entry in `opencode.json` does nothing for the TUI views. Both config files below are the global ones in `~/.config/opencode/`, and each first element is the installed plugin file's path relative to the config file declaring it, so point it wherever your copies live.
+
+`opencode.json`:
 
 ```json
 {
   "plugin": [
     [
-      "~/.config/opencode/plugin/context-manager.ts",
+      "./context-manager/context-manager.ts",
       {
         "watermark": 0.5,
         "recentWindow": 4,
@@ -183,9 +190,18 @@ The two plugin files take separate registrations: the core entry (`context-manag
         "liveStatePruneMaxAgeMs": 604800000,
         "liveStatePruneMinIntervalMs": 60000
       }
-    ],
+    ]
+  ]
+}
+```
+
+`tui.json`:
+
+```json
+{
+  "plugin": [
     [
-      "~/.config/opencode/plugin/context-manager.tui.tsx",
+      "./context-manager/context-manager.tui.tsx",
       {
         "sidebarEnabled": true,
         "sidebarSubagents": false
@@ -221,7 +237,7 @@ The honest nuance is that the native mechanisms are lossy too: the documentation
 
 ### What the plugin does
 
-Loaded from opencode's plugin directory (the install's symlink target), the plugin runs in every session opencode opens, a subagent's included. The surface is three hooks and two tools: `chat.params` captures the session's context budget when the model is chosen, `experimental.chat.messages.transform` rewrites the outgoing message list on every turn, and `experimental.chat.system.transform` delivers a one-line hint into the system prompt; `read_evicted` reloads evicted content from the session stash, and `context_stats` reports the live counters as JSON. The `/context` TUI panel (the `context.panel` command, registered by `context-manager.tui.tsx`) and the same file's persistent session-sidebar entry are read-only views over the plugin's metrics log and the per-session live-state snapshot.
+Loaded through the install's `opencode.json` entry, the core plugin runs in every session opencode opens, a subagent's included. The surface is three hooks and two tools: `chat.params` captures the session's context budget when the model is chosen, `experimental.chat.messages.transform` rewrites the outgoing message list on every turn, and `experimental.chat.system.transform` delivers a one-line hint into the system prompt; `read_evicted` reloads evicted content from the session stash, and `context_stats` reports the live counters as JSON. The `/context` TUI panel (the `context.panel` command, registered by `context-manager.tui.tsx`) and the same file's persistent session-sidebar entry are read-only views over the plugin's metrics log and the per-session live-state snapshot.
 
 One transform run executes, in order:
 

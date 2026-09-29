@@ -4,7 +4,7 @@
 
 - `make test` runs the whole suite with one `node --test` invocation over the five suite files. Gate on the runner's own summary block (`tests`, `pass`, `fail`, `cancelled`, `skipped`, `todo`), not on the absence of red output.
 - `make ci` is the CI guard and what `.github/workflows/ci.yml` invokes. It runs each suite file in its own `node --test` invocation, requires every invocation to exit 0 and report at least one test, and requires the per-file counts to sum to the aggregate `make test` total.
-- `make install` symlinks the four plugin files into `~/.config/opencode/plugin/`; `make uninstall` removes the symlinks only (a regular file at a target path is left alone).
+- `make install` symlinks the four plugin files into `~/.config/opencode/context-manager/`; `make uninstall` removes the symlinks only (a regular file at a target path is left alone).
 
 ## Test-count discipline
 

@@ -1,6 +1,6 @@
 PLUGIN_FILES := context-manager.ts context-manager.tui.tsx panel-data.ts schema.ts
 PLUGIN_SRC := $(addprefix plugin/,$(PLUGIN_FILES))
-PLUGIN_TARGET_DIR := $(HOME)/.config/opencode/plugin
+PLUGIN_TARGET_DIR := $(HOME)/.config/opencode/context-manager
 TEST_FILES := tests/context-manager.test.ts tests/panel-data.test.ts tests/panel-rows.test.ts tests/sidebar-rows.test.ts tests/sidebar-subagents.test.ts
 
 .PHONY: all test ci install uninstall help
@@ -56,9 +56,13 @@ ci:
 	fi; \
 	echo "ci guard green: $$total tests across $(words $(TEST_FILES)) files"
 
-# Symlink the plugin files into the opencode plugin directory.
-# Idempotent: existing symlinks are replaced in place; a regular file (or
-# directory) occupying a target path aborts the install with an error.
+# Symlink the plugin files into the plugin's own directory under the opencode
+# config dir. The directory must not be named plugin/ or plugins/: opencode
+# scans those for .ts/.js files, a scanned copy silently overrides the config
+# tuple and drops its options, and helper modules found there are tried as
+# pseudo-plugins, logging "failed to load plugin" errors. Idempotent:
+# existing symlinks are replaced in place; a regular file (or directory)
+# occupying a target path aborts the install with an error.
 install:
 	@mkdir -p $(PLUGIN_TARGET_DIR)
 	@for src in $(PLUGIN_SRC); do \
@@ -73,8 +77,8 @@ install:
 	done
 	@echo "Installed plugin files to $(PLUGIN_TARGET_DIR)"
 
-# Remove the plugin symlinks from the opencode plugin directory.
-# Only symlinks are removed; regular files are left untouched.
+# Remove the plugin symlinks from the plugin's directory under the opencode
+# config dir. Only symlinks are removed; regular files are left untouched.
 uninstall:
 	@for file in $(PLUGIN_FILES); do \
 		target=$(PLUGIN_TARGET_DIR)/$$file; \
@@ -91,6 +95,6 @@ help:
 	@echo ""
 	@echo "  make test      - Run the plugin test suites (node --test)"
 	@echo "  make ci        - Per-file CI guard: every suite loads, counts sum to the aggregate"
-	@echo "  make install   - Symlink the plugin files into ~/.config/opencode/plugin/"
-	@echo "  make uninstall - Remove the plugin symlinks from ~/.config/opencode/plugin/"
+	@echo "  make install   - Symlink the plugin files into $(PLUGIN_TARGET_DIR)/"
+	@echo "  make uninstall - Remove the plugin symlinks from $(PLUGIN_TARGET_DIR)/"
 	@echo "  make help      - Show this help"
