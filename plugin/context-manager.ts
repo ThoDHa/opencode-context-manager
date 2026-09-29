@@ -2168,6 +2168,13 @@ const isAgedReadEntry = (entry: EvictableEntry, listLength: number, options: Res
   entry.subjects.length > 0 &&
   listLength - entry.msgIndex > options.agedReadEvictionMessages
 
+// The deficit the evictor and the stand-down share, so the two sites
+// cannot drift: the estimate over the effective watermark, disarmed to
+// null when no effective watermark exists. The dry run does not use this
+// guard because its contract hands it a non-null watermark.
+const deficitTokensOf = (estimatedTokens: number, watermarkTokens: number | null): number | null =>
+  watermarkTokens === null ? null : estimatedTokens - watermarkTokens
+
 // The one-disposition decision the evictor walk and the dry-run walk
 // share, so the two sites cannot drift: an entry is evicted when the aged
 // read tier claims it, or when the watermark tier still has deficit left
@@ -2181,13 +2188,21 @@ const isEvictedByWalkPolicy = (
   reclaimedTokens: number,
 ): boolean => isAgedReadEntry(entry, listLength, options) || (deficitTokens !== null && reclaimedTokens < deficitTokens)
 
-const measureWithoutEvicting = (candidates: EvictionCandidates): EvictionResult => {
+// The stand-down measurement: the run record of a transform that evicted
+// nothing. The watermark and deficit ride through when an effective
+// watermark exists (armed manual mode with a captured budget or a set
+// watermarkTokens), so the sidebar and context_stats show the real
+// figures the dry run acts on; a null watermark (either mode) keeps both
+// null, matching a session that genuinely has no watermark. The deficit
+// is the shared estimate-minus-watermark arithmetic over the shared
+// candidates' estimate.
+const measureWithoutEvicting = (candidates: EvictionCandidates, watermarkTokens: number | null): EvictionResult => {
   return {
     hotSubjects: liveSubjectsOf(candidates.entries),
     appearances: candidates.appearances,
     estimatedTokens: candidates.estimatedTokens,
-    watermarkTokens: null,
-    deficitTokens: null,
+    watermarkTokens,
+    deficitTokens: deficitTokensOf(candidates.estimatedTokens, watermarkTokens),
     evicted: [],
     stashDropped: 0,
   }
@@ -2229,7 +2244,7 @@ const evictLeastRecentlyUsed = (
 ): EvictionResult => {
   const { evictable } = candidates
 
-  const deficitTokens = watermarkTokens === null ? null : candidates.estimatedTokens - watermarkTokens
+  const deficitTokens = deficitTokensOf(candidates.estimatedTokens, watermarkTokens)
   const evicted: EvictedEntryInfo[] = []
   let stashDropped = 0
   let reclaimedTokens = 0
@@ -2399,7 +2414,7 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
   const candidates = evictionCandidatesOf(messages, options)
   const standDown = options.manualMode || (effectiveWatermarkTokens === null && options.agedReadEvictionMessages === undefined)
   const eviction = standDown
-    ? measureWithoutEvicting(candidates)
+    ? measureWithoutEvicting(candidates, effectiveWatermarkTokens)
     : evictLeastRecentlyUsed(messages, candidates, options, effectiveWatermarkTokens, sessionStash)
   // The manual-mode dry run: with an effective watermark set, report
   // what the evictor would reclaim (the combined watermark and aged
