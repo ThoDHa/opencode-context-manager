@@ -12,8 +12,10 @@ import {
   resolveSidebarEnabled,
   sessionPanelData,
   sidebarRows,
+  sidebarSubagentsGroup,
   type PanelData,
   type PanelRow,
+  type SubagentChild,
 } from "../plugin/panel-data.ts"
 import {
   EVICTED_BYTES,
@@ -74,14 +76,14 @@ test("sidebarRows renders the approved layout's header, stat block, and eviction
     { text: " ", tone: "normal" },
     { text: "Budget: 200k", tone: "normal" },
     { text: "Watermark: 100k", tone: "normal" },
-    { text: "Over by: 23.5k", tone: "normal" },
-    { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
-    { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
-    { text: EXPECTED_REASONING_STAT, tone: "normal" },
-    { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
+    { text: "Over by: 23.5k", tone: "warning" },
+    { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "success" },
+    { text: EXPECTED_DEDUPED_STAT, tone: "success" },
+    { text: EXPECTED_REASONING_STAT, tone: "success" },
+    { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "success" },
     { text: " ", tone: "normal" },
-    { text: "Last evicted: read /data/a.txt", tone: "muted" },
-    { text: `3 kB, ${EVICTED_MESSAGES_AGO} messages ago`, tone: "muted" },
+    { text: "Last evicted: read /data/a.txt", tone: "info" },
+    { text: `3 kB, ${EVICTED_MESSAGES_AGO} messages ago`, tone: "info" },
   ])
 })
 
@@ -115,12 +117,12 @@ test("sidebarRows reports a session without runs and a sidebar outside any sessi
   assert.deepEqual(sidebarRowsWithinWidth(noMetricsData), [
     { text: "Context Manager", tone: "header" },
     { text: " ", tone: "normal" },
-    { text: "no metrics recorded for this session yet", tone: "muted" },
+    { text: "no metrics recorded for this session yet", tone: "normal" },
   ])
   assert.deepEqual(sidebarRowsWithinWidth({ ...noMetricsData, activeSession: undefined }), [
     { text: "Context Manager", tone: "header" },
     { text: " ", tone: "normal" },
-    { text: "no active session", tone: "muted" },
+    { text: "no active session", tone: "normal" },
   ])
 })
 
@@ -136,7 +138,7 @@ test("sidebarRows shows the empty-session state when the session's log lines are
     assert.deepEqual(sidebarRowsWithinWidth(data), [
       { text: "Context Manager", tone: "header" },
       { text: " ", tone: "normal" },
-      { text: "no metrics recorded for this session yet", tone: "muted" },
+      { text: "no metrics recorded for this session yet", tone: "normal" },
     ])
   })
 })
@@ -180,11 +182,11 @@ test("sidebarRows keeps the snapshot-fed session block under the warning group w
       { text: " ", tone: "normal" },
       { text: "Budget: 200k", tone: "normal" },
       { text: "Watermark: 100k", tone: "normal" },
-      { text: "Over by: 23.5k", tone: "normal" },
-      { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
-      { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
-      { text: EXPECTED_REASONING_STAT, tone: "normal" },
-      { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
+      { text: "Over by: 23.5k", tone: "warning" },
+      { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "success" },
+      { text: EXPECTED_DEDUPED_STAT, tone: "success" },
+      { text: EXPECTED_REASONING_STAT, tone: "success" },
+      { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "success" },
     ])
   })
 })
@@ -205,14 +207,14 @@ test("sidebarRows renders the log-fed fallback session in the spaced groups", as
       { text: " ", tone: "normal" },
       { text: `Budget: 600`, tone: "normal" },
       { text: "Watermark: 100k", tone: "normal" },
-      { text: "Over by: 23.5k", tone: "normal" },
-      { text: `Evictions: ${LOG_LINE_ONLY_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
-      { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
-      { text: EXPECTED_REASONING_STAT, tone: "normal" },
-      { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
+      { text: "Over by: 23.5k", tone: "warning" },
+      { text: `Evictions: ${LOG_LINE_ONLY_EVICTIONS}, ~3.1k tokens`, tone: "success" },
+      { text: EXPECTED_DEDUPED_STAT, tone: "success" },
+      { text: EXPECTED_REASONING_STAT, tone: "success" },
+      { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "success" },
       { text: " ", tone: "normal" },
-      { text: "Last evicted: read /data/a.txt", tone: "muted" },
-      { text: `3 kB, ${EVICTED_MESSAGES_AGO} messages ago`, tone: "muted" },
+      { text: "Last evicted: read /data/a.txt", tone: "info" },
+      { text: `3 kB, ${EVICTED_MESSAGES_AGO} messages ago`, tone: "info" },
     ])
   })
 })
@@ -238,8 +240,8 @@ test("sidebarRows caps an over-long eviction line and the footer's huge byte tot
   assert.ok(OVER_LONG_SUBJECT.length > SIDEBAR_COLUMN_LIMIT)
   assert.deepEqual(rows.slice(-3), [
     { text: " ", tone: "normal" },
-    { text: `Last evicted: read /data/${"b".repeat(16)}…`, tone: "muted" },
-    { text: `115 GB, ${EVICTED_MESSAGES_AGO} messages ago`, tone: "muted" },
+    { text: `Last evicted: read /data/${"b".repeat(16)}…`, tone: "info" },
+    { text: `115 GB, ${EVICTED_MESSAGES_AGO} messages ago`, tone: "info" },
   ])
 })
 
@@ -285,10 +287,10 @@ test("sidebarRows restyles a null budget and a missing watermark into the colon 
     { text: " ", tone: "normal" },
     { text: "Budget: inactive (no budget)", tone: "normal" },
     { text: "Watermark: none", tone: "normal" },
-    { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
-    { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
-    { text: EXPECTED_REASONING_STAT, tone: "normal" },
-    { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
+    { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "success" },
+    { text: EXPECTED_DEDUPED_STAT, tone: "success" },
+    { text: EXPECTED_REASONING_STAT, tone: "success" },
+    { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "success" },
   ])
 })
 
@@ -306,10 +308,10 @@ test("sidebarRows shows Watermark none for a present budget when only the waterm
     { text: " ", tone: "normal" },
     { text: "Budget: 200k", tone: "normal" },
     { text: "Watermark: none", tone: "normal" },
-    { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
-    { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
-    { text: EXPECTED_REASONING_STAT, tone: "normal" },
-    { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
+    { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "success" },
+    { text: EXPECTED_DEDUPED_STAT, tone: "success" },
+    { text: EXPECTED_REASONING_STAT, tone: "success" },
+    { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "success" },
   ])
 })
 
@@ -327,10 +329,10 @@ test("sidebarRows omits the over-by line when the deficit is zero or negative", 
     assert.deepEqual(rows.slice(2), [
       { text: `Budget: 200k`, tone: "normal" },
       { text: "Watermark: 100k", tone: "normal" },
-      { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "normal" },
-      { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
-      { text: EXPECTED_REASONING_STAT, tone: "normal" },
-      { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "normal" },
+      { text: `Evictions: ${TOTALS_EVICTIONS}, ~3.1k tokens`, tone: "success" },
+      { text: EXPECTED_DEDUPED_STAT, tone: "success" },
+      { text: EXPECTED_REASONING_STAT, tone: "success" },
+      { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "success" },
     ])
   }
 })
@@ -349,6 +351,38 @@ test("sidebarRows drops the budget source label while the panel keeps it", () =>
   assert.ok(rows.some((row) => row.text === "Budget: 200k"))
   assert.ok(!rows.some((row) => row.text.includes("override")))
   assert.ok(panelRows(data).some((row) => row.text === "budget: ~200k tokens (per-model override)"))
+})
+
+const GUARD_CHILD_NOW_MS = 1_758_300_000_000
+
+test("sidebarRows emits no muted row across its active, empty, and error outputs with the subagent group included", () => {
+  const scoutChild: SubagentChild = { id: "sess-child-1", type: "scout", updatedAtMs: GUARD_CHILD_NOW_MS, archived: false }
+  const scanChild: SubagentChild = { id: "sess-child-2", type: "scan", updatedAtMs: GUARD_CHILD_NOW_MS - 1, archived: false }
+  const current = sessionPanelData([makeLine()], SESSION_A)
+  assert.ok(current !== undefined)
+  const activeData: PanelData = {
+    source: "/tmp/metrics.jsonl",
+    activeSession: SESSION_A,
+    current,
+    global: globalTotals([makeLine()]),
+    error: undefined,
+    subagentPanels: [
+      { id: scoutChild.id, panel: sessionPanelData([makeLine({ session: scoutChild.id })], scoutChild.id) },
+      { id: scanChild.id, panel: undefined },
+    ],
+  }
+  const emptyData: PanelData = { ...activeData, current: undefined }
+  const errorData: PanelData = { ...activeData, current: undefined, error: "EACCES: permission denied" }
+  const subagentRows = sidebarSubagentsGroup([scoutChild, scanChild], activeData)
+  assert.ok(subagentRows.length > 0)
+
+  for (const data of [activeData, emptyData, errorData]) {
+    const rows = sidebarRows(data, subagentRows)
+    assert.ok(rows.length > 0)
+    for (const row of rows) {
+      assert.notEqual(row.tone, "muted", `muted row leaked into the sidebar: ${JSON.stringify(row)}`)
+    }
+  }
 })
 
 const SIDEBAR_ENABLED_INVALID_VALUES: unknown[] = ["false", 0, null]

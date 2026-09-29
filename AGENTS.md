@@ -13,9 +13,9 @@ Run `make test`, then confirm the runner-reported `tests` total matches the expe
 - `tests/context-manager.test.ts`: 367
 - `tests/panel-data.test.ts`: 65
 - `tests/panel-rows.test.ts`: 7
-- `tests/sidebar-rows.test.ts`: 14
+- `tests/sidebar-rows.test.ts`: 15
 - `tests/sidebar-subagents.test.ts`: 26
-- aggregate: 479
+- aggregate: 480
 
 These counts drift as tests are added; `make ci` recomputes and cross-checks them per run, so treat its numbers as current and this list as a sanity reference.
 
