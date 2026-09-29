@@ -726,7 +726,7 @@ export const formatBytes = (bytes: number): string => {
   return compactNumber(bytes, BYTES_PER_GIGABYTE, GIGABYTE_DECIMALS, " GB")
 }
 
-export type PanelRowTone = "header" | "normal" | "muted" | "warning"
+export type PanelRowTone = "header" | "normal" | "muted" | "warning" | "success" | "info" | "secondary" | "accent"
 
 export type PanelRow = {
   text: string
@@ -809,7 +809,6 @@ const SIDEBAR_SUBAGENTS_LEAD_LABEL = "Subagents"
 const SUBAGENT_AGENT_SINGULAR = "agent"
 const SUBAGENT_AGENTS_UNIT = "agents"
 const SUBAGENT_NO_DATA_TEXT = "no data yet"
-const SUBAGENT_STAT_INDENT = "  "
 
 const sidebarBudgetText = (current: SessionPanel): string =>
   current.budgetTokens === null ? SIDEBAR_BUDGET_INACTIVE_TEXT : `${SIDEBAR_BUDGET_LABEL}: ${formatTokenCount(current.budgetTokens)}`
@@ -821,7 +820,7 @@ const sidebarWatermarkText = (current: SessionPanel): string => {
 
 const sidebarOverByRow = (current: SessionPanel): PanelRow | undefined => {
   if (current.lastRun.deficitTokens === null || current.lastRun.deficitTokens <= 0) return undefined
-  return { text: `${SIDEBAR_OVER_BY_LABEL}: ${formatTokenCount(current.lastRun.deficitTokens)}`, tone: "normal" }
+  return { text: `${SIDEBAR_OVER_BY_LABEL}: ${formatTokenCount(current.lastRun.deficitTokens)}`, tone: "warning" }
 }
 
 const savingsStatText = (label: string, count: number, tokensSaved: number): string =>
@@ -834,15 +833,15 @@ const stashReadsStatText = (stashReads: number, stashHits: number): string =>
 // tombstone per pair, first crossing per reasoning part); the token savings
 // stay the cumulative per-request estimate over the byte totals.
 const sidebarCountersGroup = (current: SessionPanel): PanelRow[] => [
-  { text: savingsStatText(SIDEBAR_EVICTIONS_LABEL, current.totals.evictions, current.totals.evictionTokensSaved), tone: "normal" },
-  { text: savingsStatText(SIDEBAR_DEDUPED_LABEL, current.totals.dedupedUnique, current.totals.dedupTokensSaved), tone: "normal" },
-  { text: savingsStatText(SIDEBAR_REASONING_LABEL, current.totals.reasoningExpiredUnique, current.totals.reasoningTokensSaved), tone: "normal" },
-  { text: stashReadsStatText(current.stashReads, current.totals.stashHits), tone: "normal" },
+  { text: savingsStatText(SIDEBAR_EVICTIONS_LABEL, current.totals.evictions, current.totals.evictionTokensSaved), tone: "success" },
+  { text: savingsStatText(SIDEBAR_DEDUPED_LABEL, current.totals.dedupedUnique, current.totals.dedupTokensSaved), tone: "success" },
+  { text: savingsStatText(SIDEBAR_REASONING_LABEL, current.totals.reasoningExpiredUnique, current.totals.reasoningTokensSaved), tone: "success" },
+  { text: stashReadsStatText(current.stashReads, current.totals.stashHits), tone: "success" },
 ]
 
 const sidebarEvictionGroup = (entry: PanelEvictedEntry): PanelRow[] => [
-  { text: truncateToWidth(`Last evicted: ${entry.tool} ${entry.subject}`, SIDEBAR_COLUMN_LIMIT), tone: "muted" },
-  { text: `${formatBytes(entry.bytes)}, ${entry.messagesAgo} messages ago`, tone: "muted" },
+  { text: truncateToWidth(`Last evicted: ${entry.tool} ${entry.subject}`, SIDEBAR_COLUMN_LIMIT), tone: "info" },
+  { text: `${formatBytes(entry.bytes)}, ${entry.messagesAgo} messages ago`, tone: "info" },
 ]
 
 const withBlankSeparators = (groups: PanelRow[][]): PanelRow[] =>
@@ -900,15 +899,15 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
     aggregates.set(child.type, aggregate)
   }
   const sortedTypes = [...aggregates.entries()].sort(([, first], [, second]) => second.newestUpdatedAtMs - first.newestUpdatedAtMs)
-  const rows: PanelRow[] = [{ text: truncateToWidth(`${SIDEBAR_SUBAGENTS_LEAD_LABEL}: ${kept.length}`, SIDEBAR_COLUMN_LIMIT), tone: "muted" }]
+  const rows: PanelRow[] = [{ text: truncateToWidth(`${SIDEBAR_SUBAGENTS_LEAD_LABEL}: ${kept.length}`, SIDEBAR_COLUMN_LIMIT), tone: "secondary" }]
   const statRow = (statText: string): PanelRow => ({
-    text: truncateToWidth(`${SUBAGENT_STAT_INDENT}${statText}`, SIDEBAR_COLUMN_LIMIT),
-    tone: "muted",
+    text: truncateToWidth(statText, SIDEBAR_COLUMN_LIMIT),
+    tone: "secondary",
   })
   for (const [type, aggregate] of sortedTypes) {
     const agentsText = `${aggregate.count} ${aggregate.count === 1 ? SUBAGENT_AGENT_SINGULAR : SUBAGENT_AGENTS_UNIT}`
     const body = aggregate.hasPanel ? agentsText : SUBAGENT_NO_DATA_TEXT
-    rows.push({ text: truncateToWidth(`${type}: ${body}`, SIDEBAR_COLUMN_LIMIT), tone: "muted" })
+    rows.push({ text: truncateToWidth(`${type}: ${body}`, SIDEBAR_COLUMN_LIMIT), tone: "accent" })
     if (!aggregate.hasPanel) continue
     rows.push(statRow(savingsStatText(SIDEBAR_EVICTIONS_LABEL, aggregate.evictions, aggregate.evictionTokensSaved)))
     rows.push(statRow(savingsStatText(SIDEBAR_DEDUPED_LABEL, aggregate.dedupedUnique, aggregate.dedupTokensSaved)))
@@ -929,7 +928,7 @@ export const sidebarRows = (data: PanelData, subagentRows?: PanelRow[]): PanelRo
     if (current === undefined) return withBlankSeparators(finishSidebarGroups(groups, subagentRows))
   }
   if (current === undefined) {
-    groups.push([{ text: emptyStateText(data), tone: "muted" }])
+    groups.push([{ text: emptyStateText(data), tone: "normal" }])
     return withBlankSeparators(finishSidebarGroups(groups, subagentRows))
   }
   const statGroup: PanelRow[] = [

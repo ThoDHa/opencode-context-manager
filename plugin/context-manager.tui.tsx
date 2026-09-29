@@ -49,6 +49,10 @@ const toneColor = (api: TuiPluginApi, tone: PanelRowTone) => {
   if (tone === "header") return theme.primary
   if (tone === "muted") return theme.textMuted
   if (tone === "warning") return theme.warning
+  if (tone === "success") return theme.success
+  if (tone === "info") return theme.info
+  if (tone === "secondary") return theme.secondary
+  if (tone === "accent") return theme.accent
   return theme.text
 }
 
