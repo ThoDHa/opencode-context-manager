@@ -4287,7 +4287,7 @@ test("live state snapshots keep one file per session in the state directory", as
   }
 })
 
-test("live state snapshot carries the captured budget source and manual mode with a null watermark on a manual run", async () => {
+test("live state snapshot carries the captured budget source manual mode and the armed watermark on a manual run", async () => {
   const stateDir = makeLiveStateDir()
   try {
     const hooks = await loadPluginHooksWithLiveState(stateDir, { manualMode: true })
@@ -4304,8 +4304,8 @@ test("live state snapshot carries the captured budget source and manual mode wit
     assert.equal(snapshot.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
     assert.deepEqual(snapshot.lastRun, {
       estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS),
-      watermarkTokens: null,
-      deficitTokens: null,
+      watermarkTokens: MANUAL_ARMED_WATERMARK_TOKENS,
+      deficitTokens: MANUAL_ARMED_DEFICIT_TOKENS,
     })
     assert.deepEqual(snapshot.totals, { ...STATS_ZEROED_COUNTERS })
     assert.deepEqual(snapshot.stash, { entries: 0, capacity: STASH_LIMIT })
@@ -5798,6 +5798,9 @@ const MANUAL_CAPTURED_LIMIT_SUBJECT = "/data/manual-captured-limit.txt"
 const MANUAL_HINT_SUBJECT = "/data/manual-hint.txt"
 const MANUAL_STATS_SUBJECT = "/data/manual-stats.txt"
 const MANUAL_INVALID_SUBJECT = "/data/manual-invalid.txt"
+const MANUAL_UNWATERMARKED_SUBJECT = "/data/manual-unwatermarked.txt"
+const MANUAL_ARMED_WATERMARK_TOKENS = WATERMARK_PROBE_CONTEXT_LIMIT * WATERMARK_RATIO
+const MANUAL_ARMED_DEFICIT_TOKENS = tokensForChars(STANDARD_BUNDLE_CHARS) - MANUAL_ARMED_WATERMARK_TOKENS
 const MANUAL_REASONING_TEXT = "stale manual-mode reasoning"
 
 test("transform keeps every output untouched under eviction pressure while manualMode is enabled", async () => {
@@ -6550,6 +6553,9 @@ test("the chat.params handler survives hostile payloads without throwing", async
 const DRY_RUN_CANDIDATE_BYTES = 3000
 const DRY_RUN_CANDIDATES = 2
 const DRY_RUN_WATERMARK_TOKENS = 1000
+const DRY_RUN_FILLER_MESSAGES = 2 + RECENT_WINDOW_FILLER_MESSAGES
+const DRY_RUN_BUNDLE_ESTIMATED_TOKENS = tokensForChars(DRY_RUN_CANDIDATES * DRY_RUN_CANDIDATE_BYTES + DRY_RUN_FILLER_MESSAGES * FILLER_TEXT_CHARS)
+const DRY_RUN_ARMED_DEFICIT_TOKENS = DRY_RUN_BUNDLE_ESTIMATED_TOKENS - DRY_RUN_WATERMARK_TOKENS
 // The evictor's walk stops once reclaimed tokens cover the deficit: the
 // bundle estimates ~1515 tokens, deficit ~515, and the first 3000-byte
 // candidate reclaims 750 tokens, so the walk stops after one candidate.
@@ -6687,6 +6693,38 @@ test("metrics log carries wouldEvict fields whenever the manual-mode dry run is 
   }
 })
 
+test("metrics line records the armed watermark and the dry run's deficit on an eventful manual run", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const hooks = await loadPluginHooksWith({
+      manualMode: true,
+      watermarkTokens: DRY_RUN_WATERMARK_TOKENS,
+      metricsLog: true,
+      metricsPath,
+    })
+    await setContextLimit(hooks, SESSION_ID, LARGE_DEFAULT_CONTEXT_TOKENS)
+    const bundle = buildDryRunBundle()
+    await runTransform(hooks, bundle)
+
+    const lines = metricsLinesIn(metricsPath)
+    assert.equal(lines.length, STATS_LOG_FILE_LINES)
+    assert.equal(lines[0].watermarkTokens, DRY_RUN_WATERMARK_TOKENS)
+    assert.equal(lines[0].deficitTokens, DRY_RUN_ARMED_DEFICIT_TOKENS)
+
+    // The recorded figures agree with the dry run's own deficit: one
+    // stand-down arithmetic serves both, so they cannot drift.
+    const stats = await readStats(hooks, SESSION_ID)
+    const dryRun = stats.dryRun as Record<string, unknown>
+    assert.equal(dryRun.deficitTokens, lines[0].deficitTokens)
+    const lastRun = stats.lastRun as Record<string, unknown>
+    assert.equal(lastRun.watermarkTokens, DRY_RUN_WATERMARK_TOKENS)
+    assert.equal(lastRun.deficitTokens, DRY_RUN_ARMED_DEFICIT_TOKENS)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
 test("rehydration ignores run-scoped dry-run fields and seeds only the totals", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
@@ -6766,7 +6804,7 @@ test("transform keeps fence eviction the stash and read_evicted active while man
   assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), `${block}\n`)
 })
 
-test("context_stats reports the manual state in the options block while the captured budget stays visible", async () => {
+test("context_stats reports the manual state the captured budget and the armed watermark last run", async () => {
   const hooks = await loadPluginHooksWith({ manualMode: true })
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -6777,6 +6815,22 @@ test("context_stats reports the manual state in the options block while the capt
   assert.equal(stats.options.manualMode, true)
   assert.equal(stats.modelContextTokens, WATERMARK_PROBE_CONTEXT_LIMIT)
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+  assert.deepEqual(stats.lastRun, {
+    estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS),
+    watermarkTokens: MANUAL_ARMED_WATERMARK_TOKENS,
+    deficitTokens: MANUAL_ARMED_DEFICIT_TOKENS,
+  })
+})
+
+test("context_stats keeps a null watermark and deficit for a manual session with no budget and no watermarkTokens", async () => {
+  const hooks = await loadPluginHooksWith({ manualMode: true })
+
+  const bundle = buildStandardBundle(SESSION_ID, MANUAL_UNWATERMARKED_SUBJECT)
+  await runTransform(hooks, bundle)
+
+  const stats = await readStats(hooks, SESSION_ID)
+  assert.equal(stats.modelContextTokens, null)
+  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
   assert.deepEqual(stats.lastRun, {
     estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS),
     watermarkTokens: null,
