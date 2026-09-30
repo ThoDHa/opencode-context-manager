@@ -2573,6 +2573,12 @@ const EXPIRED_REASONING_PAIR_COUNT = 2
 const EXPIRED_REASONING_PAIR_BYTES = REASONING_COLD_TEXT.length + REASONING_SECOND_COLD_TEXT.length
 const EXPIRED_REASONING_SINGLE_COUNT = 1
 const EXPIRED_REASONING_METADATA = { [REASONING_SIGNATURE_KEY]: REASONING_SIGNATURE_VALUE }
+const RETENTION_WIDE_MESSAGES = 16
+const RETENTION_MID_MESSAGES = 12
+const RETENTION_BOUNDARY_AGE_MESSAGES = 6
+const RETENTION_MIXED_AGED_READ_MESSAGES = 10
+const RETENTION_MIXED_READ_PATH = "/data/retention-aged-read.txt"
+const RETENTION_INVALID_VALUES = [12.5, 0, -1, "16"]
 
 test("transform expires a reasoning part strictly older than the recent window and keeps the parts at and inside the boundary", async () => {
   const hooks = await loadPluginHooks()
@@ -2643,6 +2649,171 @@ test("transform leaves expiry results unchanged on a second transform pass", asy
   assert.deepEqual(bundle, afterFirstPass)
   assert.equal(bundle.messages[0].parts.length, 0)
   assert.equal(bundle.messages[RECENT_WINDOW_MESSAGES + 1].parts.length, 1)
+})
+
+test("transform with reasoningRetentionMessages set to the window produces the same message list as unset", async () => {
+  const unsetHooks = await loadPluginHooks()
+  const explicitHooks = await loadPluginHooksWith({ reasoningRetentionMessages: RECENT_WINDOW_MESSAGES })
+
+  const buildExpiryBundle = (): StrictBundle =>
+    buildBundle([
+      [reasoningPart(REASONING_COLD_TEXT)],
+      ...fillerMessages(RECENT_WINDOW_MESSAGES),
+      [reasoningPart(REASONING_BOUNDARY_TEXT)],
+      [reasoningPart(REASONING_HOT_TEXT)],
+      ...fillerMessages(RECENT_WINDOW_MESSAGES - 2),
+    ])
+  const unsetBundle = buildExpiryBundle()
+  const explicitBundle = buildExpiryBundle()
+  await runTransform(unsetHooks, unsetBundle)
+  await runTransform(explicitHooks, explicitBundle)
+
+  assert.deepEqual(explicitBundle, unsetBundle)
+})
+
+test("transform clamps a reasoningRetentionMessages value below the recent window up to the window", async () => {
+  const hooks = await loadPluginHooksWith({ reasoningRetentionMessages: 2 })
+
+  const bundle = buildBundle([
+    [reasoningPart(REASONING_COLD_TEXT)],
+    ...fillerMessages(1),
+    [reasoningPart(REASONING_BOUNDARY_TEXT)],
+    [reasoningPart(REASONING_HOT_TEXT)],
+    ...fillerMessages(2),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(bundle.messages[0].parts.length, 0)
+  assert.deepEqual(bundle.messages[2].parts, [reasoningPart(REASONING_BOUNDARY_TEXT)])
+  assert.deepEqual(bundle.messages[3].parts, [reasoningPart(REASONING_HOT_TEXT)])
+})
+
+test("transform drops invalid reasoningRetentionMessages values to the unset window behavior", async () => {
+  for (const invalidValue of RETENTION_INVALID_VALUES) {
+    const hooks = await loadPluginHooksWith({ reasoningRetentionMessages: invalidValue })
+
+    const bundle = buildBundle([
+      [reasoningPart(REASONING_COLD_TEXT)],
+      ...fillerMessages(RECENT_WINDOW_MESSAGES),
+      [reasoningPart(REASONING_BOUNDARY_TEXT)],
+      ...fillerMessages(RECENT_WINDOW_MESSAGES - 1),
+    ])
+    await runTransform(hooks, bundle)
+
+    assert.equal(bundle.messages[0].parts.length, 0, `value ${String(invalidValue)}`)
+    assert.equal(bundle.messages[RECENT_WINDOW_MESSAGES + 1].parts.length, 1, `value ${String(invalidValue)}`)
+  }
+})
+
+test("transform keeps reasoning between the recent window and a widened retention age and expires only what sits beyond it", async () => {
+  const hooks = await loadPluginHooksWith({ reasoningRetentionMessages: RETENTION_WIDE_MESSAGES })
+
+  const bundle = buildBundle([
+    [reasoningPart(REASONING_COLD_TEXT)],
+    ...fillerMessages(6),
+    [reasoningPart(REASONING_SECOND_COLD_TEXT)],
+    ...fillerMessages(10),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(bundle.messages[0].parts.length, 0)
+  assert.deepEqual(bundle.messages[7].parts, [reasoningPart(REASONING_SECOND_COLD_TEXT)])
+})
+
+test("transform keeps the reasoning part exactly at the retention age and expires the first part beyond it", async () => {
+  const hooks = await loadPluginHooksWith({ reasoningRetentionMessages: RETENTION_BOUNDARY_AGE_MESSAGES })
+
+  const bundle = buildBundle([
+    [reasoningPart(REASONING_COLD_TEXT)],
+    ...fillerMessages(RETENTION_BOUNDARY_AGE_MESSAGES + 3),
+    [reasoningPart(REASONING_BOUNDARY_TEXT)],
+    ...fillerMessages(RETENTION_BOUNDARY_AGE_MESSAGES - 1),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(bundle.messages[0].parts.length, 0)
+  assert.deepEqual(bundle.messages[RETENTION_BOUNDARY_AGE_MESSAGES + 4].parts, [reasoningPart(REASONING_BOUNDARY_TEXT)])
+})
+
+test("transform expires a retained reasoning part once it ages past the retention boundary as the list grows", async () => {
+  const hooks = await loadPluginHooksWith({ reasoningRetentionMessages: RETENTION_BOUNDARY_AGE_MESSAGES })
+
+  const bundle = buildBundle([[reasoningPart(REASONING_COLD_TEXT)], ...fillerMessages(RETENTION_BOUNDARY_AGE_MESSAGES - 1)])
+  await runTransform(hooks, bundle)
+  assert.deepEqual(bundle.messages[0].parts, [reasoningPart(REASONING_COLD_TEXT)])
+
+  fillerMessages(2).forEach((parts) => bundle.messages.push(syntheticMessageFor(SESSION_ID, parts)))
+  await runTransform(hooks, bundle)
+  assert.equal(bundle.messages[0].parts.length, 0)
+})
+
+test("a widened retention keeps reasoning at an age the aged read tier still evicts a read output at", async () => {
+  const hooks = await loadPluginHooksWith({
+    agedReadEvictionMessages: RETENTION_MIXED_AGED_READ_MESSAGES,
+    reasoningRetentionMessages: RETENTION_WIDE_MESSAGES,
+  })
+
+  const bundle = buildBundle([
+    [reasoningPart(REASONING_COLD_TEXT), pathToolPart(RETENTION_MIXED_READ_PATH, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(RETENTION_MIXED_AGED_READ_MESSAGES),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.ok(toolPartAt(bundle.messages[0], 1).state.output.startsWith(TOMBSTONE_MARKER))
+  assert.deepEqual(bundle.messages[0].parts[0], reasoningPart(REASONING_COLD_TEXT))
+})
+
+test("metrics line counts retained aged reasoning in reasoningInWindowBytes and expires only parts beyond the retention age", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const hooks = await loadPluginHooksWith({
+      metricsLog: true,
+      metricsPath,
+      manualMode: true,
+      reasoningRetentionMessages: RETENTION_MID_MESSAGES,
+    })
+
+    const bundle = buildBundle([
+      [reasoningPart(REASONING_COLD_TEXT)],
+      ...fillerMessages(8),
+      [reasoningPart(REASONING_SECOND_COLD_TEXT)],
+      ...fillerMessages(3),
+      [reasoningPart(REASONING_HOT_TEXT)],
+      ...fillerMessages(3),
+    ])
+    await runTransform(hooks, bundle)
+
+    const lines = metricsLinesIn(metricsPath)
+    assert.equal(lines.length, STATS_LOG_FILE_LINES)
+    assert.equal(lines[0].reasoningExpiredThisRun, EXPIRED_REASONING_SINGLE_COUNT)
+    assert.equal(lines[0].reasoningBytesExpiredThisRun, REASONING_COLD_TEXT.length)
+    assert.equal(lines[0].reasoningInWindowBytes, REASONING_SECOND_COLD_TEXT.length + REASONING_HOT_TEXT.length)
+
+    const stats = await readStats(hooks, SESSION_ID)
+    const composition = stats.composition as Record<string, unknown>
+    assert.equal(composition.reasoningInWindowBytes, REASONING_SECOND_COLD_TEXT.length + REASONING_HOT_TEXT.length)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("transform leaves a widened-retention expiry result unchanged on a second transform pass", async () => {
+  const hooks = await loadPluginHooksWith({ reasoningRetentionMessages: RETENTION_MID_MESSAGES })
+
+  const bundle = buildBundle([
+    [reasoningPart(REASONING_COLD_TEXT)],
+    ...fillerMessages(8),
+    [reasoningPart(REASONING_SECOND_COLD_TEXT)],
+    ...fillerMessages(6),
+  ])
+  await runTransform(hooks, bundle)
+  const afterFirstPass = structuredClone(bundle)
+  await runTransform(hooks, bundle)
+
+  assert.deepEqual(bundle, afterFirstPass)
+  assert.equal(bundle.messages[0].parts.length, 0)
+  assert.deepEqual(bundle.messages[9].parts, [reasoningPart(REASONING_SECOND_COLD_TEXT)])
 })
 
 test("transform never tombstones a default protected task output under watermark pressure that evicts an unprotected sibling", async () => {
@@ -3351,6 +3522,7 @@ test("context_stats reports zeroed counters unknown budget and empty stash for a
     watermark: WATERMARK_RATIO,
     watermarkTokens: null,
     recentWindow: RECENT_WINDOW_MESSAGES,
+    reasoningRetentionMessages: RECENT_WINDOW_MESSAGES,
     minEvictableBytes: MIN_EVICTABLE_BYTES,
     defaultContextTokens: null,
     agedReadEvictionMessages: null,

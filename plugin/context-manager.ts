@@ -145,7 +145,7 @@ const DEFAULT_METRICS_MIN_LINE_INTERVAL_MS = SECONDS_PER_MINUTE * MS_PER_SECOND
 const METRICS_COALESCING_DISABLED_MS = 0
 const STATS_TOOL_NAME = "context_stats"
 const STATS_TOOL_DESCRIPTION =
-  "Return live metrics for the Context Manager in this session: eviction counters, expired reasoning counts, post-eviction touches, stash occupancy, the effective context budget, and the most recent transform run's token estimate; also the newest run's post-transform composition (tool outputs, text, windowed reasoning), the manual-mode dry run when armed, and the last transform fault when one occurred."
+  "Return live metrics for the Context Manager in this session: eviction counters, expired reasoning counts, post-eviction touches, stash occupancy, the effective context budget, and the most recent transform run's token estimate; also the newest run's post-transform composition (tool outputs, text, retained reasoning), the manual-mode dry run when armed, and the last transform fault when one occurred."
 const JSON_INDENT_SPACES = 2
 const CONTEXT_TOKENS_SOURCE_OVERRIDE = "override"
 const CONTEXT_TOKENS_SOURCE_MODEL = "model"
@@ -183,6 +183,7 @@ type ContextManagerOptions = {
   watermark?: number
   watermarkTokens?: number
   agedReadEvictionMessages?: number
+  reasoningRetentionMessages?: number
   recentWindow?: number
   minEvictableBytes?: number
   defaultContextTokens?: number
@@ -233,10 +234,11 @@ type CompiledGlob = { regexp: RegExp; matchesSegments: boolean }
 
 type ResolvedOptions = Omit<
   Required<ContextManagerOptions>,
-  "defaultContextTokens" | "agedReadEvictionMessages" | "modelContextTokens" | "protectedPatterns" | "userFenceEviction" | "watermarkTokens"
+  "defaultContextTokens" | "agedReadEvictionMessages" | "reasoningRetentionMessages" | "modelContextTokens" | "protectedPatterns" | "userFenceEviction" | "watermarkTokens"
 > & {
   defaultContextTokens?: number
   agedReadEvictionMessages?: number
+  reasoningRetentionMessages: number
   watermarkTokens?: number
   modelContextTokens: Record<string, number>
   protectedPatterns: CompiledGlob[]
@@ -488,6 +490,7 @@ const resolveOptions = (raw: ContextManagerOptions = {}): ResolvedOptions => {
     Array.isArray(raw.protectedPatterns) && raw.protectedPatterns.every(isNonEmptyString)
       ? raw.protectedPatterns
       : DEFAULT_PROTECTED_PATTERNS
+  const recentWindow = typeof raw.recentWindow === "number" && raw.recentWindow >= 0 ? Math.floor(raw.recentWindow) : DEFAULT_RECENT_WINDOW_MESSAGES
   return {
     watermark: typeof raw.watermark === "number" && raw.watermark > 0 && raw.watermark < 1 ? raw.watermark : DEFAULT_WATERMARK_RATIO,
     // Absolute watermark, the staged-eviction lever: when set it wins over
@@ -507,7 +510,17 @@ const resolveOptions = (raw: ContextManagerOptions = {}): ResolvedOptions => {
       typeof raw.agedReadEvictionMessages === "number" && Number.isInteger(raw.agedReadEvictionMessages) && raw.agedReadEvictionMessages > 0
         ? raw.agedReadEvictionMessages
         : undefined,
-    recentWindow: typeof raw.recentWindow === "number" && raw.recentWindow >= 0 ? Math.floor(raw.recentWindow) : DEFAULT_RECENT_WINDOW_MESSAGES,
+    // The reasoning expiry boundary's message age from the list tail,
+    // clamped from below at recentWindow: a value below the window would
+    // expire the pending tool-use continuation's signature-carrying
+    // thinking block mid-turn, so the window is a floor, not a peer.
+    reasoningRetentionMessages: Math.max(
+      recentWindow,
+      typeof raw.reasoningRetentionMessages === "number" && Number.isInteger(raw.reasoningRetentionMessages) && raw.reasoningRetentionMessages > 0
+        ? raw.reasoningRetentionMessages
+        : recentWindow,
+    ),
+    recentWindow,
     minEvictableBytes: typeof raw.minEvictableBytes === "number" && raw.minEvictableBytes >= 0 ? raw.minEvictableBytes : DEFAULT_MIN_EVICTABLE_BYTES,
     defaultContextTokens:
       typeof raw.defaultContextTokens === "number" && Number.isFinite(raw.defaultContextTokens) && raw.defaultContextTokens > 0
@@ -625,6 +638,9 @@ const isPatternProtected = (subjects: Subject[], options: ResolvedOptions): bool
 
 const hotFromIndexOf = (messages: MessageBundle[], options: ResolvedOptions): number =>
   messages.length - options.recentWindow
+
+const retentionFromIndexOf = (messages: MessageBundle[], options: ResolvedOptions): number =>
+  messages.length - options.reasoningRetentionMessages
 
 const rangeOf = (input: Record<string, unknown>): SubjectRange | undefined => {
   const offset = input[OFFSET_INPUT_KEY]
@@ -993,27 +1009,30 @@ const stripTerminalNoiseFrom = (output: string): string => {
 }
 
 // The post-transform composition of one run's message list: live tool
-// outputs, text parts, and the reasoning still inside the recent window.
+// outputs, text parts, and the reasoning still inside the retention age.
 // Called after every pass has edited the list, so the three sums are the
 // view the model actually receives. The estimate relation is exact for
 // the two sums the estimate counts: estimatedTokens equals
 // ceil((toolPoolBytes + textChars) / charsPerToken) over this same list,
 // while reasoningInWindowBytes and attachmentBytes are bill components
-// the estimate omits. attachmentBytes reuses the evictor's own
-// attachment accounting (tool-state attachment url payloads via
-// attachmentPayloadCharsOf) — a superset of eviction's tool-state
+// the estimate omits. reasoningInWindowBytes keeps its key while meaning
+// retained bytes: the sum runs over the reasoningRetentionMessages
+// boundary, not the hot window, so it covers the reasoning the request
+// actually carries for any retention setting. attachmentBytes reuses the
+// evictor's own attachment accounting (tool-state attachment url payloads
+// via attachmentPayloadCharsOf) — a superset of eviction's tool-state
 // attachment accounting, extended with file-part url lengths; embedded
 // images inside file parts, data-URI text outputs, and non-attachment
 // host content are the known gaps, not a second measure.
 const runCompositionOf = (messages: MessageBundle[], options: ResolvedOptions): RunComposition => {
-  const hotFromIndex = hotFromIndexOf(messages, options)
+  const retentionFromIndex = retentionFromIndexOf(messages, options)
   let toolPoolBytes = 0
   let textChars = 0
   let reasoningInWindowBytes = 0
   let escapeBytes = 0
   let attachmentBytes = 0
   for (let msgIndex = 0; msgIndex < messages.length; msgIndex += 1) {
-    const inHotWindow = msgIndex >= hotFromIndex
+    const inRetainedWindow = msgIndex >= retentionFromIndex
     for (const part of messages[msgIndex].parts) {
       if (part["type"] === TEXT_PART_TYPE) {
         const text = part["text"]
@@ -1022,7 +1041,7 @@ const runCompositionOf = (messages: MessageBundle[], options: ResolvedOptions): 
       }
       if (part["type"] === REASONING_PART_TYPE) {
         const text = part[REASONING_TEXT_KEY]
-        if (inHotWindow && typeof text === "string") reasoningInWindowBytes += text.length
+        if (inRetainedWindow && typeof text === "string") reasoningInWindowBytes += text.length
         continue
       }
       if (part["type"] === FILE_PART_TYPE) {
@@ -1061,7 +1080,7 @@ const purgeErroredToolInputs = (messages: MessageBundle[], options: ResolvedOpti
 // content (text plus metadata, stringified with the same stable stringify
 // the dedup pass keys inputs by) rather than by a msgIndex cursor like the
 // touch watermark. A part counts unique the first run its identity is seen
-// outside the recent window, and identical-content occurrences count once.
+// outside the retention age, and identical-content occurrences count once.
 // The seen-set lives on the session's metrics entry, whose lifetime bounds
 // the memory: the entry can be evicted from the metrics store and reseeded
 // within one process, re-counting that session's standing set once per
@@ -1070,11 +1089,11 @@ const purgeErroredToolInputs = (messages: MessageBundle[], options: ResolvedOpti
 // seen-set is also bounded, so only a same-content reappearance after a
 // full bound worth of newer parts could count once more.
 const expireAgedReasoning = (metrics: SessionMetrics, messages: MessageBundle[], options: ResolvedOptions): ReasoningExpiry => {
-  const hotFromIndex = hotFromIndexOf(messages, options)
+  const retentionFromIndex = retentionFromIndexOf(messages, options)
   let parts = 0
   let bytes = 0
   let unique = 0
-  for (let msgIndex = 0; msgIndex < hotFromIndex; msgIndex += 1) {
+  for (let msgIndex = 0; msgIndex < retentionFromIndex; msgIndex += 1) {
     const messageParts = messages[msgIndex].parts
     for (let partIndex = messageParts.length - 1; partIndex >= 0; partIndex -= 1) {
       const part = messageParts[partIndex]
@@ -2018,6 +2037,7 @@ const executeStatsTool = (source: StatsSource, toolContext: unknown): string => 
       watermark: source.options.watermark,
       watermarkTokens: source.options.watermarkTokens ?? null,
       recentWindow: source.options.recentWindow,
+      reasoningRetentionMessages: source.options.reasoningRetentionMessages,
       minEvictableBytes: source.options.minEvictableBytes,
       defaultContextTokens: source.options.defaultContextTokens ?? null,
       agedReadEvictionMessages: source.options.agedReadEvictionMessages ?? null,
