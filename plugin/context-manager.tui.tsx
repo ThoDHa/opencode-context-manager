@@ -65,6 +65,11 @@ type RowsViewProps = { api: TuiPluginApi; rows: PanelRow[] }
 // without flattening it. labelBold rows (subagent per-type lines) render
 // the label span bold. Rows without the "Label: value" shape keep the
 // single-span render exactly as before.
+//
+// Per-part color rides the style prop, not fg: on the host runtime
+// (opencode 1.18.33), setProperty applies only href and style to
+// text-node children (span/strong), so a plain fg there is silently
+// dropped; style.fg is the sanctioned channel, used by the host's own UI.
 const RowsView = (props: RowsViewProps) => (
   <box flexDirection="column">
     {props.rows.map((row) => {
@@ -74,11 +79,11 @@ const RowsView = (props: RowsViewProps) => (
       return (
         <text>
           {row.labelBold === true ? (
-            <strong fg={theme.textMuted}>{parts.label}: </strong>
+            <strong style={{ fg: theme.textMuted }}>{parts.label}: </strong>
           ) : (
-            <span fg={theme.textMuted}>{parts.label}: </span>
+            <span style={{ fg: theme.textMuted }}>{parts.label}: </span>
           )}
-          <span fg={toneColor(props.api, row.tone)}>{parts.value}</span>
+          <span style={{ fg: toneColor(props.api, row.tone) }}>{parts.value}</span>
         </text>
       )
     })}
