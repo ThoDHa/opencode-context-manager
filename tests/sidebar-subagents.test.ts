@@ -103,7 +103,7 @@ test("sidebarSubagentsGroup renders the type's agent count on its row and four s
 
   assert.deepEqual(rows, [
     { text: "Subagents: 2", tone: "secondary" },
-    { text: "scout: 2 agents", tone: "accent" },
+    { text: "Scout: 2 agents", tone: "accent", labelBold: true },
     { text: "Evictions: 2, ~900 tokens", tone: "secondary" },
     { text: "Deduped: 10, ~4.5k tokens", tone: "secondary" },
     { text: "Reasoning expired: 12, ~1.3k tokens", tone: "secondary" },
@@ -119,7 +119,7 @@ test("sidebarSubagentsGroup uses the singular agent unit for a single-child type
 
   assert.deepEqual(rows, [
     { text: "Subagents: 1", tone: "secondary" },
-    { text: "scout: 1 agent", tone: "accent" },
+    { text: "Scout: 1 agent", tone: "accent", labelBold: true },
     { text: "Evictions: 1, ~900 tokens", tone: "secondary" },
     { text: EXPECTED_DEDUPED_STAT, tone: "secondary" },
     { text: EXPECTED_REASONING_STAT, tone: "secondary" },
@@ -134,7 +134,7 @@ test("sidebarSubagentsGroup renders no data yet for a type whose children all la
 
   assert.deepEqual(rows, [
     { text: "Subagents: 1", tone: "secondary" },
-    { text: "general: no data yet", tone: "accent" },
+    { text: "General: no data yet", tone: "accent", labelBold: true },
   ])
 })
 
@@ -147,7 +147,7 @@ test("sidebarSubagentsGroup sums the landed panels of a type and keeps the agent
 
   assert.deepEqual(rows, [
     { text: "Subagents: 2", tone: "secondary" },
-    { text: "scout: 2 agents", tone: "accent" },
+    { text: "Scout: 2 agents", tone: "accent", labelBold: true },
     { text: "Evictions: 2, ~900 tokens", tone: "secondary" },
     { text: EXPECTED_DEDUPED_STAT, tone: "secondary" },
     { text: EXPECTED_REASONING_STAT, tone: "secondary" },
@@ -165,12 +165,12 @@ test("sidebarSubagentsGroup sorts type rows by the type's most recent child upda
 
   assert.deepEqual(rows, [
     { text: "Subagents: 3", tone: "secondary" },
-    { text: "probe: 2 agents", tone: "accent" },
+    { text: "Probe: 2 agents", tone: "accent", labelBold: true },
     { text: "Evictions: 2, ~900 tokens", tone: "secondary" },
     { text: EXPECTED_DEDUPED_STAT, tone: "secondary" },
     { text: EXPECTED_REASONING_STAT, tone: "secondary" },
     { text: "Stash reads: 10, 4 hits", tone: "secondary" },
-    { text: "scan: no data yet", tone: "accent" },
+    { text: "Scan: no data yet", tone: "accent", labelBold: true },
   ])
 })
 
@@ -182,7 +182,7 @@ test("sidebarSubagentsGroup renders an ancient child alongside fresh ones regard
   const rows = rowsWithinWidth(sidebarSubagentsGroup([ancient, fresh], data))
 
   assert.deepEqual(rows[0], { text: "Subagents: 2", tone: "secondary" })
-  assert.deepEqual(rows[rows.length - 1], { text: "scan: no data yet", tone: "accent" })
+  assert.deepEqual(rows[rows.length - 1], { text: "Scan: no data yet", tone: "accent", labelBold: true })
 })
 
 test("sidebarSubagentsGroup excludes an archived child from the count and the type rows", () => {
@@ -194,12 +194,22 @@ test("sidebarSubagentsGroup excludes an archived child from the count and the ty
 
   assert.deepEqual(rows, [
     { text: "Subagents: 1", tone: "secondary" },
-    { text: "probe: 1 agent", tone: "accent" },
+    { text: "Probe: 1 agent", tone: "accent", labelBold: true },
     { text: "Evictions: 5, ~3.1k tokens", tone: "secondary" },
     { text: EXPECTED_DEDUPED_STAT, tone: "secondary" },
     { text: EXPECTED_REASONING_STAT, tone: "secondary" },
     { text: "Stash reads: 10, 4 hits", tone: "secondary" },
   ])
+})
+
+test("sidebarSubagentsGroup leaves the raw child type untouched while rendering a capitalized row label", () => {
+  const child = makeChild({ type: "worker" })
+  const data = dataWithChildren([{ id: child.id, panel: makePanel(child.id) }])
+
+  const rows = rowsWithinWidth(sidebarSubagentsGroup([child], data))
+
+  assert.equal(child.type, "worker")
+  assert.deepEqual(rows[1], { text: "Worker: 1 agent", tone: "accent", labelBold: true })
 })
 
 test("sidebarSubagentsGroup caps an over-long type label's row at the sidebar column limit and keeps the stat rows beneath it", () => {
@@ -209,7 +219,7 @@ test("sidebarSubagentsGroup caps an over-long type label's row at the sidebar co
   const rows = rowsWithinWidth(sidebarSubagentsGroup([child], data))
 
   assert.equal(rows.length, 6)
-  assert.equal(rows[1].text, `${"a".repeat(SIDEBAR_COLUMN_LIMIT - 1)}…`)
+  assert.equal(rows[1].text, `A${"a".repeat(SIDEBAR_COLUMN_LIMIT - 2)}…`)
   assert.equal(rows[2].text, "Evictions: 5, ~3.1k tokens")
   assert.equal(rows[3].text, EXPECTED_DEDUPED_STAT)
   assert.equal(rows[4].text, EXPECTED_REASONING_STAT)
@@ -224,16 +234,6 @@ test("sidebarSubagentsGroup returns no rows when every child is archived", () =>
   const archived = makeChild({ archived: true })
 
   assert.deepEqual(sidebarSubagentsGroup([archived], dataWithChildren()), [])
-})
-
-test("sidebarSubagentsGroup leaves the raw child type untouched while rendering a capitalized row label", () => {
-  const child = makeChild({ type: "worker" })
-  const data = dataWithChildren([{ id: child.id, panel: makePanel(child.id) }])
-
-  const rows = rowsWithinWidth(sidebarSubagentsGroup([child], data))
-
-  assert.equal(child.type, "worker")
-  assert.deepEqual(rows[1], { text: "Worker: 1 agent", tone: "accent", labelBold: true })
 })
 
 test("sidebarRows appends a non-empty subagent group as the last blank-line-separated group", () => {
