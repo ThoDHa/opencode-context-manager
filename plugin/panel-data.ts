@@ -726,11 +726,14 @@ export const formatBytes = (bytes: number): string => {
   return compactNumber(bytes, BYTES_PER_GIGABYTE, GIGABYTE_DECIMALS, " GB")
 }
 
-export type PanelRowTone = "header" | "normal" | "muted" | "warning" | "success" | "info" | "secondary" | "accent"
+export type PanelRowTone = "header" | "normal" | "warning" | "success" | "info"
 
 export type PanelRow = {
   text: string
   tone: PanelRowTone
+  // Overrides the renderer's default accent label color for a "Label:
+  // value" row; set on the subagents group's agent-type rows.
+  labelTone?: PanelRowTone
   // Marks the label span of a "Label: value" row as bold in the TUI. Set
   // only by the subagents group's per-type rows; absent everywhere else.
   labelBold?: boolean
@@ -794,7 +797,7 @@ export const panelRows = (data: PanelData): PanelRow[] => {
     if (current === undefined) return rows
   }
   if (current === undefined) {
-    rows.push({ text: emptyStateText(data), tone: "muted" })
+    rows.push({ text: emptyStateText(data), tone: "normal" })
     return rows
   }
   rows.push({ text: budgetText(current), tone: "normal" })
@@ -802,7 +805,7 @@ export const panelRows = (data: PanelData): PanelRow[] => {
   rows.push({ text: countersText(current), tone: "normal" })
   const newestEviction = current.recentEvictions[0]
   if (newestEviction !== undefined) {
-    rows.push({ text: `${LAST_EVICTION_ROW_LABEL} ${evictionText(newestEviction)}`, tone: "muted" })
+    rows.push({ text: `${LAST_EVICTION_ROW_LABEL} ${evictionText(newestEviction)}`, tone: "info" })
   }
   return rows
 }
@@ -923,15 +926,15 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
     aggregates.set(child.type, aggregate)
   }
   const sortedTypes = [...aggregates.entries()].sort(([, first], [, second]) => second.newestUpdatedAtMs - first.newestUpdatedAtMs)
-  const rows: PanelRow[] = [{ text: truncateToWidth(`${SIDEBAR_SUBAGENTS_LEAD_LABEL}: ${kept.length}`, SIDEBAR_COLUMN_LIMIT), tone: "secondary" }]
+  const rows: PanelRow[] = [{ text: truncateToWidth(`${SIDEBAR_SUBAGENTS_LEAD_LABEL}: ${kept.length}`, SIDEBAR_COLUMN_LIMIT), tone: "normal" }]
   const statRow = (statText: string): PanelRow => ({
     text: truncateToWidth(statText, SIDEBAR_COLUMN_LIMIT),
-    tone: "secondary",
+    tone: "normal",
   })
   for (const [type, aggregate] of sortedTypes) {
     const agentsText = `${aggregate.count} ${aggregate.count === 1 ? SUBAGENT_AGENT_SINGULAR : SUBAGENT_AGENTS_UNIT}`
     const body = aggregate.hasPanel ? agentsText : SUBAGENT_NO_DATA_TEXT
-    rows.push({ text: truncateToWidth(`${capitalizeLabel(type)}: ${body}`, SIDEBAR_COLUMN_LIMIT), tone: "accent", labelBold: true })
+    rows.push({ text: truncateToWidth(`${capitalizeLabel(type)}: ${body}`, SIDEBAR_COLUMN_LIMIT), tone: "normal", labelTone: "info", labelBold: true })
     if (!aggregate.hasPanel) continue
     rows.push(statRow(savingsStatText(SIDEBAR_EVICTIONS_LABEL, aggregate.evictions, aggregate.evictionTokensSaved)))
     rows.push(statRow(savingsStatText(SIDEBAR_DEDUPED_LABEL, aggregate.dedupedUnique, aggregate.dedupTokensSaved)))

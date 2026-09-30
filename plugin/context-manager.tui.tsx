@@ -48,23 +48,19 @@ type PanelProps = { api: TuiPluginApi; data: PanelData }
 const toneColor = (api: TuiPluginApi, tone: PanelRowTone) => {
   const theme = api.theme.current
   if (tone === "header") return theme.primary
-  if (tone === "muted") return theme.textMuted
   if (tone === "warning") return theme.warning
   if (tone === "success") return theme.success
   if (tone === "info") return theme.info
-  if (tone === "secondary") return theme.secondary
-  if (tone === "accent") return theme.accent
   return theme.text
 }
 
 type RowsViewProps = { api: TuiPluginApi; rows: PanelRow[] }
 
-// The label/value color contract: the label always renders in textMuted,
-// the value carries the row's tone, and a muted row stays whole-line
-// muted (both spans textMuted), so the tone hierarchy moves to the value
-// without flattening it. labelBold rows (subagent per-type lines) render
-// the label span bold. Rows without the "Label: value" shape keep the
-// single-span render exactly as before.
+// The label/value color contract: a "Label: value" row's label span
+// defaults to the theme's accent color, labelTone overrides that default
+// (the subagents group's agent-name rows use info), and the value span
+// carries the row's tone. Rows without the "Label: value" shape keep the
+// single-span render in the row tone.
 //
 // Per-part color rides the style prop, not fg: on the host runtime
 // (opencode 1.18.33), setProperty applies only href and style to
@@ -76,12 +72,13 @@ const RowsView = (props: RowsViewProps) => (
       const parts = splitRowText(row.text)
       if (parts === undefined) return <text fg={toneColor(props.api, row.tone)}>{row.text}</text>
       const theme = props.api.theme.current
+      const labelColor = row.labelTone !== undefined ? toneColor(props.api, row.labelTone) : theme.accent
       return (
         <text>
           {row.labelBold === true ? (
-            <strong style={{ fg: theme.textMuted }}>{parts.label}: </strong>
+            <strong style={{ fg: labelColor }}>{parts.label}: </strong>
           ) : (
-            <span style={{ fg: theme.textMuted }}>{parts.label}: </span>
+            <span style={{ fg: labelColor }}>{parts.label}: </span>
           )}
           <span style={{ fg: toneColor(props.api, row.tone) }}>{parts.value}</span>
         </text>
