@@ -45,18 +45,19 @@ Installing the plugin means placing its four source files (`context-manager.ts`,
 - [opencode](https://opencode.ai) 1.18.29 or later, the host application: its sessions run the plugin, and its TUI serves the `/context` panel and the session sidebar. The version floor comes from the plugin entry's shape, not the features: the core entry registers through the v1 plugin-module object (`export default { id, server }`), a default export the plugin loader reads as an object entrypoint only from 1.18.29 on, so an older build rejects the plugin at load. The two TUI views additionally need a current opencode build carrying the slots API: the TUI module detects `api.slots.register` (a property check on the api object the host passes) and registers nothing on a build without it, so the views are absent while the core transform and both tools work unchanged.
 - git, to clone this repository and to pull later updates into it
 - make, to run the `test`, `install`, and `uninstall` targets the `Makefile` defines
-- node, to run the test suite, since `make test` invokes `node --test` over the core suite (`tests/context-manager.test.ts`) and the panel suites (`tests/panel-data.test.ts`, `tests/panel-rows.test.ts`, `tests/sidebar-rows.test.ts`, `tests/sidebar-subagents.test.ts`)
+- node 24 or later, to run the test suite, since `make test` invokes `node --test` over the core suite (`tests/context-manager.test.ts`), the panel suites (`tests/panel-data.test.ts`, `tests/panel-rows.test.ts`, `tests/sidebar-rows.test.ts`, `tests/sidebar-subagents.test.ts`), and the TUI harness smoke suite (`tests/tui-harness.test.ts`); the floor is 24 because the harness's `node:module` `registerHooks` mechanism assumes it
 
 ### Install
 
 ```sh
 git clone https://github.com/ThoDHa/opencode-context-manager.git
 cd opencode-context-manager
+npm ci
 make test
 make install
 ```
 
-`make install` creates `~/.config/opencode/context-manager/` when it is missing and symlinks the four plugin files into it. The install is idempotent: a rerun replaces existing symlinks in place. It never overwrites anything else: when a regular file or directory occupies a target path, the install aborts with an error naming the path, and the file must be removed by hand before the install can succeed. The install places the files only; the two config entries in [Configuration](#configuration) load them, and without the `opencode.json` entry the plugin does not run, since nothing scans the install directory.
+`npm ci` installs the dev-only test dependencies from the committed lockfile (solid-js and the babel presets the TUI test harness compiles the plugin's `.tsx` with) and is a prerequisite for `make test` and `make ci`; the plugin itself gains no runtime dependency. `make install` creates `~/.config/opencode/context-manager/` when it is missing and symlinks the four plugin files into it. The install is idempotent: a rerun replaces existing symlinks in place. It never overwrites anything else: when a regular file or directory occupies a target path, the install aborts with an error naming the path, and the file must be removed by hand before the install can succeed. The install places the files only; the two config entries in [Configuration](#configuration) load them, and without the `opencode.json` entry the plugin does not run, since nothing scans the install directory.
 
 ### How it runs
 
@@ -64,7 +65,7 @@ The install plus the two config entries are the whole deployment: the four symli
 
 ### Staying updated
 
-The installed entries are symlinks into the clone, so an update is `git pull` in the repository: the links resolve into the working tree, and the code the plugin runs is whatever the pull left there. `make test` re-runs the five suites against the pulled tree.
+The installed entries are symlinks into the clone, so an update is `git pull` in the repository: the links resolve into the working tree, and the code the plugin runs is whatever the pull left there. `npm ci` refreshes the test dependencies when the lockfile moved, and `make test` re-runs the six suites against the pulled tree.
 
 ### Upgrading from the plugin directory
 
@@ -233,7 +234,7 @@ Every value shown is that option's default, so omitting any key yields the same 
 
 ## Context Manager Plugin Design
 
-The Context Manager is the plugin at `plugin/context-manager.ts`, with the TUI panel and sidebar in `context-manager.tui.tsx`, their shared data layer in `panel-data.ts`, and the shared totals schema both data sides consume in `schema.ts`. It hooks the transform opencode runs on the message list before every model call and trims what the provider is about to receive. `make test` pins the mechanism claims (core suite `tests/context-manager.test.ts`, panel suites `tests/panel-data.test.ts`, `tests/panel-rows.test.ts`, `tests/sidebar-rows.test.ts`, `tests/sidebar-subagents.test.ts`); the comparisons, the economics, and the observed session below are argument and measurement, not test outputs.
+The Context Manager is the plugin at `plugin/context-manager.ts`, with the TUI panel and sidebar in `context-manager.tui.tsx`, their shared data layer in `panel-data.ts`, and the shared totals schema both data sides consume in `schema.ts`. It hooks the transform opencode runs on the message list before every model call and trims what the provider is about to receive. `make test` pins the mechanism claims (core suite `tests/context-manager.test.ts`, panel suites `tests/panel-data.test.ts`, `tests/panel-rows.test.ts`, `tests/sidebar-rows.test.ts`, `tests/sidebar-subagents.test.ts`, and TUI harness suite `tests/tui-harness.test.ts`); the comparisons, the economics, and the observed session below are argument and measurement, not test outputs.
 
 ### Why this plugin exists
 

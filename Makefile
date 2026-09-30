@@ -1,7 +1,9 @@
 PLUGIN_FILES := context-manager.ts context-manager.tui.tsx panel-data.ts schema.ts
 PLUGIN_SRC := $(addprefix plugin/,$(PLUGIN_FILES))
 PLUGIN_TARGET_DIR := $(HOME)/.config/opencode/context-manager
-TEST_FILES := tests/context-manager.test.ts tests/panel-data.test.ts tests/panel-rows.test.ts tests/sidebar-rows.test.ts tests/sidebar-subagents.test.ts
+TUI_HOOK := $(CURDIR)/tests/tui/hooks.mjs
+NODE_TEST_ENV := NODE_OPTIONS="--import $(TUI_HOOK)"
+TEST_FILES := tests/context-manager.test.ts tests/panel-data.test.ts tests/panel-rows.test.ts tests/sidebar-rows.test.ts tests/sidebar-subagents.test.ts tests/tui-harness.test.ts
 
 .PHONY: all test ci install uninstall help
 
@@ -10,7 +12,7 @@ all: test
 
 # Run the plugin test suites
 test:
-	node --test $(TEST_FILES)
+	$(NODE_TEST_ENV) node --test $(TEST_FILES)
 
 # CI guard: run each suite file in its own node --test invocation, require
 # every invocation to exit 0 and to report at least one test, and require
@@ -22,7 +24,7 @@ test:
 ci:
 	@test_count() { grep -E '^[^0-9]*tests [0-9]+[[:space:]]*$$' | grep -o '[0-9]*' | tail -n 1; }; \
 	total=0; \
-	expected=$$(node --test $(TEST_FILES) | test_count); \
+	expected=$$(env $(NODE_TEST_ENV) node --test $(TEST_FILES) | test_count); \
 	if [ -z "$$expected" ]; then \
 		echo "FAIL: aggregate run produced no measurable test count" >&2; \
 		exit 1; \
@@ -34,7 +36,7 @@ ci:
 			;; \
 	esac; \
 	for file in $(TEST_FILES); do \
-		out=$$(node --test $$file 2>&1); \
+		out=$$(env $(NODE_TEST_ENV) node --test $$file 2>&1); \
 		status=$$?; \
 		count=$$(printf '%s\n' "$$out" | test_count); \
 		if [ "$$status" -ne 0 ]; then \
@@ -93,8 +95,10 @@ help:
 	@echo "opencode-context-manager"
 	@echo "===================="
 	@echo ""
-	@echo "  make test      - Run the plugin test suites (node --test)"
+	@echo "  make test      - Run the plugin test suites (node --test with the TUI compile hook)"
 	@echo "  make ci        - Per-file CI guard: every suite loads, counts sum to the aggregate"
 	@echo "  make install   - Symlink the plugin files into $(PLUGIN_TARGET_DIR)/"
 	@echo "  make uninstall - Remove the plugin symlinks from $(PLUGIN_TARGET_DIR)/"
 	@echo "  make help      - Show this help"
+	@echo ""
+	@echo "npm ci is a prerequisite for test targets: test dependencies are dev-only"
