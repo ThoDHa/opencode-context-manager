@@ -5,6 +5,7 @@ import {
   globalTotals,
   panelRows,
   sessionPanelData,
+  splitRowText,
 } from "../plugin/panel-data.ts"
 import {
   EVICTED_BYTES,
@@ -23,6 +24,33 @@ import {
 } from "./panel-fixtures.ts"
 
 const COLLECTED_EVICTION_COUNT = 2
+
+test("splitRowText splits a label value row at the first colon-space", () => {
+  assert.deepEqual(splitRowText("budget: ~200k tokens"), { label: "budget", value: "~200k tokens" })
+})
+
+test("splitRowText splits at the first colon-space only and keeps later colons in the value", () => {
+  assert.deepEqual(splitRowText("last evicted: read /data/a.txt (3 kB, 5 msgs ago: check)"), {
+    label: "last evicted",
+    value: "read /data/a.txt (3 kB, 5 msgs ago: check)",
+  })
+})
+
+test("splitRowText returns undefined for a row without any colon", () => {
+  assert.equal(splitRowText("Context Manager"), undefined)
+})
+
+test("splitRowText returns undefined when the colon has no trailing space", () => {
+  assert.equal(splitRowText("metrics log unreadable:EACCES"), undefined)
+})
+
+test("splitRowText returns undefined when the value after the colon-space is empty", () => {
+  assert.equal(splitRowText("budget: "), undefined)
+})
+
+test("splitRowText returns undefined for a row whose label before the colon-space is empty", () => {
+  assert.equal(splitRowText(": value"), undefined)
+})
 
 test("panelRows renders the session's budget, last run, compact counters, and newest eviction", () => {
   const data = {

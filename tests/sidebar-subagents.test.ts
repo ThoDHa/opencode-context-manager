@@ -226,6 +226,16 @@ test("sidebarSubagentsGroup returns no rows when every child is archived", () =>
   assert.deepEqual(sidebarSubagentsGroup([archived], dataWithChildren()), [])
 })
 
+test("sidebarSubagentsGroup leaves the raw child type untouched while rendering a capitalized row label", () => {
+  const child = makeChild({ type: "worker" })
+  const data = dataWithChildren([{ id: child.id, panel: makePanel(child.id) }])
+
+  const rows = rowsWithinWidth(sidebarSubagentsGroup([child], data))
+
+  assert.equal(child.type, "worker")
+  assert.deepEqual(rows[1], { text: "Worker: 1 agent", tone: "accent", labelBold: true })
+})
+
 test("sidebarRows appends a non-empty subagent group as the last blank-line-separated group", () => {
   const data = dataWithChildren()
   const base = sidebarRows(data)

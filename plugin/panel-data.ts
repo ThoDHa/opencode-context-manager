@@ -731,7 +731,31 @@ export type PanelRowTone = "header" | "normal" | "muted" | "warning" | "success"
 export type PanelRow = {
   text: string
   tone: PanelRowTone
+  // Marks the label span of a "Label: value" row as bold in the TUI. Set
+  // only by the subagents group's per-type rows; absent everywhere else.
+  labelBold?: boolean
 }
+
+export type SplitRowText = { label: string; value: string }
+
+const LABEL_VALUE_SEPARATOR = ": "
+
+// Same seam as canRegisterSidebar: the .tsx cannot export logic node can
+// load, so the split predicate lives here and the TUI imports it. A row
+// has the "Label: value" shape only when the first ": " is preceded by a
+// non-empty label and followed by a non-empty value; anything else
+// (headers, separators, continuation lines) stays whole-line.
+export const splitRowText = (text: string): SplitRowText | undefined => {
+  const separatorIndex = text.indexOf(LABEL_VALUE_SEPARATOR)
+  if (separatorIndex < 0) return undefined
+  const label = text.slice(0, separatorIndex)
+  const value = text.slice(separatorIndex + LABEL_VALUE_SEPARATOR.length)
+  if (label.length === 0 || value.length === 0) return undefined
+  return { label, value }
+}
+
+const capitalizeLabel = (label: string): string =>
+  label.length === 0 ? label : `${label[0].toUpperCase()}${label.slice(1)}`
 
 const budgetText = (current: SessionPanel): string => {
   const label = budgetSourceLabel(current.budgetSource)
@@ -907,7 +931,7 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
   for (const [type, aggregate] of sortedTypes) {
     const agentsText = `${aggregate.count} ${aggregate.count === 1 ? SUBAGENT_AGENT_SINGULAR : SUBAGENT_AGENTS_UNIT}`
     const body = aggregate.hasPanel ? agentsText : SUBAGENT_NO_DATA_TEXT
-    rows.push({ text: truncateToWidth(`${type}: ${body}`, SIDEBAR_COLUMN_LIMIT), tone: "accent" })
+    rows.push({ text: truncateToWidth(`${capitalizeLabel(type)}: ${body}`, SIDEBAR_COLUMN_LIMIT), tone: "accent", labelBold: true })
     if (!aggregate.hasPanel) continue
     rows.push(statRow(savingsStatText(SIDEBAR_EVICTIONS_LABEL, aggregate.evictions, aggregate.evictionTokensSaved)))
     rows.push(statRow(savingsStatText(SIDEBAR_DEDUPED_LABEL, aggregate.dedupedUnique, aggregate.dedupTokensSaved)))

@@ -31,6 +31,7 @@ import {
   resolveSubagentChildren,
   sidebarRows,
   sidebarSubagentsGroup,
+  splitRowText,
   type PanelData,
   type PanelRow,
   type PanelRowTone,
@@ -58,11 +59,30 @@ const toneColor = (api: TuiPluginApi, tone: PanelRowTone) => {
 
 type RowsViewProps = { api: TuiPluginApi; rows: PanelRow[] }
 
+// The label/value color contract: the label always renders in textMuted,
+// the value carries the row's tone, and a muted row stays whole-line
+// muted (both spans textMuted), so the tone hierarchy moves to the value
+// without flattening it. labelBold rows (subagent per-type lines) render
+// the label span bold. Rows without the "Label: value" shape keep the
+// single-span render exactly as before.
 const RowsView = (props: RowsViewProps) => (
   <box flexDirection="column">
-    {props.rows.map((row) => (
-      <text fg={toneColor(props.api, row.tone)}>{row.text}</text>
-    ))}
+    {props.rows.map((row) => {
+      const parts = splitRowText(row.text)
+      if (parts === undefined) return <text fg={toneColor(props.api, row.tone)}>{row.text}</text>
+      const muted = row.tone === "muted"
+      const valueColor = muted ? props.api.theme.current.textMuted : toneColor(props.api, row.tone)
+      return (
+        <text>
+          {row.labelBold === true ? (
+            <strong fg={props.api.theme.current.textMuted}>{parts.label}: </strong>
+          ) : (
+            <span fg={props.api.theme.current.textMuted}>{parts.label}: </span>
+          )}
+          <span fg={valueColor}>{parts.value}</span>
+        </text>
+      )
+    })}
   </box>
 )
 
