@@ -70,14 +70,14 @@ const RowsView = (props: RowsViewProps) => (
     {props.rows.map((row) => {
       const parts = splitRowText(row.text)
       if (parts === undefined) return <text fg={toneColor(props.api, row.tone)}>{row.text}</text>
-      const muted = row.tone === "muted"
-      const valueColor = muted ? props.api.theme.current.textMuted : toneColor(props.api, row.tone)
+      const theme = props.api.theme.current
+      const valueColor = row.tone === "muted" ? theme.textMuted : toneColor(props.api, row.tone)
       return (
         <text>
           {row.labelBold === true ? (
-            <strong fg={props.api.theme.current.textMuted}>{parts.label}: </strong>
+            <strong fg={theme.textMuted}>{parts.label}: </strong>
           ) : (
-            <span fg={props.api.theme.current.textMuted}>{parts.label}: </span>
+            <span fg={theme.textMuted}>{parts.label}: </span>
           )}
           <span fg={valueColor}>{parts.value}</span>
         </text>
