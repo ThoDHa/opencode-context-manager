@@ -212,6 +212,24 @@ test("sidebarSubagentsGroup leaves the raw child type untouched while rendering 
   assert.deepEqual(rows[1], { text: "Worker: 1 agent", tone: "accent", labelBold: true })
 })
 
+test("sidebarSubagentsGroup capitalizes only the first letter of an already-capitalized or hyphenated type", () => {
+  const alreadyCapitalized = makeChild({ id: "sess-child-1", type: "Scout" })
+  const hyphenated = makeChild({ id: "sess-child-2", type: "code-reviewer", updatedAtMs: NOW_MS - MINUTE_MS })
+  const data = dataWithChildren([{ id: alreadyCapitalized.id, panel: makePanel(alreadyCapitalized.id) }])
+
+  const rows = rowsWithinWidth(sidebarSubagentsGroup([alreadyCapitalized, hyphenated], data))
+
+  assert.deepEqual(rows, [
+    { text: "Subagents: 2", tone: "secondary" },
+    { text: "Scout: 1 agent", tone: "accent", labelBold: true },
+    { text: "Evictions: 5, ~3.1k tokens", tone: "secondary" },
+    { text: EXPECTED_DEDUPED_STAT, tone: "secondary" },
+    { text: EXPECTED_REASONING_STAT, tone: "secondary" },
+    { text: "Stash reads: 10, 4 hits", tone: "secondary" },
+    { text: "Code-reviewer: no data yet", tone: "accent", labelBold: true },
+  ])
+})
+
 test("sidebarSubagentsGroup caps an over-long type label's row at the sidebar column limit and keeps the stat rows beneath it", () => {
   const child = makeChild({ type: "a".repeat(60) })
   const data = dataWithChildren([{ id: child.id, panel: makePanel(child.id) }])

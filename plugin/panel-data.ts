@@ -21,7 +21,7 @@ export const resolveSidebarSubagents = (value: unknown): boolean =>
   typeof value === "boolean" ? value : DEFAULT_SIDEBAR_SUBAGENTS
 
 // True when the host TUI api object actually exposes the slots registry the
-// sidebar needs. The .tsx cannot export logic node can load, so the
+// sidebar needs. The .tsx cannot export logic that node can load, so the
 // predicate lives here and the TUI imports it: a host without the slots
 // API (or with a non-callable register) gets no sidebar registration and
 // no error, matching the README's degradation promise.
@@ -740,8 +740,8 @@ export type SplitRowText = { label: string; value: string }
 
 const LABEL_VALUE_SEPARATOR = ": "
 
-// Same seam as canRegisterSidebar: the .tsx cannot export logic node can
-// load, so the split predicate lives here and the TUI imports it. A row
+// Same seam as canRegisterSidebar: the .tsx cannot export logic that node
+// can load, so the split predicate lives here and the TUI imports it. A row
 // has the "Label: value" shape only when the first ": " is preceded by a
 // non-empty label and followed by a non-empty value; anything else
 // (headers, separators, continuation lines) stays whole-line.
