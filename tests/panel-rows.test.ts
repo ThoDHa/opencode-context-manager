@@ -186,7 +186,7 @@ test("panelRows reports a session without recorded runs distinctly from a panel 
   assert.ok(!noMetricsRows.some((row) => row.text.startsWith("budget:")))
   assert.deepEqual(noMetricsRows, [
     { text: "Context Manager", tone: "header" },
-    { text: "no metrics recorded for this session yet", tone: "muted" },
+    { text: "no metrics recorded for this session yet", tone: "normal" },
   ])
 
   const noSessionRows = panelRows({ ...noMetricsData, activeSession: undefined })
@@ -195,7 +195,7 @@ test("panelRows reports a session without recorded runs distinctly from a panel 
   assert.ok(!noSessionRows.some((row) => row.text === "no metrics recorded for this session yet"))
   assert.deepEqual(noSessionRows, [
     { text: "Context Manager", tone: "header" },
-    { text: "no active session", tone: "muted" },
+    { text: "no active session", tone: "normal" },
   ])
 })
 

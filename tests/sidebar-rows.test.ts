@@ -355,7 +355,7 @@ test("sidebarRows drops the budget source label while the panel keeps it", () =>
 
 const GUARD_CHILD_NOW_MS = 1_758_300_000_000
 
-test("sidebarRows emits no muted row across its active, empty, and error outputs with the subagent group included", () => {
+test("sidebarRows emits no muted or secondary row across its active, empty, and error outputs with the subagent group included", () => {
   const scoutChild: SubagentChild = { id: "sess-child-1", type: "scout", updatedAtMs: GUARD_CHILD_NOW_MS, archived: false }
   const scanChild: SubagentChild = { id: "sess-child-2", type: "scan", updatedAtMs: GUARD_CHILD_NOW_MS - 1, archived: false }
   const current = sessionPanelData([makeLine()], SESSION_A)
@@ -381,6 +381,7 @@ test("sidebarRows emits no muted row across its active, empty, and error outputs
     assert.ok(rows.length > 0)
     for (const row of rows) {
       assert.notEqual(row.tone, "muted", `muted row leaked into the sidebar: ${JSON.stringify(row)}`)
+      assert.notEqual(row.tone, "secondary", `secondary row leaked into the sidebar: ${JSON.stringify(row)}`)
     }
   }
 })
