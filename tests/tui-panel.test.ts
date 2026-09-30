@@ -37,10 +37,10 @@ const CHILD_AGENT_TYPE = "general"
 const CHILD_UPDATED_MS = 1000
 
 // Expected row text derived from the panel-fixtures values: the snapshot's
-// 200000-token model budget formats as ~200k and the "model" source labels
+// 200000-token model budget formats as 200k and the "model" source labels
 // as per-model limit; the log fixture's eviction reads /data/a.txt.
-const SNAPSHOT_BUDGET_ROW = "budget: ~200k tokens (per-model limit)"
-const EVICTIONS_SUCCESS_MARKER = "5, ~3.1k tokens"
+const SNAPSHOT_BUDGET_ROW = "budget: 200k tokens (per-model limit)"
+const EVICTIONS_SUCCESS_MARKER = "5, 3.1k tokens"
 const STASH_SUCCESS_MARKER = "10, 4 hits"
 
 const EXPECTED_LABEL_SPAN_COUNT = 4

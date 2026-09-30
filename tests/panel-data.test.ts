@@ -844,7 +844,7 @@ test("loadPanelData prefers the live snapshot for the session block and keeps lo
       rows.some(
         (row) =>
           row.text ===
-          `counters: ${TOTALS_EVICTIONS} evictions (12 kB reclaimed, ~3.1k tokens saved), ${TOTALS_DEDUPED_UNIQUE} dedup (~2.3k tokens saved), ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} stash reads (${TOTALS_STASH_HITS} hits)`,
+          `counters: ${TOTALS_EVICTIONS} evictions (12 kB reclaimed, 3.1k tokens saved), ${TOTALS_DEDUPED_UNIQUE} dedup (2.3k tokens saved), ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} stash reads (${TOTALS_STASH_HITS} hits)`,
       ),
     )
     assert.ok(!rows.some((row) => row.text.includes("occupancy:")))
@@ -958,7 +958,7 @@ test("loadPanelData falls back to the metrics log when no snapshot exists for th
       rows.some(
         (row) =>
           row.text ===
-          `counters: ${LOG_LINE_ONLY_EVICTIONS} evictions (12 kB reclaimed, ~3.1k tokens saved), ${TOTALS_DEDUPED_UNIQUE} dedup (~2.3k tokens saved), ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} stash reads (${TOTALS_STASH_HITS} hits)`,
+          `counters: ${LOG_LINE_ONLY_EVICTIONS} evictions (12 kB reclaimed, 3.1k tokens saved), ${TOTALS_DEDUPED_UNIQUE} dedup (2.3k tokens saved), ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} stash reads (${TOTALS_STASH_HITS} hits)`,
       ),
     )
   })
@@ -1022,7 +1022,7 @@ test("loadPanelData serves the snapshot block alongside the log warning when the
     const rows = panelRows(data)
     assert.ok(rows.some((row) => row.text.startsWith("metrics log unreadable:")))
     assert.equal(rows[0].text, "Context Manager (manual)")
-    assert.ok(rows.some((row) => row.text === "budget: ~200k tokens (per-model limit)"))
+    assert.ok(rows.some((row) => row.text === "budget: 200k tokens (per-model limit)"))
     assert.ok(!rows.some((row) => row.text.startsWith("history:")))
   })
 })
