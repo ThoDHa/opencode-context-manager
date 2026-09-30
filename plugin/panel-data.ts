@@ -764,21 +764,21 @@ const budgetText = (current: SessionPanel): string => {
   const label = budgetSourceLabel(current.budgetSource)
   return current.budgetTokens === null
     ? `budget: ${label}`
-    : `budget: ~${formatTokenCount(current.budgetTokens)} tokens (${label})`
+    : `budget: ${formatTokenCount(current.budgetTokens)} tokens (${label})`
 }
 
 const lastRunText = (current: SessionPanel): string => {
-  const estimate = `~${formatTokenCount(current.lastRun.estimatedTokens)} estimated`
+  const estimate = `${formatTokenCount(current.lastRun.estimatedTokens)} estimated`
   if (current.lastRun.watermarkTokens === null || current.lastRun.deficitTokens === null) return `last run: ${estimate}, no watermark`
-  const watermark = `~${formatTokenCount(current.lastRun.watermarkTokens)} watermark`
+  const watermark = `${formatTokenCount(current.lastRun.watermarkTokens)} watermark`
   if (current.lastRun.deficitTokens > 0) {
-    return `last run: ${estimate} vs ${watermark} (over by ~${formatTokenCount(current.lastRun.deficitTokens)})`
+    return `last run: ${estimate} vs ${watermark} (over by ${formatTokenCount(current.lastRun.deficitTokens)})`
   }
   return `last run: ${estimate} vs ${watermark} (within watermark)`
 }
 
 const countersText = (current: SessionPanel): string =>
-  `${COUNTERS_ROW_LABEL} ${current.totals.evictions} evictions (${formatBytes(current.totals.bytesReclaimed)} reclaimed, ~${formatTokenCount(current.totals.evictionTokensSaved)} tokens saved), ${current.totals.dedupedUnique} dedup (~${formatTokenCount(current.totals.dedupTokensSaved)} tokens saved), ${current.stashReads} stash reads (${current.totals.stashHits} hits)`
+  `${COUNTERS_ROW_LABEL} ${current.totals.evictions} evictions (${formatBytes(current.totals.bytesReclaimed)} reclaimed, ${formatTokenCount(current.totals.evictionTokensSaved)} tokens saved), ${current.totals.dedupedUnique} dedup (${formatTokenCount(current.totals.dedupTokensSaved)} tokens saved), ${current.stashReads} stash reads (${current.totals.stashHits} hits)`
 
 const evictionText = (entry: PanelEvictedEntry): string =>
   `${entry.tool} ${entry.subject} (${formatBytes(entry.bytes)}, ${entry.messagesAgo} msgs ago)`
@@ -851,7 +851,7 @@ const sidebarOverByRow = (current: SessionPanel): PanelRow | undefined => {
 }
 
 const savingsStatText = (label: string, count: number, tokensSaved: number): string =>
-  `${label}: ${count}, ~${formatTokenCount(tokensSaved)} ${SIDEBAR_TOKENS_UNIT}`
+  `${label}: ${count}, ${formatTokenCount(tokensSaved)} ${SIDEBAR_TOKENS_UNIT}`
 
 const stashReadsStatText = (stashReads: number, stashHits: number): string =>
   `${SIDEBAR_STASH_READS_LABEL}: ${stashReads}, ${stashHits} ${SIDEBAR_HITS_UNIT}`
@@ -926,22 +926,25 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
     aggregates.set(child.type, aggregate)
   }
   const sortedTypes = [...aggregates.entries()].sort(([, first], [, second]) => second.newestUpdatedAtMs - first.newestUpdatedAtMs)
-  const rows: PanelRow[] = [{ text: truncateToWidth(`${SIDEBAR_SUBAGENTS_LEAD_LABEL}: ${kept.length}`, SIDEBAR_COLUMN_LIMIT), tone: "normal" }]
   const statRow = (statText: string): PanelRow => ({
     text: truncateToWidth(statText, SIDEBAR_COLUMN_LIMIT),
     tone: "normal",
   })
-  for (const [type, aggregate] of sortedTypes) {
+  const typeBlocks: PanelRow[][] = sortedTypes.map(([type, aggregate]) => {
     const agentsText = `${aggregate.count} ${aggregate.count === 1 ? SUBAGENT_AGENT_SINGULAR : SUBAGENT_AGENTS_UNIT}`
     const body = aggregate.hasPanel ? agentsText : SUBAGENT_NO_DATA_TEXT
-    rows.push({ text: truncateToWidth(`${capitalizeLabel(type)}: ${body}`, SIDEBAR_COLUMN_LIMIT), tone: "normal", labelTone: "info", labelBold: true })
-    if (!aggregate.hasPanel) continue
-    rows.push(statRow(savingsStatText(SIDEBAR_EVICTIONS_LABEL, aggregate.evictions, aggregate.evictionTokensSaved)))
-    rows.push(statRow(savingsStatText(SIDEBAR_DEDUPED_LABEL, aggregate.dedupedUnique, aggregate.dedupTokensSaved)))
-    rows.push(statRow(savingsStatText(SIDEBAR_REASONING_LABEL, aggregate.reasoningExpiredUnique, aggregate.reasoningTokensSaved)))
-    rows.push(statRow(stashReadsStatText(aggregate.stashReads, aggregate.stashHits)))
-  }
-  return rows
+    const block: PanelRow[] = [
+      { text: truncateToWidth(`${capitalizeLabel(type)}: ${body}`, SIDEBAR_COLUMN_LIMIT), tone: "normal", labelTone: "info", labelBold: true },
+    ]
+    if (!aggregate.hasPanel) return block
+    block.push(statRow(savingsStatText(SIDEBAR_EVICTIONS_LABEL, aggregate.evictions, aggregate.evictionTokensSaved)))
+    block.push(statRow(savingsStatText(SIDEBAR_DEDUPED_LABEL, aggregate.dedupedUnique, aggregate.dedupTokensSaved)))
+    block.push(statRow(savingsStatText(SIDEBAR_REASONING_LABEL, aggregate.reasoningExpiredUnique, aggregate.reasoningTokensSaved)))
+    block.push(statRow(stashReadsStatText(aggregate.stashReads, aggregate.stashHits)))
+    return block
+  })
+  const leadRow: PanelRow = { text: truncateToWidth(`${SIDEBAR_SUBAGENTS_LEAD_LABEL}: ${kept.length}`, SIDEBAR_COLUMN_LIMIT), tone: "normal" }
+  return withBlankSeparators([[leadRow], ...typeBlocks])
 }
 
 const finishSidebarGroups = (groups: PanelRow[][], subagentRows?: PanelRow[]): PanelRow[][] =>
