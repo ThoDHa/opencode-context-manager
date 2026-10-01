@@ -21,9 +21,12 @@ const TOTALS_STASH_MISSES = 6
 const TOTALS_STASH_DROPPED = 1
 const TOTALS_DEDUPED = 9
 const TOTALS_DEDUPED_UNIQUE = 4
+// Not a schema key: the retired per-request-recounted cumulative count,
+// kept as the needle the panel-rows negative assertion expects never to
+// see rendered beside "reasoning".
 const TOTALS_REASONING_EXPIRED = 7
 const TOTALS_REASONING_EXPIRED_UNIQUE = 3
-const TOTALS_REASONING_BYTES = 2560
+const TOTALS_REASONING_BYTES_UNIQUE = 2560
 const TOTALS_FENCE_EVICTED = 2
 const TOTALS_TOUCHES = 3
 const TOTALS_EVICTION_TOKENS_SAVED = 3072
@@ -68,9 +71,8 @@ const TOTALS_VALUES: Record<TotalsKey, number> = {
   collapsedWindows: TOTALS_COLLAPSED_WINDOWS,
   collapsedWindowBytes: TOTALS_COLLAPSED_WINDOW_BYTES,
   collapsedWindowTokensSaved: TOTALS_COLLAPSED_WINDOW_TOKENS_SAVED,
-  reasoningExpired: TOTALS_REASONING_EXPIRED,
-  reasoningBytesExpired: TOTALS_REASONING_BYTES,
   reasoningExpiredUnique: TOTALS_REASONING_EXPIRED_UNIQUE,
+  reasoningBytesExpiredUnique: TOTALS_REASONING_BYTES_UNIQUE,
   reasoningTokensSaved: TOTALS_REASONING_TOKENS_SAVED,
   fenceEvicted: TOTALS_FENCE_EVICTED,
   postEvictionTouches: TOTALS_TOUCHES,
@@ -78,9 +80,10 @@ const TOTALS_VALUES: Record<TotalsKey, number> = {
 
 const makeTotals = (): PanelMetricsLine["totals"] => ({ ...TOTALS_VALUES })
 
-// A totals record written before the unique-event and token-savings keys
-// existed: the exact shape the strict parser must reject and the tolerant
-// reader must skip.
+// A totals record written before the unique-event, unique-bytes, and
+// token-savings keys existed (the new-key absence the strict parser must
+// reject and the tolerant reader must skip: the pre-upgrade shape that
+// resets persisted reasoning totals on upgrade).
 const makePreSchemaTotals = (): Record<string, number> => {
   const {
     evictionTokensSaved: _evictionTokensSaved,
@@ -89,6 +92,7 @@ const makePreSchemaTotals = (): Record<string, number> => {
     reasoningTokensSaved: _reasoningTokensSaved,
     dedupedUnique: _dedupedUnique,
     reasoningExpiredUnique: _reasoningExpiredUnique,
+    reasoningBytesExpiredUnique: _reasoningBytesExpiredUnique,
     collapsedWindows: _collapsedWindows,
     collapsedWindowBytes: _collapsedWindowBytes,
     ...preSchema
@@ -170,7 +174,7 @@ export {
   TOTALS_COLLAPSED_WINDOW_TOKENS_SAVED,
   TOTALS_REASONING_EXPIRED,
   TOTALS_REASONING_EXPIRED_UNIQUE,
-  TOTALS_REASONING_BYTES,
+  TOTALS_REASONING_BYTES_UNIQUE,
   TOTALS_REASONING_TOKENS_SAVED,
   EXPECTED_REASONING_STAT,
   EXPECTED_DEDUPED_STAT,

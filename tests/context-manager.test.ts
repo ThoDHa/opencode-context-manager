@@ -3419,9 +3419,8 @@ const STATS_ZEROED_COUNTERS = {
   collapsedWindowBytes: 0,
   collapsedWindowTokensSaved: 0,
   postEvictionTouches: 0,
-  reasoningExpired: 0,
-  reasoningBytesExpired: 0,
   reasoningExpiredUnique: 0,
+  reasoningBytesExpiredUnique: 0,
   reasoningTokensSaved: 0,
   fenceEvicted: 0,
 }
@@ -4763,7 +4762,7 @@ test("context_stats reports the live state options defaulting beside the metrics
   assert.equal(customOptions.liveStatePruneMinIntervalMs, LIVE_STATE_CUSTOM_PRUNE_MIN_INTERVAL_MS)
 })
 
-test("context_stats counts expired reasoning parts and bytes without counting them as evictions", async () => {
+test("context_stats credits each expired reasoning part once and holds the totals constant across repeated standing runs", async () => {
   const hooks = await loadPluginHooks()
   const agedReasoningParts = (): MessagePart[][] => [
     [reasoningPart(REASONING_COLD_TEXT), reasoningPart(REASONING_SECOND_COLD_TEXT)],
@@ -4772,25 +4771,23 @@ test("context_stats counts expired reasoning parts and bytes without counting th
 
   await runTransform(hooks, buildBundle(agedReasoningParts()))
 
-  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), {
+  const firstCrossingCounters = {
     ...STATS_ZEROED_COUNTERS,
-    reasoningExpired: EXPIRED_REASONING_PAIR_COUNT,
-    reasoningBytesExpired: EXPIRED_REASONING_PAIR_BYTES,
     reasoningExpiredUnique: EXPIRED_REASONING_PAIR_COUNT,
+    reasoningBytesExpiredUnique: EXPIRED_REASONING_PAIR_BYTES,
     reasoningTokensSaved: tokensForChars(EXPIRED_REASONING_PAIR_BYTES),
-  })
+  }
+  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), firstCrossingCounters)
 
   // The stored session retains its parts, so the same aged reasoning set is
-  // re-expired on every run: the repeat runs on a fresh identical copy.
+  // re-expired on every run: the repeat runs on a fresh identical copy
+  // recount the standing set per request but credit the lifetime totals
+  // only at the first crossing, in count and in bytes alike.
   await runTransform(hooks, buildBundle(agedReasoningParts()))
-  const counters = countersOf(await readStats(hooks, SESSION_ID))
-  assert.equal(counters.reasoningExpired, EXPIRED_REASONING_PAIR_COUNT * REPEATED_STANDING_RUNS)
-  assert.equal(counters.reasoningExpiredUnique, EXPIRED_REASONING_PAIR_COUNT)
-  assert.equal(counters.reasoningBytesExpired, EXPIRED_REASONING_PAIR_BYTES * REPEATED_STANDING_RUNS)
-  assert.equal(counters.reasoningTokensSaved, tokensForChars(EXPIRED_REASONING_PAIR_BYTES * REPEATED_STANDING_RUNS))
+  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), firstCrossingCounters)
 })
 
-test("context_stats counts two identical-content reasoning parts in distinct messages once in the unique counter", async () => {
+test("context_stats counts identical-content reasoning parts once in the unique count and credits their bytes once", async () => {
   const hooks = await loadPluginHooks()
 
   const bundle = buildBundle([
@@ -4802,10 +4799,9 @@ test("context_stats counts two identical-content reasoning parts in distinct mes
   await runTransform(hooks, bundle)
 
   const counters = countersOf(await readStats(hooks, SESSION_ID))
-  assert.equal(counters.reasoningExpired, EXPIRED_REASONING_SINGLE_COUNT + EXPIRED_REASONING_SINGLE_COUNT)
-  assert.equal(counters.reasoningBytesExpired, REASONING_COLD_TEXT.length * REPEATED_STANDING_RUNS)
   assert.equal(counters.reasoningExpiredUnique, EXPIRED_REASONING_SINGLE_COUNT)
-  assert.equal(counters.reasoningTokensSaved, tokensForChars(REASONING_COLD_TEXT.length * REPEATED_STANDING_RUNS))
+  assert.equal(counters.reasoningBytesExpiredUnique, REASONING_COLD_TEXT.length)
+  assert.equal(counters.reasoningTokensSaved, tokensForChars(REASONING_COLD_TEXT.length))
 })
 
 test("context_stats leaves reasoning counters at zero when a pressured session has no reasoning parts", async () => {
@@ -4843,9 +4839,8 @@ test("metrics log counts expired reasoning bytes separately from evictions on a 
     assert.equal(lines[0].dedupedThisRun, 0)
     assert.deepEqual(lines[0].totals, {
       ...STATS_ZEROED_COUNTERS,
-      reasoningExpired: EXPIRED_REASONING_SINGLE_COUNT,
-      reasoningBytesExpired: REASONING_COLD_TEXT.length,
       reasoningExpiredUnique: EXPIRED_REASONING_SINGLE_COUNT,
+      reasoningBytesExpiredUnique: REASONING_COLD_TEXT.length,
       reasoningTokensSaved: tokensForChars(REASONING_COLD_TEXT.length),
     })
   } finally {
@@ -5722,7 +5717,12 @@ test("metrics log coalesces a reasoning only run inside the interval and flushes
     assert.equal(lines.length, METRICS_COALESCE_LINES_AFTER_ELAPSED)
     assert.equal(lines[METRICS_COALESCE_LINES_AFTER_ELAPSED - 1].reasoningExpiredThisRun, EXPIRED_REASONING_SINGLE_COUNT)
     assert.equal(lines[METRICS_COALESCE_LINES_AFTER_ELAPSED - 1].reasoningBytesExpiredThisRun, REASONING_COLD_TEXT.length)
-    assert.equal(countersOf(await readStats(hooks, SESSION_ID)).reasoningExpired, EXPIRED_REASONING_SINGLE_COUNT * METRICS_COALESCE_RUN_COUNT)
+    // The coalesced runs recount the standing part per request while the
+    // lifetime totals hold at the first crossing's figures.
+    const counters = countersOf(await readStats(hooks, SESSION_ID))
+    assert.equal(counters.reasoningExpiredUnique, EXPIRED_REASONING_SINGLE_COUNT)
+    assert.equal(counters.reasoningBytesExpiredUnique, REASONING_COLD_TEXT.length)
+    assert.equal(counters.reasoningTokensSaved, tokensForChars(REASONING_COLD_TEXT.length))
   } finally {
     cleanupMetricsDir(metricsDir)
   }
@@ -7391,7 +7391,7 @@ const withCounterDeltas = (baseline: Record<string, number>, deltas: Record<stri
   for (const [key, delta] of Object.entries(deltas)) expected[key] = (expected[key] ?? 0) + delta
   expected.evictionTokensSaved = tokensForChars(expected.bytesReclaimed)
   expected.dedupTokensSaved = tokensForChars(expected.dedupedBytes)
-  expected.reasoningTokensSaved = tokensForChars(expected.reasoningBytesExpired)
+  expected.reasoningTokensSaved = tokensForChars(expected.reasoningBytesExpiredUnique)
   return expected
 }
 
@@ -7406,9 +7406,8 @@ const SECOND_SITTING_COUNTER_DELTAS = {
   deduped: 1,
   dedupedUnique: 1,
   dedupedBytes: THREE_ENTRY_OUTPUT_BYTES,
-  reasoningExpired: 1,
   reasoningExpiredUnique: 1,
-  reasoningBytesExpired: REHYDRA_REASONING_TEXT.length,
+  reasoningBytesExpiredUnique: REHYDRA_REASONING_TEXT.length,
   fenceEvicted: 1,
 }
 
@@ -7907,6 +7906,28 @@ test("a snapshot whose budget fields are invalid rejects the whole record and th
   }
 })
 
+test("a snapshot predating the unique reasoning bytes key rejects the whole record and the session starts zeroed", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const preUpgradeSnapshot = JSON.parse(rehydrateSeedSnapshot(SESSION_ID, REHYDRA_LATER_TS, REHYDRA_NEWER_RECORD_EVICTIONS)) as Record<string, unknown>
+    delete (preUpgradeSnapshot.totals as Record<string, unknown>).reasoningBytesExpiredUnique
+    writeFileSync(liveStatePathIn(stateDir, SESSION_ID), `${JSON.stringify(preUpgradeSnapshot)}\n`)
+
+    const hooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await runTransform(hooks, reasoningOnlyBundle())
+
+    const lines = metricsLinesForSession(metricsPath, SESSION_ID)
+    assert.equal(lines.length, STATS_LOG_FILE_LINES)
+    assert.equal((lines[0].totals as Record<string, number>).evictions, 0)
+    assert.equal((lines[0].totals as Record<string, number>).reasoningExpiredUnique, EXPIRED_REASONING_SINGLE_COUNT)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
 test("recreated metrics entry re-seeds lifetime counters after the metricsSessions bound evicted it", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
@@ -7950,10 +7971,9 @@ test("context_stats re-counts the standing reasoning set when the metrics store 
     await runTransform(hooks, buildBundle(agedReasoningParts()))
 
     const counters = countersOf(await readStats(hooks, SESSION_ID))
-    assert.equal(counters.reasoningExpired, EXPIRED_REASONING_PAIR_COUNT * REPEATED_STANDING_RUNS)
     assert.equal(counters.reasoningExpiredUnique, EXPIRED_REASONING_PAIR_COUNT * REPEATED_STANDING_RUNS)
-    assert.equal(counters.reasoningBytesExpired, EXPIRED_REASONING_PAIR_BYTES * REPEATED_STANDING_RUNS)
-    assert.ok(counters.reasoningExpiredUnique <= counters.reasoningExpired)
+    assert.equal(counters.reasoningBytesExpiredUnique, EXPIRED_REASONING_PAIR_BYTES * REPEATED_STANDING_RUNS)
+    assert.equal(counters.reasoningTokensSaved, tokensForChars(EXPIRED_REASONING_PAIR_BYTES * REPEATED_STANDING_RUNS))
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)

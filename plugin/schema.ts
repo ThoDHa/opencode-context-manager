@@ -28,9 +28,8 @@ export const RAW_COUNTER_KEYS = Object.freeze([
   "dedupedUnique",
   "collapsedWindows",
   "collapsedWindowBytes",
-  "reasoningExpired",
-  "reasoningBytesExpired",
   "reasoningExpiredUnique",
+  "reasoningBytesExpiredUnique",
   "postEvictionTouches",
   "fenceEvicted",
 ] as const)

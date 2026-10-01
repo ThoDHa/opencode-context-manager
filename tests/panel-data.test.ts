@@ -51,8 +51,7 @@ import {
   TOTALS_DEDUPED_UNIQUE,
   TOTALS_EVICTIONS,
   TOTALS_FENCE_EVICTED,
-  TOTALS_REASONING_BYTES,
-  TOTALS_REASONING_EXPIRED,
+  TOTALS_REASONING_BYTES_UNIQUE,
   TOTALS_REASONING_EXPIRED_UNIQUE,
   TOTALS_STASH_HITS,
   TOTALS_STASH_MISSES,
@@ -136,7 +135,7 @@ test("parseMetricsLine rejects a line missing a required field", () => {
   assert.equal(parseMetricsLine(raw), undefined)
 })
 
-test("parseMetricsLine rejects a line whose totals carry a non-numeric counter", () => {
+test("parseMetricsLine rejects a line whose totals carry a non-numeric or missing counter", () => {
   const rawNonNumericEvictions = JSON.stringify(makeLine({ totals: { ...makeTotals(), evictions: "many" } }))
   const rawNonNumericFenceEvictions = JSON.stringify(makeLine({ totals: { ...makeTotals(), fenceEvicted: "some" } }))
   const rawNonNumericEvictionTokensSaved = JSON.stringify(
@@ -150,6 +149,15 @@ test("parseMetricsLine rejects a line whose totals carry a non-numeric counter",
   const rawNonNumericReasoningExpiredUnique = JSON.stringify(
     makeLine({ totals: { ...makeTotals(), reasoningExpiredUnique: "hundreds" } }),
   )
+  const rawNonNumericReasoningBytesExpiredUnique = JSON.stringify(
+    makeLine({ totals: { ...makeTotals(), reasoningBytesExpiredUnique: "tons" } }),
+  )
+  // JSON.stringify drops undefined values, so this line's totals lack the
+  // key entirely: the pre-upgrade shape rejected per the savings-key
+  // precedent instead of being read with the counter zeroed.
+  const rawMissingReasoningBytesExpiredUnique = JSON.stringify(
+    makeLine({ totals: { ...makeTotals(), reasoningBytesExpiredUnique: undefined } }),
+  )
 
   assert.equal(parseMetricsLine(rawNonNumericEvictions), undefined)
   assert.equal(parseMetricsLine(rawNonNumericFenceEvictions), undefined)
@@ -158,6 +166,8 @@ test("parseMetricsLine rejects a line whose totals carry a non-numeric counter",
   assert.equal(parseMetricsLine(rawNonNumericReasoningTokensSaved), undefined)
   assert.equal(parseMetricsLine(rawNonNumericDedupedUnique), undefined)
   assert.equal(parseMetricsLine(rawNonNumericReasoningExpiredUnique), undefined)
+  assert.equal(parseMetricsLine(rawNonNumericReasoningBytesExpiredUnique), undefined)
+  assert.equal(parseMetricsLine(rawMissingReasoningBytesExpiredUnique), undefined)
 })
 
 test("parseMetricsLine and parseStateSnapshot drop pre-upgrade records whose totals predate the token-savings keys", () => {
@@ -497,10 +507,9 @@ test("parseMetricsLine consumes the line's ts and accepts the plugin's remaining
   assert.equal(line.session, SESSION_A)
   assert.equal(line.ts, "2026-09-16T12:00:00.000Z")
   assert.equal(line.estimatedTokens, ESTIMATED_TOKENS)
-  assert.equal(line.totals.reasoningExpired, TOTALS_REASONING_EXPIRED)
-  assert.equal(line.totals.reasoningBytesExpired, TOTALS_REASONING_BYTES)
   assert.equal(line.totals.dedupedUnique, TOTALS_DEDUPED_UNIQUE)
   assert.equal(line.totals.reasoningExpiredUnique, TOTALS_REASONING_EXPIRED_UNIQUE)
+  assert.equal(line.totals.reasoningBytesExpiredUnique, TOTALS_REASONING_BYTES_UNIQUE)
   assert.equal(line.totals.collapsedWindows, TOTALS_COLLAPSED_WINDOWS)
   assert.equal(line.totals.collapsedWindowBytes, TOTALS_COLLAPSED_WINDOW_BYTES)
   assert.equal(line.totals.collapsedWindowTokensSaved, TOTALS_COLLAPSED_WINDOW_TOKENS_SAVED)

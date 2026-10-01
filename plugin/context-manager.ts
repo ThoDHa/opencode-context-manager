@@ -306,7 +306,7 @@ type RunOutcome = {
   composition: RunComposition
 }
 
-type ReasoningExpiry = { parts: number; bytes: number; unique: number }
+type ReasoningExpiry = { parts: number; bytes: number; unique: number; uniqueBytes: number }
 
 type ContextTokensSource =
   | typeof CONTEXT_TOKENS_SOURCE_OVERRIDE
@@ -333,9 +333,8 @@ type SessionMetrics = {
   dedupedUnique: number
   collapsedWindows: number
   collapsedWindowBytes: number
-  reasoningExpired: number
-  reasoningBytesExpired: number
   reasoningExpiredUnique: number
+  reasoningBytesExpiredUnique: number
   postEvictionTouches: number
   fenceEvicted: number
   evictedSubjects: Subject[]
@@ -1093,20 +1092,25 @@ const expireAgedReasoning = (metrics: SessionMetrics, messages: MessageBundle[],
   let parts = 0
   let bytes = 0
   let unique = 0
+  let uniqueBytes = 0
   for (let msgIndex = 0; msgIndex < retentionFromIndex; msgIndex += 1) {
     const messageParts = messages[msgIndex].parts
     for (let partIndex = messageParts.length - 1; partIndex >= 0; partIndex -= 1) {
       const part = messageParts[partIndex]
       if (part["type"] !== REASONING_PART_TYPE) continue
       const text = part[REASONING_TEXT_KEY]
-      if (typeof text === "string") bytes += text.length
+      const textChars = typeof text === "string" ? text.length : 0
+      bytes += textChars
       const identity = reasoningIdentityOf(text, part[REASONING_METADATA_KEY])
-      if (rememberUniqueKey(metrics.reasoningSeenKeys, identity, DEFAULT_REMEMBERED_REASONING_PARTS)) unique += 1
+      if (rememberUniqueKey(metrics.reasoningSeenKeys, identity, DEFAULT_REMEMBERED_REASONING_PARTS)) {
+        unique += 1
+        uniqueBytes += textChars
+      }
       messageParts.splice(partIndex, 1)
       parts += 1
     }
   }
-  return { parts, bytes, unique }
+  return { parts, bytes, unique, uniqueBytes }
 }
 
 const stripLegacyHintParts = (messages: MessageBundle[]): void => {
@@ -1462,10 +1466,18 @@ const persistedMsOf = (value: unknown): number | undefined => {
 // Absent keys default to 0 (records written before a counter existed),
 // while a present-but-non-finite value rejects the whole record: a corrupt
 // raw counter means the record cannot be trusted, so the seeder refuses it
-// and falls through to the next-newest record.
+// and falls through to the next-newest record. One absence marks the
+// upgrade boundary instead: a totals block missing the first-crossing
+// reasoning-bytes key predates it, so its reasoning totals were
+// accumulated under the retired per-request-recounted semantics and its
+// byte history exists in no persisted record; the seeder rejects the
+// record and the session restarts at zero rather than rehydrating figures
+// the new schema cannot mean.
+const UPGRADE_REQUIRED_COUNTER_KEYS: readonly RawCounterKey[] = ["reasoningBytesExpiredUnique"]
+
 const persistedCounterOf = (totals: Record<string, unknown>, key: RawCounterKey): number | undefined => {
   const value = totals[key]
-  if (value === undefined) return 0
+  if (value === undefined) return UPGRADE_REQUIRED_COUNTER_KEYS.includes(key) ? undefined : 0
   return typeof value === "number" && Number.isFinite(value) ? value : undefined
 }
 
@@ -1683,9 +1695,13 @@ const recordRunOutcome = (metrics: SessionMetrics, run: RunOutcome, rememberedSu
   metrics.dedupedUnique += dedupedUniqueThisRun
   metrics.collapsedWindows += collapsedWindowsThisRun
   metrics.collapsedWindowBytes += collapsedWindowBytesThisRun
-  metrics.reasoningExpired += reasoningExpiredThisRun.parts
-  metrics.reasoningBytesExpired += reasoningExpiredThisRun.bytes
+  // Lifetime totals credit only the unique pair: the standing aged set is
+  // re-expired on every request, so accumulating the per-run parts and
+  // bytes would multiply both by the request count. The per-request truth
+  // stays on the line's reasoningExpiredThisRun fields and in
+  // expireAgedReasoning's return value.
   metrics.reasoningExpiredUnique += reasoningExpiredThisRun.unique
+  metrics.reasoningBytesExpiredUnique += reasoningExpiredThisRun.uniqueBytes
   metrics.postEvictionTouches += touchesThisRun
   metrics.fenceEvicted += fenceEvictedThisRun.blocks
   metrics.bytesReclaimed += fenceEvictedThisRun.bytes
@@ -1829,7 +1845,7 @@ const DERIVED_TOTAL_SOURCES: { [K in TotalsDerivedKey]: RawCounterKey } = {
   evictionTokensSaved: "bytesReclaimed",
   dedupTokensSaved: "dedupedBytes",
   collapsedWindowTokensSaved: "collapsedWindowBytes",
-  reasoningTokensSaved: "reasoningBytesExpired",
+  reasoningTokensSaved: "reasoningBytesExpiredUnique",
 }
 
 const totalsOf = (metrics: SessionMetrics, charsPerToken: number): CumulativeCounters => {
