@@ -156,24 +156,91 @@ test("sidebarSubagentsGroup sums the landed panels of a type and keeps the agent
   ])
 })
 
-test("sidebarSubagentsGroup sorts type rows by the type's most recent child update, most recent first", () => {
-  const olderExplore = makeChild({ id: "sess-child-1", type: "scan", updatedAtMs: NOW_MS - MINUTE_MS })
-  const freshProbe = makeChild({ id: "sess-child-2", type: "probe", updatedAtMs: NOW_MS })
-  const olderProbe = makeChild({ id: "sess-child-3", type: "probe", updatedAtMs: NOW_MS - 2 * MINUTE_MS })
-  const data = dataWithChildren([{ id: freshProbe.id, panel: makePanel(freshProbe.id, { evictions: 2, evictionTokensSaved: 900 }) }])
+test("sidebarSubagentsGroup orders type blocks alphabetically regardless of the type's most recent child update", () => {
+  const freshScan = makeChild({ id: "sess-child-1", type: "scan", updatedAtMs: NOW_MS })
+  const staleProbe = makeChild({ id: "sess-child-2", type: "probe", updatedAtMs: NOW_MS - MINUTE_MS })
+  const data = dataWithChildren([{ id: freshScan.id, panel: makePanel(freshScan.id) }])
 
-  const rows = rowsWithinWidth(sidebarSubagentsGroup([olderExplore, olderProbe, freshProbe], data))
+  const rows = rowsWithinWidth(sidebarSubagentsGroup([freshScan, staleProbe], data))
 
   assert.deepEqual(rows, [
-    { text: "Subagents: 3", tone: "normal" },
+    { text: "Subagents: 2", tone: "normal" },
     { text: " ", tone: "normal" },
-    { text: "Probe: 2 agents", tone: "normal", labelTone: "info", labelBold: true },
-    { text: "Evictions: 2, 900 tokens", tone: "normal" },
+    { text: "Probe: no data yet", tone: "normal", labelTone: "info", labelBold: true },
+    { text: " ", tone: "normal" },
+    { text: "Scan: 1 agent", tone: "normal", labelTone: "info", labelBold: true },
+    { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
     { text: "Stash reads: 10, 4 hits", tone: "normal" },
+  ])
+})
+
+test("sidebarSubagentsGroup places the fleet agent types first in the canonical sequence and every other type after them in code-unit order", () => {
+  const worker = makeChild({ id: "sess-child-1", type: "worker", updatedAtMs: NOW_MS - 3 * MINUTE_MS })
+  const verifier = makeChild({ id: "sess-child-2", type: "verifier", updatedAtMs: NOW_MS - 2 * MINUTE_MS })
+  const reviewer = makeChild({ id: "sess-child-3", type: "reviewer", updatedAtMs: NOW_MS - MINUTE_MS })
+  const planner = makeChild({ id: "sess-child-4", type: "planner", updatedAtMs: NOW_MS - 4 * MINUTE_MS })
+  const freshestExplore = makeChild({ id: "sess-child-5", type: "explore", updatedAtMs: NOW_MS - MINUTE_MS })
+  const freshestZeta = makeChild({ id: "sess-child-6", type: "zeta", updatedAtMs: NOW_MS })
+  const data = dataWithChildren([{ id: freshestZeta.id, panel: makePanel(freshestZeta.id) }])
+
+  const rows = rowsWithinWidth(sidebarSubagentsGroup([freshestZeta, freshestExplore, planner, reviewer, worker, verifier], data))
+
+  assert.deepEqual(rows, [
+    { text: "Subagents: 6", tone: "normal" },
     { text: " ", tone: "normal" },
-    { text: "Scan: no data yet", tone: "normal", labelTone: "info", labelBold: true },
+    { text: "Worker: no data yet", tone: "normal", labelTone: "info", labelBold: true },
+    { text: " ", tone: "normal" },
+    { text: "Verifier: no data yet", tone: "normal", labelTone: "info", labelBold: true },
+    { text: " ", tone: "normal" },
+    { text: "Reviewer: no data yet", tone: "normal", labelTone: "info", labelBold: true },
+    { text: " ", tone: "normal" },
+    { text: "Planner: no data yet", tone: "normal", labelTone: "info", labelBold: true },
+    { text: " ", tone: "normal" },
+    { text: "Explore: no data yet", tone: "normal", labelTone: "info", labelBold: true },
+    { text: " ", tone: "normal" },
+    { text: "Zeta: 1 agent", tone: "normal", labelTone: "info", labelBold: true },
+    { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
+    { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
+    { text: EXPECTED_REASONING_STAT, tone: "normal" },
+    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+  ])
+})
+
+test("sidebarSubagentsGroup keeps a capitalized fleet type in the fleet block ahead of a code-unit-earlier non-fleet type", () => {
+  const freshAudit = makeChild({ id: "sess-child-1", type: "Audit", updatedAtMs: NOW_MS })
+  const staleWorker = makeChild({ id: "sess-child-2", type: "Worker", updatedAtMs: NOW_MS - MINUTE_MS })
+  const data = dataWithChildren()
+
+  const rows = rowsWithinWidth(sidebarSubagentsGroup([freshAudit, staleWorker], data))
+
+  assert.deepEqual(rows, [
+    { text: "Subagents: 2", tone: "normal" },
+    { text: " ", tone: "normal" },
+    { text: "Worker: no data yet", tone: "normal", labelTone: "info", labelBold: true },
+    { text: " ", tone: "normal" },
+    { text: "Audit: no data yet", tone: "normal", labelTone: "info", labelBold: true },
+  ])
+})
+
+test("sidebarSubagentsGroup compares non-fleet types locale-free so an uppercase-initial type precedes a lowercase one regardless of recency", () => {
+  const freshAudit = makeChild({ id: "sess-child-1", type: "audit", updatedAtMs: NOW_MS })
+  const staleSummarizer = makeChild({ id: "sess-child-2", type: "Summarizer", updatedAtMs: NOW_MS - MINUTE_MS })
+  const data = dataWithChildren([{ id: freshAudit.id, panel: makePanel(freshAudit.id) }])
+
+  const rows = rowsWithinWidth(sidebarSubagentsGroup([freshAudit, staleSummarizer], data))
+
+  assert.deepEqual(rows, [
+    { text: "Subagents: 2", tone: "normal" },
+    { text: " ", tone: "normal" },
+    { text: "Summarizer: no data yet", tone: "normal", labelTone: "info", labelBold: true },
+    { text: " ", tone: "normal" },
+    { text: "Audit: 1 agent", tone: "normal", labelTone: "info", labelBold: true },
+    { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
+    { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
+    { text: EXPECTED_REASONING_STAT, tone: "normal" },
+    { text: "Stash reads: 10, 4 hits", tone: "normal" },
   ])
 })
 
