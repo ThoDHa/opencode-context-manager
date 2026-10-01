@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import type { PanelMetricsLine } from "../plugin/panel-data.ts"
-import { type TotalsKey } from "../plugin/schema.ts"
+import type { TotalsKey } from "../plugin/schema.ts"
 
 const SESSION_A = "sess-panel-a"
 const SESSION_B = "sess-panel-b"

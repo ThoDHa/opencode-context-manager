@@ -4,7 +4,15 @@ import { join } from "node:path"
 import { after, test } from "node:test"
 import assert from "node:assert/strict"
 
-import { MOCK_THEME, createTuiApiMock, type TuiApi, type TuiApiMock } from "./tui/api-mock.ts"
+import {
+  EXPECTED_DIALOG_SIZE,
+  MOCK_THEME,
+  createTuiApiMock,
+  type RegisteredCommand,
+  type SidebarSlotRenderer,
+  type TuiApiMock,
+  type TuiPluginEntry,
+} from "./tui/api-mock.ts"
 import {
   nodeText,
   renderTree,
@@ -15,22 +23,6 @@ import {
   type StubNode,
 } from "./tui/opentui-stub.ts"
 
-// The mock records host-shaped registrations as unknown at the boundary;
-// these structural types narrow the recorded command and slot renderer for
-// assertions.
-type RegisteredCommand = {
-  run: () => void
-}
-
-type SidebarSlotRenderer = (ctx: unknown, props: { session_id: string }) => unknown
-
-type TuiEntryOptions = { sidebarEnabled?: unknown; sidebarSubagents?: unknown }
-
-type TuiEntry = (api: TuiApi, options?: TuiEntryOptions) => Promise<void>
-
-type TuiPluginEntry = { id: string; tui: TuiEntry }
-
-const EXPECTED_DIALOG_SIZE = "large"
 const EXPECTED_SIDEBAR_SLOT_NAME = "sidebar_content"
 const NO_SESSION_ROW_TEXT = "no active session"
 const UNREADABLE_ROW_MARKER = "metrics log unreadable:"
@@ -74,10 +66,10 @@ const spansWithFg = (root: StubNode, fg: string): StubElementNode[] =>
   elementsOfName(root, "span").filter((node) => styleFgOf(node) === fg)
 
 // Module-eval, suite-lifetime HOME override: this suite's plugin imports
-// (dynamic below) must not evaluate before it lands; see the seam and
-// withTuiHome's callback-scope limit documented in tests/tui/fixtures.ts.
-// Fixture writes go through the fixtures.ts writers, with paths from the
-// plugin's own exported constants so writer and reader cannot drift.
+// (dynamic below) must not evaluate before it lands; the seam is documented
+// at the top of tests/tui/fixtures.ts. Fixture writes go through the
+// fixtures.ts writers, with paths from the plugin's own exported constants
+// so writer and reader cannot drift.
 const home = mkdtempSync(join(tmpdir(), "ctx-tui-home-"))
 const previousHome = process.env.HOME
 process.env.HOME = home
@@ -94,6 +86,11 @@ const { writeMetricsLog, writeSessionSnapshot } = await import("./tui/fixtures.t
 const { makeLine } = await import("./panel-fixtures.ts")
 const { DEFAULT_LIVE_STATE_DIR, DEFAULT_METRICS_PATH, PANEL_COMMAND_TITLE } = await import("../plugin/panel-data.ts")
 const plugin = (await import("../plugin/context-manager.tui.tsx")).default as TuiPluginEntry
+
+test("the suite's temp HOME owns the plugin's default paths", () => {
+  assert.ok(DEFAULT_METRICS_PATH.startsWith(home), `metrics path escaped the temp HOME: ${DEFAULT_METRICS_PATH}`)
+  assert.ok(DEFAULT_LIVE_STATE_DIR.startsWith(home), `state dir escaped the temp HOME: ${DEFAULT_LIVE_STATE_DIR}`)
+})
 
 const registeredCommandOf = (mock: TuiApiMock): RegisteredCommand => {
   const layer = mock.calls.keymapRegisterLayer[0]

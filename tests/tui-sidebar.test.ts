@@ -5,13 +5,12 @@ import { join } from "node:path"
 import { after, test } from "node:test"
 import type { TestContext } from "node:test"
 
-import type { TuiApiMock } from "./tui/api-mock.ts"
+import { type SidebarSlotRenderer, type TuiApiMock } from "./tui/api-mock.ts"
 import type { StubElementNode } from "./tui/opentui-stub.ts"
 
 // Module-eval, suite-lifetime HOME override, with the plugin imports (the
 // dynamic panel-data import below and the .tsx inside the test) kept behind
-// it: the seam and withTuiHome's callback-scope limit are documented in
-// tests/tui/fixtures.ts.
+// it: the seam is documented at the top of tests/tui/fixtures.ts.
 const previousHome = process.env.HOME
 const home = mkdtempSync(join(tmpdir(), "ctx-tui-home-"))
 process.env.HOME = home
@@ -53,8 +52,6 @@ const SUBAGENTS_ARCHIVED_CHILD = "sess-tui-subagents-archived"
 const NO_SUBAGENTS_SESSION = "sess-tui-no-subagents"
 const DISPOSE_INFLIGHT_SESSION = "sess-tui-dispose-inflight"
 const DISPOSE_PAINTED_SESSION = "sess-tui-dispose-painted"
-
-type SidebarSlotRenderer = (ctx: unknown, props: { session_id: string }) => unknown
 
 type SidebarTuiEntry = (
   api: TuiApiMock["api"],
@@ -127,8 +124,8 @@ test("the suite's temp HOME owns the plugin's default paths", () => {
 
 test("SidebarEntry renders, polls, and disposes against the temp HOME fixtures", async (suite) => {
   // First .tsx import, inside the test so the compiled module evaluates
-  // after the module-eval HOME override above; the seam is documented on
-  // withTuiHome in tests/tui/fixtures.ts.
+  // after the module-eval HOME override above; the seam is documented at
+  // the top of tests/tui/fixtures.ts.
   const tui: SidebarTuiEntry = (await import("../plugin/context-manager.tui.tsx")).default.tui
 
   await suite.test("startup ENOENT transient keeps the entry hidden on mount and on a data-less poll tick", async (st) => {

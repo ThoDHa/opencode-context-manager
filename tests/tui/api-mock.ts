@@ -55,6 +55,28 @@ export type TuiApiMock = {
   rejectChildren: (error?: unknown) => void
 }
 
+// The host hands registrations to the mock as unknown at the boundary; these
+// structural types narrow them for suite assertions.
+export type RegisteredCommand = {
+  namespace: string
+  name: string
+  title: string
+  desc: string
+  category: string
+  slashName: string
+  run: () => void
+}
+
+export type SidebarSlotRenderer = (ctx: unknown, props: { session_id: string }) => unknown
+
+export type TuiEntryOptions = { sidebarEnabled?: unknown; sidebarSubagents?: unknown }
+
+export type TuiEntry = (api: TuiApi, options?: TuiEntryOptions) => Promise<void>
+
+export type TuiPluginEntry = { id: string; tui: TuiEntry }
+
+export const EXPECTED_DIALOG_SIZE = "large"
+
 // Guard-path options: omitting keymap or slots drops the property entirely,
 // so canRegisterKeymap/canRegisterSidebar go false the same way they do
 // against a host build without those registries.

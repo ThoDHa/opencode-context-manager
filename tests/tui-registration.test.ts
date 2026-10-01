@@ -4,34 +4,21 @@ import { join } from "node:path"
 import { after, test } from "node:test"
 import assert from "node:assert/strict"
 
-import { createTuiApiMock, type TuiApi, type TuiApiMock } from "./tui/api-mock.ts"
+import {
+  EXPECTED_DIALOG_SIZE,
+  createTuiApiMock,
+  type RegisteredCommand,
+  type TuiApiMock,
+  type TuiPluginEntry,
+} from "./tui/api-mock.ts"
 import { nodeText, renderTree, settleUntil } from "./tui/opentui-stub.ts"
 
-// The mock records host-shaped registrations as unknown at the boundary;
-// this structural type narrows the recorded panel command for assertions.
-type RegisteredCommand = {
-  namespace: string
-  name: string
-  title: string
-  desc: string
-  category: string
-  slashName: string
-  run: () => void
-}
-
-type TuiEntryOptions = { sidebarEnabled?: unknown; sidebarSubagents?: unknown }
-
-type TuiEntry = (api: TuiApi, options?: TuiEntryOptions) => Promise<void>
-
-type TuiPluginEntry = { id: string; tui: TuiEntry }
-
-const EXPECTED_DIALOG_SIZE = "large"
 const EXPECTED_SIDEBAR_SLOT_ORDER = 600
 const EXPECTED_SIDEBAR_SLOT_NAME = "sidebar_content"
 
 // Module-eval, suite-lifetime HOME override: this suite's plugin imports
-// (dynamic below) must not evaluate before it lands; see the seam and
-// withTuiHome's callback-scope limit documented in tests/tui/fixtures.ts.
+// (dynamic below) must not evaluate before it lands; the seam is documented
+// at the top of tests/tui/fixtures.ts.
 const home = mkdtempSync(join(tmpdir(), "ctx-tui-home-"))
 const previousHome = process.env.HOME
 process.env.HOME = home
@@ -45,6 +32,8 @@ after(() => {
 })
 
 const {
+  DEFAULT_LIVE_STATE_DIR,
+  DEFAULT_METRICS_PATH,
   PANEL_COMMAND_CATEGORY,
   PANEL_COMMAND_DESCRIPTION,
   PANEL_COMMAND_NAME,
@@ -53,6 +42,11 @@ const {
   PANEL_COMMAND_TITLE,
 } = await import("../plugin/panel-data.ts")
 const plugin = (await import("../plugin/context-manager.tui.tsx")).default as TuiPluginEntry
+
+test("the suite's temp HOME owns the plugin's default paths", () => {
+  assert.ok(DEFAULT_METRICS_PATH.startsWith(home), `metrics path escaped the temp HOME: ${DEFAULT_METRICS_PATH}`)
+  assert.ok(DEFAULT_LIVE_STATE_DIR.startsWith(home), `state dir escaped the temp HOME: ${DEFAULT_LIVE_STATE_DIR}`)
+})
 
 const registeredCommandOf = (mock: TuiApiMock): RegisteredCommand => {
   const layer = mock.calls.keymapRegisterLayer[0]
