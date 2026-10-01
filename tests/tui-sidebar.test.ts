@@ -164,6 +164,7 @@ test("SidebarEntry renders, polls, and disposes against the temp HOME fixtures",
       assert.ok(!text.includes("Budget: 200k"))
       assert.ok(text.includes("Watermark: 100k"))
       assert.ok(text.includes("Over by: 23.5k"))
+      assert.ok(text.includes("Tokens used: 19.5k tokens"))
       assert.ok(text.includes("Evictions: 5, 3.1k tokens"), `snapshot totals should win: ${text}`)
       assert.ok(!text.includes("Evictions: 9"))
       assert.ok(text.includes("Last evicted: read /data/a.txt"), `log should supply evictions: ${text}`)

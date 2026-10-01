@@ -946,6 +946,7 @@ const stashReadsStatText = (stashReads: number, stashHits: number): string =>
 // savings divide those same first-crossing byte totals, so the pair each
 // row shows is one coherent distinct-work statement.
 const sidebarCountersGroup = (current: SessionPanel): PanelRow[] => [
+  { text: tokensStatText(current.totals.processedContextTokens), tone: "success" },
   { text: savingsStatText(SIDEBAR_EVICTIONS_LABEL, current.totals.evictions, current.totals.evictionTokensSaved), tone: "success" },
   { text: savingsStatText(SIDEBAR_DEDUPED_LABEL, current.totals.dedupedUnique, current.totals.dedupTokensSaved), tone: "success" },
   { text: savingsStatText(SIDEBAR_REASONING_LABEL, current.totals.reasoningExpiredUnique, current.totals.reasoningTokensSaved), tone: "success" },
