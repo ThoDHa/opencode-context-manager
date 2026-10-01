@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path"
+import assert from "node:assert/strict"
 
 import type { PanelMetricsLine } from "../../plugin/panel-data.ts"
 import { makeSnapshot, serialize, writeSnapshot } from "../panel-fixtures.ts"
@@ -13,6 +14,14 @@ import { makeSnapshot, serialize, writeSnapshot } from "../panel-fixtures.ts"
 // callback could run, so a callback-scoped HOME never covers a suite's own
 // module eval. Importing this module is safe at eval order: it evaluates no
 // plugin module (the panel-data import is a fully elided `import type`).
+
+// Asserts a suite's temp HOME owns the plugin's frozen default paths; a
+// static plugin import that re-arms the early-evaluation trap fails here
+// instead of writing fixtures into the developer's real config directory.
+export const assertTempHomeOwnsPaths = (home: string, metricsPath: string, stateDir: string): void => {
+  assert.ok(metricsPath.startsWith(home), `metrics path escaped the temp HOME: ${metricsPath}`)
+  assert.ok(stateDir.startsWith(home), `state dir escaped the temp HOME: ${stateDir}`)
+}
 
 // Writes a JSONL metrics log under the temp HOME, creating parent dirs.
 export const writeMetricsLog = (metricsPath: string, lines: PanelMetricsLine[]): void => {

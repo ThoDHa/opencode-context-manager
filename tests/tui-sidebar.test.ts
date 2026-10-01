@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { after, test } from "node:test"
 import type { TestContext } from "node:test"
 
-import { type SidebarSlotRenderer, type TuiApiMock } from "./tui/api-mock.ts"
+import type { SidebarSlotRenderer, TuiApiMock } from "./tui/api-mock.ts"
 import type { StubElementNode } from "./tui/opentui-stub.ts"
 
 // Module-eval, suite-lifetime HOME override, with the plugin imports (the
@@ -26,7 +26,7 @@ after(() => {
 
 const { createTuiApiMock } = await import("./tui/api-mock.ts")
 const { nodeText, renderTree, settleUntil } = await import("./tui/opentui-stub.ts")
-const { writeMetricsLog, writeSessionSnapshot } = await import("./tui/fixtures.ts")
+const { assertTempHomeOwnsPaths, writeMetricsLog, writeSessionSnapshot } = await import("./tui/fixtures.ts")
 const { makeLine, makeTotals } = await import("./panel-fixtures.ts")
 const { DEFAULT_LIVE_STATE_DIR, DEFAULT_METRICS_PATH } = await import("../plugin/panel-data.ts")
 
@@ -118,8 +118,7 @@ const withPollSidebar = async (
 }
 
 test("the suite's temp HOME owns the plugin's default paths", () => {
-  assert.ok(DEFAULT_METRICS_PATH.startsWith(home), `metrics path escaped the temp HOME: ${DEFAULT_METRICS_PATH}`)
-  assert.ok(DEFAULT_LIVE_STATE_DIR.startsWith(home), `state dir escaped the temp HOME: ${DEFAULT_LIVE_STATE_DIR}`)
+  assertTempHomeOwnsPaths(home, DEFAULT_METRICS_PATH, DEFAULT_LIVE_STATE_DIR)
 })
 
 test("SidebarEntry renders, polls, and disposes against the temp HOME fixtures", async (suite) => {

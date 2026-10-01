@@ -41,11 +41,11 @@ const {
   PANEL_COMMAND_SLASH_NAME,
   PANEL_COMMAND_TITLE,
 } = await import("../plugin/panel-data.ts")
+const { assertTempHomeOwnsPaths } = await import("./tui/fixtures.ts")
 const plugin = (await import("../plugin/context-manager.tui.tsx")).default as TuiPluginEntry
 
 test("the suite's temp HOME owns the plugin's default paths", () => {
-  assert.ok(DEFAULT_METRICS_PATH.startsWith(home), `metrics path escaped the temp HOME: ${DEFAULT_METRICS_PATH}`)
-  assert.ok(DEFAULT_LIVE_STATE_DIR.startsWith(home), `state dir escaped the temp HOME: ${DEFAULT_LIVE_STATE_DIR}`)
+  assertTempHomeOwnsPaths(home, DEFAULT_METRICS_PATH, DEFAULT_LIVE_STATE_DIR)
 })
 
 const registeredCommandOf = (mock: TuiApiMock): RegisteredCommand => {
