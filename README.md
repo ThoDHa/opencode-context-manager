@@ -1,5 +1,8 @@
 # opencode-context-manager
 
+[![CI](https://github.com/ThoDHa/opencode-context-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/ThoDHa/opencode-context-manager/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 An [opencode](https://opencode.ai) plugin that manages context windows with least-recently-used eviction: it transforms chat requests to evict the least recently used tool outputs, reasoning blocks, duplicated attachments, and oversized fenced blocks, strips terminal escape noise from tool outputs as they complete so storage keeps the clean version, replaces evicted content with tombstones that can be restored through the `read_evicted` tool, reports live counters through `context_stats`, and serves a `/context` panel plus a persistent session-sidebar summary over the same data. [Installation](#installation) covers setup, updates, and removal; [Configuration](#configuration) covers the option surface.
 
 ## Contents
@@ -35,6 +38,9 @@ An [opencode](https://opencode.ai) plugin that manages context windows with leas
   - [Why it works: the token economics](#why-it-works-the-token-economics)
   - [When it fires and when it never does](#when-it-fires-and-when-it-never-does)
   - [Honest limits](#honest-limits)
+- [Compatibility](#compatibility)
+- [Versioning](#versioning)
+- [License](#license)
 
 ## Installation
 
@@ -365,3 +371,21 @@ The caching unknown: a prefix cache invalidates at the first changed message, ev
 Volatile state: the stash lives in the plugin's memory for the server process. A restart orphans stashed originals (`read_evicted` then returns the miss text), but the counters are not lost: the session's first transform or `read_evicted` hit after a restart rehydrates them from the session's live-state snapshot, or the newest metrics-log line for the session when no snapshot serves it (a miss cannot initiate hydration, it only awaits one already in flight; `context_stats` alone neither creates nor rehydrates), so totals keep running across restarts. Three bounds remain: records written before `dedupedBytes` entered the totals seed zero for that one counter, a session with no surviving snapshot (`liveStateLog` off) whose log line has rotated out of the current generation, the `.1` sibling the seeder never reads, restarts its counters, and two processes resuming the same session each seed from the same base and count independently on top of it. A restart whose snapshot and line writes both failed resumes from the last record that did land. The metrics log survives restarts but keeps only the current and previous rotation generation. The memory bounds are deliberate, 50 (`stashLimit`) stash entries per session, 8 (`stashSessions`) sessions, 100 (`rememberedEvictedSubjects`) remembered evicted subjects, but real ceilings: the 51st eviction in one run drops the oldest stash entry, and that original becomes unrecoverable.
 
 Second order under plan caps: where usage is capped at the plan level and dominated by fixed per-request overhead times request count, trimming the variable history share of long sessions is a second-order lever. The plugin earns its keep as cheap insurance for the sessions that do grow long (an extended session coordinating subagents, a long interactive run): one plugin, four source files, default-on, doing nothing at all to sessions that stay small. It is not a rate-limit fix; the first-order levers, fewer requests and shorter fixed payloads, live outside it.
+
+## Compatibility
+
+The plugin runs inside opencode's own runtime and depends on a small, named slice of its plugin API: the `chat.params` hook (context-budget capture), the `experimental.chat.messages.transform` hook (the per-request eviction pass), the `experimental.chat.system.transform` hook (the hint line), and, for the `/context` panel and the session sidebar, the TUI slots API. Compatibility claims for a given opencode build come in two evidence tiers: wire-verified means the plugin ran end to end on that build and the actual provider payloads were captured and inspected, and source-verified means the build's host source or runtime binary was checked for the control flow the plugin relies on. The versions named below are the ones with archived evidence at each tier, not the full set: the design note additionally records source verification of the storage-isolation invariant at 1.1.4, 1.18.5, and 1.18.32 plus current dev ([Staged eviction: watermarkTokens and the manual-mode dry run](#staged-eviction-watermarktokens-and-the-manual-mode-dry-run)).
+
+- **opencode 1.18.29 (wire-verified):** end-to-end runs against a live opencode captured the wire payloads with the plugin loaded, proving the transform's passes, the `read_evicted` tool, and its tombstone-and-reload loop on real sessions; this build is also the documented version floor ([Requirements](#requirements)).
+- **opencode 1.18.30 (source-verified):** the hook ordering (`messages.transform` firing before the system prompt is assembled) and the system-transform contract were verified against that build's source.
+- **opencode 1.18.31 (source-verified):** the surfaces the later passes rely on were verified against that build's source and runtime binary: tool-part attachment structure, the message serializer's pre-wire filtering, `file` part shape, the TUI slots surface the sidebar registers through, subagent child-session data, and the native compaction prune this plugin treats as its overflow backstop.
+
+The sources ship as plain TypeScript executed with no build step, so any runtime loading them must support native type stripping; the test suite's documented node 24 floor meets that requirement (see Requirements). A build without the TUI slots API loads the core plugin and both tools unchanged and registers no views, as Requirements describes; a build that drops one of the named hooks breaks the feature that hook carries.
+
+## Versioning
+
+Releases are cut as `v`-prefixed semver tags on this repository, and each tag carries its notes on the [releases page](https://github.com/ThoDHa/opencode-context-manager/releases). There is no npm package and no registry step: a version is the tag, and the git-clone install and update flow of [Installation](#installation) consumes it directly, so pinning a version means checking the tag out in your clone and updating means pulling it.
+
+## License
+
+Released under the MIT license; the full text is [LICENSE](LICENSE) at the repository root.
