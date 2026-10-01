@@ -15,6 +15,7 @@ export type RecordedDialogSize = { size: string }
 export type RecordedDialogReplace = { renderer: unknown }
 export type RecordedToast = { variant: string; title: string; message: string }
 export type RecordedChildrenFetch = { sessionID: string }
+export type RecordedPluginDeactivate = { pluginID: string }
 
 // One color per theme key so a mis-mapped tone is visible in assertions
 // instead of hiding behind two identical strings.
@@ -32,6 +33,7 @@ export type TuiApi = {
   route: { current: TuiRoute }
   keymap?: { registerLayer: (layer: RecordedKeymapLayer) => void }
   slots?: { register: (registration: RecordedSlotRegistration) => void }
+  plugins?: { deactivate: (pluginID: string) => void }
   ui: {
     dialog: { setSize: (size: string) => void; replace: (renderer: unknown) => void }
     toast: (options: RecordedToast) => void
@@ -48,6 +50,7 @@ export type TuiApiMock = {
     dialogReplace: RecordedDialogReplace[]
     toast: RecordedToast[]
     children: RecordedChildrenFetch[]
+    pluginsDeactivate: RecordedPluginDeactivate[]
   }
   setSessionRoute: (sessionID: string) => void
   setNonSessionRoute: (name?: string) => void
@@ -69,7 +72,7 @@ export type RegisteredCommand = {
 
 export type SidebarSlotRenderer = (ctx: unknown, props: { session_id: string }) => unknown
 
-export type TuiEntryOptions = { sidebarEnabled?: unknown; sidebarSubagents?: unknown }
+export type TuiEntryOptions = { sidebarEnabled?: unknown; sidebarSubagents?: unknown; sidebarMode?: unknown }
 
 export type TuiEntry = (api: TuiApi, options?: TuiEntryOptions) => Promise<void>
 
@@ -77,15 +80,15 @@ export type TuiPluginEntry = { id: string; tui: TuiEntry }
 
 export const EXPECTED_DIALOG_SIZE = "large"
 
-// Guard-path options: omitting keymap or slots drops the property entirely,
-// so canRegisterKeymap/canRegisterSidebar go false the same way they do
-// against a host build without those registries.
-export type TuiApiMockOptions = { omitKeymap?: boolean; omitSlots?: boolean }
+// Guard-path options: omitting keymap, slots, or plugins drops the property
+// entirely, so canRegisterKeymap/canRegisterSidebar/canDeactivatePlugins go
+// false the same way they do against a host build without those registries.
+export type TuiApiMockOptions = { omitKeymap?: boolean; omitSlots?: boolean; omitPlugins?: boolean }
 
 const DEFAULT_ROUTE_NAME = "home"
 const DEFAULT_CHILDREN_RESULT = { data: [] }
 
-export const createTuiApiMock = ({ omitKeymap = false, omitSlots = false }: TuiApiMockOptions = {}): TuiApiMock => {
+export const createTuiApiMock = ({ omitKeymap = false, omitSlots = false, omitPlugins = false }: TuiApiMockOptions = {}): TuiApiMock => {
   const calls = {
     keymapRegisterLayer: [] as RecordedKeymapLayer[],
     slotsRegister: [] as RecordedSlotRegistration[],
@@ -93,6 +96,7 @@ export const createTuiApiMock = ({ omitKeymap = false, omitSlots = false }: TuiA
     dialogReplace: [] as RecordedDialogReplace[],
     toast: [] as RecordedToast[],
     children: [] as RecordedChildrenFetch[],
+    pluginsDeactivate: [] as RecordedPluginDeactivate[],
   }
   let childrenHandler: (query: { sessionID: string }) => Promise<unknown> = async () => DEFAULT_CHILDREN_RESULT
 
@@ -114,6 +118,15 @@ export const createTuiApiMock = ({ omitKeymap = false, omitSlots = false }: TuiA
           slots: {
             register: (registration: RecordedSlotRegistration): void => {
               calls.slotsRegister.push(registration)
+            },
+          },
+        }),
+    ...(omitPlugins
+      ? {}
+      : {
+          plugins: {
+            deactivate: (pluginID: string): void => {
+              calls.pluginsDeactivate.push({ pluginID })
             },
           },
         }),

@@ -63,6 +63,7 @@ import {
   makeSnapshot,
   makeTotals,
   makePreSchemaTotals,
+  makePreTokenUsageTotals,
   TOTALS_COLLAPSED_WINDOWS,
   TOTALS_COLLAPSED_WINDOW_BYTES,
   TOTALS_COLLAPSED_WINDOW_TOKENS_SAVED,
@@ -152,6 +153,12 @@ test("parseMetricsLine rejects a line whose totals carry a non-numeric or missin
   const rawNonNumericReasoningBytesExpiredUnique = JSON.stringify(
     makeLine({ totals: { ...makeTotals(), reasoningBytesExpiredUnique: "tons" } }),
   )
+  const rawNonNumericProcessedContextBytes = JSON.stringify(
+    makeLine({ totals: { ...makeTotals(), processedContextBytes: "heaps" } }),
+  )
+  const rawNonNumericProcessedContextTokens = JSON.stringify(
+    makeLine({ totals: { ...makeTotals(), processedContextTokens: "loads" } }),
+  )
   // JSON.stringify drops undefined values, so this line's totals lack the
   // key entirely: the pre-upgrade shape rejected per the savings-key
   // precedent instead of being read with the counter zeroed.
@@ -167,6 +174,8 @@ test("parseMetricsLine rejects a line whose totals carry a non-numeric or missin
   assert.equal(parseMetricsLine(rawNonNumericDedupedUnique), undefined)
   assert.equal(parseMetricsLine(rawNonNumericReasoningExpiredUnique), undefined)
   assert.equal(parseMetricsLine(rawNonNumericReasoningBytesExpiredUnique), undefined)
+  assert.equal(parseMetricsLine(rawNonNumericProcessedContextBytes), undefined)
+  assert.equal(parseMetricsLine(rawNonNumericProcessedContextTokens), undefined)
   assert.equal(parseMetricsLine(rawMissingReasoningBytesExpiredUnique), undefined)
 })
 
@@ -233,6 +242,38 @@ test("parseTotals defaults an absent dedupedBytes to zero while still rejecting 
   assert.equal(line.totals.dedupedBytes, 0)
   const { fenceEvicted: _fenceEvicted, ...missingFenceTotals } = makeTotals()
   assert.equal(parseMetricsLine(JSON.stringify(makeLine({ totals: missingFenceTotals }))), undefined)
+})
+
+test("parseTotals defaults the absent processed context keys to zero while still rejecting other missing keys", () => {
+  const preTokenUsageTotals = makePreTokenUsageTotals()
+  const rawLine = JSON.stringify(makeLine({ totals: preTokenUsageTotals }))
+  const rawSnapshot = JSON.stringify(makeSnapshot({ totals: preTokenUsageTotals }))
+
+  const line = parseMetricsLine(rawLine)
+  const snapshot = parseStateSnapshot(rawSnapshot)
+
+  assert.ok(line !== undefined)
+  assert.equal(line.totals.processedContextBytes, 0)
+  assert.equal(line.totals.processedContextTokens, 0)
+  assert.ok(snapshot !== undefined)
+  assert.equal(snapshot.totals.processedContextBytes, 0)
+  assert.equal(snapshot.totals.processedContextTokens, 0)
+  const { fenceEvicted: _fenceEvicted, ...missingFenceTotals } = preTokenUsageTotals
+  assert.equal(parseMetricsLine(JSON.stringify(makeLine({ totals: missingFenceTotals }))), undefined)
+})
+
+test("readMetricsLog keeps a pre-token-usage line alongside current lines once its missing keys default to zero", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "metrics.jsonl")
+    writeFileSync(path, serialize([makeLine({ totals: makePreTokenUsageTotals() }), makeLine()]))
+
+    const lines = await readMetricsLog(path)
+
+    assert.equal(lines.length, LINE_COUNT_TWO)
+    assert.equal(lines[0].totals.processedContextBytes, 0)
+    assert.equal(lines[0].totals.processedContextTokens, 0)
+    assert.deepEqual(lines[1], makeLine())
+  })
 })
 
 test("the fixture totals carry exactly the shared schema keys at runtime", () => {

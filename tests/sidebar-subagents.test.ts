@@ -87,7 +87,7 @@ test("filterSubagentChildren preserves the input order", () => {
   assert.deepEqual(filterSubagentChildren([first, second]), [first, second])
 })
 
-test("sidebarSubagentsGroup renders the type's agent count on its row and four stat rows beneath", () => {
+test("sidebarSubagentsGroup renders the type's agent count on its row and the token-first stat rows beneath", () => {
   const childOne = makeChild({ id: "sess-child-1", type: "scout" })
   const childTwo = makeChild({ id: "sess-child-2", type: "scout", updatedAtMs: NOW_MS - MINUTE_MS })
   const uniqueCounts = { dedupedUnique: 5, reasoningExpiredUnique: 6 }
@@ -101,7 +101,14 @@ test("sidebarSubagentsGroup renders the type's agent count on its row and four s
   assert.deepEqual(rows, [
     { text: "Subagents: 2", tone: "normal" },
     { text: " ", tone: "normal" },
+    { text: "Tokens used: 39k tokens", tone: "normal" },
+    { text: "Evictions: 2, 900 tokens", tone: "normal" },
+    { text: "Deduped: 10, 4.5k tokens", tone: "normal" },
+    { text: "Reasoning expired: 12, 1.3k tokens", tone: "normal" },
+    { text: "Stash reads: 20, 8 hits", tone: "normal" },
+    { text: " ", tone: "normal" },
     { text: "Scout: 2 agents", tone: "normal", labelTone: "info", labelBold: true },
+    { text: "Tokens used: 39k tokens", tone: "normal" },
     { text: "Evictions: 2, 900 tokens", tone: "normal" },
     { text: "Deduped: 10, 4.5k tokens", tone: "normal" },
     { text: "Reasoning expired: 12, 1.3k tokens", tone: "normal" },
@@ -118,7 +125,14 @@ test("sidebarSubagentsGroup uses the singular agent unit for a single-child type
   assert.deepEqual(rows, [
     { text: "Subagents: 1", tone: "normal" },
     { text: " ", tone: "normal" },
+    { text: "Tokens used: 19.5k tokens", tone: "normal" },
+    { text: "Evictions: 1, 900 tokens", tone: "normal" },
+    { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
+    { text: EXPECTED_REASONING_STAT, tone: "normal" },
+    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+    { text: " ", tone: "normal" },
     { text: "Scout: 1 agent", tone: "normal", labelTone: "info", labelBold: true },
+    { text: "Tokens used: 19.5k tokens", tone: "normal" },
     { text: "Evictions: 1, 900 tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
@@ -148,12 +162,86 @@ test("sidebarSubagentsGroup sums the landed panels of a type and keeps the agent
   assert.deepEqual(rows, [
     { text: "Subagents: 2", tone: "normal" },
     { text: " ", tone: "normal" },
+    { text: "Tokens used: 19.5k tokens", tone: "normal" },
+    { text: "Evictions: 2, 900 tokens", tone: "normal" },
+    { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
+    { text: EXPECTED_REASONING_STAT, tone: "normal" },
+    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+    { text: " ", tone: "normal" },
     { text: "Scout: 2 agents", tone: "normal", labelTone: "info", labelBold: true },
+    { text: "Tokens used: 19.5k tokens", tone: "normal" },
     { text: "Evictions: 2, 900 tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
     { text: "Stash reads: 10, 4 hits", tone: "normal" },
   ])
+})
+
+test("sidebarSubagentsGroup renders the cumulative token-first block directly under the lead row and sums landed panels across types", () => {
+  const scout = makeChild({ id: "sess-child-1", type: "scout" })
+  const worker = makeChild({ id: "sess-child-2", type: "worker", updatedAtMs: NOW_MS - MINUTE_MS })
+  const data = dataWithChildren([
+    { id: scout.id, panel: makePanel(scout.id, { evictions: 2, evictionTokensSaved: 900, processedContextTokens: 700 }) },
+    { id: worker.id, panel: makePanel(worker.id, { evictions: 1, evictionTokensSaved: 600, processedContextTokens: 400 }) },
+  ])
+
+  const rows = rowsWithinWidth(sidebarSubagentsGroup([scout, worker], data))
+
+  assert.deepEqual(rows, [
+    { text: "Subagents: 2", tone: "normal" },
+    { text: " ", tone: "normal" },
+    { text: "Tokens used: 1.1k tokens", tone: "normal" },
+    { text: "Evictions: 3, 1.5k tokens", tone: "normal" },
+    { text: "Deduped: 8, 4.5k tokens", tone: "normal" },
+    { text: "Reasoning expired: 6, 1.3k tokens", tone: "normal" },
+    { text: "Stash reads: 20, 8 hits", tone: "normal" },
+    { text: " ", tone: "normal" },
+    { text: "Worker: 1 agent", tone: "normal", labelTone: "info", labelBold: true },
+    { text: "Tokens used: 400 tokens", tone: "normal" },
+    { text: "Evictions: 1, 600 tokens", tone: "normal" },
+    { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
+    { text: EXPECTED_REASONING_STAT, tone: "normal" },
+    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+    { text: " ", tone: "normal" },
+    { text: "Scout: 1 agent", tone: "normal", labelTone: "info", labelBold: true },
+    { text: "Tokens used: 700 tokens", tone: "normal" },
+    { text: "Evictions: 2, 900 tokens", tone: "normal" },
+    { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
+    { text: EXPECTED_REASONING_STAT, tone: "normal" },
+    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+  ])
+})
+
+test("sidebarSubagentsGroup renders no cumulative block when no child's panel has landed", () => {
+  const scout = makeChild({ id: "sess-child-1", type: "scout" })
+  const worker = makeChild({ id: "sess-child-2", type: "worker", updatedAtMs: NOW_MS - MINUTE_MS })
+
+  const rows = rowsWithinWidth(sidebarSubagentsGroup([scout, worker], dataWithChildren()))
+
+  assert.deepEqual(rows, [
+    { text: "Subagents: 2", tone: "normal" },
+    { text: " ", tone: "normal" },
+    { text: "Worker: no data yet", tone: "normal", labelTone: "info", labelBold: true },
+    { text: " ", tone: "normal" },
+    { text: "Scout: no data yet", tone: "normal", labelTone: "info", labelBold: true },
+  ])
+})
+
+test("sidebarSubagentsGroup sums the token rows over the landed children only", () => {
+  const landedOne = makeChild({ id: "sess-child-1", type: "scout" })
+  const landedTwo = makeChild({ id: "sess-child-2", type: "scout", updatedAtMs: NOW_MS - MINUTE_MS })
+  const dataless = makeChild({ id: "sess-child-3", type: "scout", updatedAtMs: NOW_MS - 2 * MINUTE_MS })
+  const data = dataWithChildren([
+    { id: landedOne.id, panel: makePanel(landedOne.id, { processedContextTokens: 700 }) },
+    { id: landedTwo.id, panel: makePanel(landedTwo.id, { processedContextTokens: 400 }) },
+  ])
+
+  const rows = rowsWithinWidth(sidebarSubagentsGroup([landedOne, landedTwo, dataless], data))
+
+  assert.equal(rows[0].text, "Subagents: 3")
+  assert.equal(rows[2].text, "Tokens used: 1.1k tokens")
+  assert.equal(rows[8].text, "Scout: 3 agents")
+  assert.equal(rows[9].text, "Tokens used: 1.1k tokens")
 })
 
 test("sidebarSubagentsGroup orders type blocks alphabetically regardless of the type's most recent child update", () => {
@@ -166,9 +254,16 @@ test("sidebarSubagentsGroup orders type blocks alphabetically regardless of the 
   assert.deepEqual(rows, [
     { text: "Subagents: 2", tone: "normal" },
     { text: " ", tone: "normal" },
+    { text: "Tokens used: 19.5k tokens", tone: "normal" },
+    { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
+    { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
+    { text: EXPECTED_REASONING_STAT, tone: "normal" },
+    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+    { text: " ", tone: "normal" },
     { text: "Probe: no data yet", tone: "normal", labelTone: "info", labelBold: true },
     { text: " ", tone: "normal" },
     { text: "Scan: 1 agent", tone: "normal", labelTone: "info", labelBold: true },
+    { text: "Tokens used: 19.5k tokens", tone: "normal" },
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
@@ -190,6 +285,12 @@ test("sidebarSubagentsGroup places the fleet agent types first in the canonical 
   assert.deepEqual(rows, [
     { text: "Subagents: 6", tone: "normal" },
     { text: " ", tone: "normal" },
+    { text: "Tokens used: 19.5k tokens", tone: "normal" },
+    { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
+    { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
+    { text: EXPECTED_REASONING_STAT, tone: "normal" },
+    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+    { text: " ", tone: "normal" },
     { text: "Worker: no data yet", tone: "normal", labelTone: "info", labelBold: true },
     { text: " ", tone: "normal" },
     { text: "Verifier: no data yet", tone: "normal", labelTone: "info", labelBold: true },
@@ -201,6 +302,7 @@ test("sidebarSubagentsGroup places the fleet agent types first in the canonical 
     { text: "Explore: no data yet", tone: "normal", labelTone: "info", labelBold: true },
     { text: " ", tone: "normal" },
     { text: "Zeta: 1 agent", tone: "normal", labelTone: "info", labelBold: true },
+    { text: "Tokens used: 19.5k tokens", tone: "normal" },
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
@@ -234,9 +336,16 @@ test("sidebarSubagentsGroup compares non-fleet types locale-free so an uppercase
   assert.deepEqual(rows, [
     { text: "Subagents: 2", tone: "normal" },
     { text: " ", tone: "normal" },
+    { text: "Tokens used: 19.5k tokens", tone: "normal" },
+    { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
+    { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
+    { text: EXPECTED_REASONING_STAT, tone: "normal" },
+    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+    { text: " ", tone: "normal" },
     { text: "Summarizer: no data yet", tone: "normal", labelTone: "info", labelBold: true },
     { text: " ", tone: "normal" },
     { text: "Audit: 1 agent", tone: "normal", labelTone: "info", labelBold: true },
+    { text: "Tokens used: 19.5k tokens", tone: "normal" },
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
@@ -265,7 +374,14 @@ test("sidebarSubagentsGroup excludes an archived child from the count and the ty
   assert.deepEqual(rows, [
     { text: "Subagents: 1", tone: "normal" },
     { text: " ", tone: "normal" },
+    { text: "Tokens used: 19.5k tokens", tone: "normal" },
+    { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
+    { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
+    { text: EXPECTED_REASONING_STAT, tone: "normal" },
+    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+    { text: " ", tone: "normal" },
     { text: "Probe: 1 agent", tone: "normal", labelTone: "info", labelBold: true },
+    { text: "Tokens used: 19.5k tokens", tone: "normal" },
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
@@ -280,7 +396,7 @@ test("sidebarSubagentsGroup leaves the raw child type untouched while rendering 
   const rows = rowsWithinWidth(sidebarSubagentsGroup([child], data))
 
   assert.equal(child.type, "worker")
-  assert.deepEqual(rows[2], { text: "Worker: 1 agent", tone: "normal", labelTone: "info", labelBold: true })
+  assert.deepEqual(rows[8], { text: "Worker: 1 agent", tone: "normal", labelTone: "info", labelBold: true })
 })
 
 test("sidebarSubagentsGroup capitalizes only the first letter of an already-capitalized or hyphenated type", () => {
@@ -293,7 +409,14 @@ test("sidebarSubagentsGroup capitalizes only the first letter of an already-capi
   assert.deepEqual(rows, [
     { text: "Subagents: 2", tone: "normal" },
     { text: " ", tone: "normal" },
+    { text: "Tokens used: 19.5k tokens", tone: "normal" },
+    { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
+    { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
+    { text: EXPECTED_REASONING_STAT, tone: "normal" },
+    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+    { text: " ", tone: "normal" },
     { text: "Scout: 1 agent", tone: "normal", labelTone: "info", labelBold: true },
+    { text: "Tokens used: 19.5k tokens", tone: "normal" },
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
@@ -309,13 +432,14 @@ test("sidebarSubagentsGroup caps an over-long type label's row at the sidebar co
 
   const rows = rowsWithinWidth(sidebarSubagentsGroup([child], data))
 
-  assert.equal(rows.length, 7)
+  assert.equal(rows.length, 14)
   assert.deepEqual(rows[1], { text: " ", tone: "normal" })
-  assert.equal(rows[2].text, `A${"a".repeat(SIDEBAR_COLUMN_LIMIT - 2)}…`)
-  assert.equal(rows[3].text, "Evictions: 5, 3.1k tokens")
-  assert.equal(rows[4].text, EXPECTED_DEDUPED_STAT)
-  assert.equal(rows[5].text, EXPECTED_REASONING_STAT)
-  assert.equal(rows[6].text, "Stash reads: 10, 4 hits")
+  assert.equal(rows[8].text, `A${"a".repeat(SIDEBAR_COLUMN_LIMIT - 2)}…`)
+  assert.equal(rows[9].text, "Tokens used: 19.5k tokens")
+  assert.equal(rows[10].text, "Evictions: 5, 3.1k tokens")
+  assert.equal(rows[11].text, EXPECTED_DEDUPED_STAT)
+  assert.equal(rows[12].text, EXPECTED_REASONING_STAT)
+  assert.equal(rows[13].text, "Stash reads: 10, 4 hits")
 })
 
 test("sidebarSubagentsGroup returns no rows for an empty child list", () => {

@@ -17,6 +17,7 @@ import {
   canRegisterSidebar,
   createMetricsLogReader,
   DEFAULT_METRICS_PATH,
+  deactivateHostSidebarBuiltins,
   filterSubagentChildren,
   loadPanelData,
   PANEL_COMMAND_CATEGORY,
@@ -27,8 +28,10 @@ import {
   PANEL_COMMAND_TITLE,
   panelRows,
   resolveSidebarEnabled,
+  resolveSidebarMode,
   resolveSidebarSubagents,
   resolveSubagentChildren,
+  SIDEBAR_MODE_CONTEXT,
   sidebarRows,
   sidebarSubagentsGroup,
   splitRowText,
@@ -184,6 +187,12 @@ const tui: TuiPluginModule["tui"] = async (api, options) => {
   }
   if (resolveSidebarEnabled(options?.sidebarEnabled) && canRegisterSidebar(api)) {
     const subagentsEnabled = resolveSidebarSubagents(options?.sidebarSubagents)
+    // In context mode the host's built-in sidebar content plugins are
+    // deactivated at every load so only the session name and this plugin's
+    // block remain; no persistence is assumed and full deactivates nothing.
+    if (resolveSidebarMode(options?.sidebarMode) === SIDEBAR_MODE_CONTEXT) {
+      deactivateHostSidebarBuiltins(api)
+    }
     api.slots.register({
       order: SIDEBAR_SLOT_ORDER,
       slots: {

@@ -20,6 +20,77 @@ export const DEFAULT_SIDEBAR_SUBAGENTS = false
 export const resolveSidebarSubagents = (value: unknown): boolean =>
   typeof value === "boolean" ? value : DEFAULT_SIDEBAR_SUBAGENTS
 
+export const SIDEBAR_MODE_FULL = "full"
+export const SIDEBAR_MODE_CONTEXT = "context"
+export const DEFAULT_SIDEBAR_MODE = SIDEBAR_MODE_FULL
+
+export type SidebarMode = typeof SIDEBAR_MODE_FULL | typeof SIDEBAR_MODE_CONTEXT
+
+// Recognized values are the two literals; everything else (unset, non-string,
+// unrecognized) falls back to full, which deactivates nothing.
+export const resolveSidebarMode = (value: unknown): SidebarMode =>
+  value === SIDEBAR_MODE_CONTEXT ? SIDEBAR_MODE_CONTEXT : DEFAULT_SIDEBAR_MODE
+
+// The host's built-in sidebar content plugins contributing to the same
+// sidebar_content slot the plugin registers into, in their host order. The
+// footer lives in the separate sidebar_footer slot and is never listed.
+export const HOST_SIDEBAR_CONTENT_PLUGIN_IDS: readonly string[] = Object.freeze([
+  "internal:sidebar-context",
+  "internal:sidebar-mcp",
+  "internal:sidebar-lsp",
+  "internal:sidebar-todo",
+  "internal:sidebar-files",
+])
+
+// True when the host TUI api object actually exposes the plugin deactivation
+// surface. Same seam as canRegisterSidebar: the .tsx cannot export logic
+// that node can load, so the predicate lives here and the TUI imports it. A
+// host without the plugins API (or with a non-callable deactivate) gets no
+// deactivation and no error, so a host build without the surface degrades
+// to the full sidebar.
+export const canDeactivatePlugins = (api: unknown): boolean => {
+  if (isRecord(api) === false) return false
+  let plugins: unknown
+  try {
+    plugins = api["plugins"]
+  } catch {
+    return false
+  }
+  if (isRecord(plugins) === false) return false
+  try {
+    return typeof plugins["deactivate"] === "function"
+  } catch {
+    return false
+  }
+}
+
+// A deactivate call's return value is API-inferred, so a promise-like result
+// is possible: attaching a no-op rejection handler keeps a hostile host's
+// rejected promise out of the unhandled-rejection queue while degrading that
+// id to no deactivation.
+const detachDeactivateRejection = (result: unknown): void => {
+  const thenable = result as { then?: (onFulfilled?: () => void, onRejected?: () => void) => unknown } | null | undefined
+  if (typeof thenable?.then === "function") thenable.then(undefined, () => {})
+}
+
+// Deactivates the host's built-in sidebar content plugins so a context-mode
+// sidebar shows only the session name and the plugin's own block. Applied
+// at every TUI load with no persistence assumed. The calls are independent:
+// a per-id failure (a synchronous throw or a rejected promise-like return)
+// degrades that id to no deactivation while the remaining ids still get
+// their calls, never an error into the TUI mount path.
+export const deactivateHostSidebarBuiltins = (api: unknown): void => {
+  if (canDeactivatePlugins(api) === false) return
+  const deactivate = (api as { plugins: { deactivate: (pluginID: string) => void } }).plugins.deactivate
+  for (const pluginID of HOST_SIDEBAR_CONTENT_PLUGIN_IDS) {
+    try {
+      detachDeactivateRejection(deactivate(pluginID))
+    } catch {
+      continue
+    }
+  }
+}
+
 // True when the host TUI api object actually exposes the slots registry the
 // sidebar needs. The .tsx cannot export logic that node can load, so the
 // predicate lives here and the TUI imports it: a host without the slots
@@ -267,12 +338,20 @@ const parseEvictedEntries = (value: unknown): PanelEvictedEntry[] | undefined =>
   return entries
 }
 
-// Every totals key is required and must be a finite number, with one
+// Every totals key is required and must be a finite number, with a
 // transitional exception: `dedupedBytes` postdates the other raw counters,
 // and rotation now holds weeks of records written before it existed, so an
 // absent `dedupedBytes` defaults to 0 while a present non-finite value
-// still rejects the record.
-const TRANSITIONAL_ABSENT_ZERO_KEYS: readonly TotalsKey[] = ["dedupedBytes"]
+// still rejects the record. `processedContextBytes` and
+// `processedContextTokens` join the same list: a brand-new from-zero
+// counter carries no legacy meaning to distrust, so pre-upgrade records
+// keep parsing with truthful zeros and the totals begin accumulating from
+// the upgrade forward.
+const TRANSITIONAL_ABSENT_ZERO_KEYS: readonly TotalsKey[] = [
+  "dedupedBytes",
+  "processedContextBytes",
+  "processedContextTokens",
+]
 
 const parseTotals = (value: unknown): PanelTotals | undefined => {
   if (!isRecord(value)) return undefined
@@ -827,6 +906,7 @@ const SIDEBAR_EVICTIONS_LABEL = "Evictions"
 const SIDEBAR_DEDUPED_LABEL = "Deduped"
 const SIDEBAR_REASONING_LABEL = "Reasoning expired"
 const SIDEBAR_STASH_READS_LABEL = "Stash reads"
+const SIDEBAR_TOKENS_USED_LABEL = "Tokens used"
 const SIDEBAR_TOKENS_UNIT = "tokens"
 const SIDEBAR_HITS_UNIT = "hits"
 const SIDEBAR_BUDGET_INACTIVE_TEXT = `${SIDEBAR_BUDGET_LABEL}: inactive (no budget)`
@@ -853,6 +933,9 @@ const sidebarOverByRow = (current: SessionPanel): PanelRow | undefined => {
 
 const savingsStatText = (label: string, count: number, tokensSaved: number): string =>
   `${label}: ${count}, ${formatTokenCount(tokensSaved)} ${SIDEBAR_TOKENS_UNIT}`
+
+const tokensStatText = (tokens: number): string =>
+  `${SIDEBAR_TOKENS_USED_LABEL}: ${formatTokenCount(tokens)} ${SIDEBAR_TOKENS_UNIT}`
 
 const stashReadsStatText = (stashReads: number, stashHits: number): string =>
   `${SIDEBAR_STASH_READS_LABEL}: ${stashReads}, ${stashHits} ${SIDEBAR_HITS_UNIT}`
@@ -899,37 +982,48 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
     reasoningTokensSaved: number
     stashReads: number
     stashHits: number
+    processedContextTokens: number
     hasPanel: boolean
     newestUpdatedAtMs: number
   }
+  const aggregateFor = (): SubagentTypeAggregate => ({
+    count: 0,
+    evictions: 0,
+    evictionTokensSaved: 0,
+    dedupedUnique: 0,
+    dedupTokensSaved: 0,
+    reasoningExpiredUnique: 0,
+    reasoningTokensSaved: 0,
+    stashReads: 0,
+    stashHits: 0,
+    processedContextTokens: 0,
+    hasPanel: false,
+    newestUpdatedAtMs: 0,
+  })
+  const foldPanelIntoAggregate = (aggregate: SubagentTypeAggregate, panel: SessionPanel): void => {
+    aggregate.hasPanel = true
+    aggregate.evictions += panel.totals.evictions
+    aggregate.evictionTokensSaved += panel.totals.evictionTokensSaved
+    aggregate.dedupedUnique += panel.totals.dedupedUnique
+    aggregate.dedupTokensSaved += panel.totals.dedupTokensSaved
+    aggregate.reasoningExpiredUnique += panel.totals.reasoningExpiredUnique
+    aggregate.reasoningTokensSaved += panel.totals.reasoningTokensSaved
+    aggregate.stashReads += panel.stashReads
+    aggregate.stashHits += panel.totals.stashHits
+    aggregate.processedContextTokens += panel.totals.processedContextTokens
+  }
   const aggregates = new Map<string, SubagentTypeAggregate>()
+  // The cumulative aggregate reads only the folded panel stats, so it seeds
+  // zero and never touches the per-type count and recency fields.
+  const cumulative = aggregateFor()
   for (const child of kept) {
-    const aggregate = aggregates.get(child.type) ?? {
-      count: 0,
-      evictions: 0,
-      evictionTokensSaved: 0,
-      dedupedUnique: 0,
-      dedupTokensSaved: 0,
-      reasoningExpiredUnique: 0,
-      reasoningTokensSaved: 0,
-      stashReads: 0,
-      stashHits: 0,
-      hasPanel: false,
-      newestUpdatedAtMs: child.updatedAtMs,
-    }
+    const aggregate = aggregates.get(child.type) ?? aggregateFor()
     aggregate.count += 1
     aggregate.newestUpdatedAtMs = Math.max(aggregate.newestUpdatedAtMs, child.updatedAtMs)
     const panel = panelByID.get(child.id)
     if (panel !== undefined) {
-      aggregate.hasPanel = true
-      aggregate.evictions += panel.totals.evictions
-      aggregate.evictionTokensSaved += panel.totals.evictionTokensSaved
-      aggregate.dedupedUnique += panel.totals.dedupedUnique
-      aggregate.dedupTokensSaved += panel.totals.dedupTokensSaved
-      aggregate.reasoningExpiredUnique += panel.totals.reasoningExpiredUnique
-      aggregate.reasoningTokensSaved += panel.totals.reasoningTokensSaved
-      aggregate.stashReads += panel.stashReads
-      aggregate.stashHits += panel.totals.stashHits
+      foldPanelIntoAggregate(aggregate, panel)
+      foldPanelIntoAggregate(cumulative, panel)
     }
     aggregates.set(child.type, aggregate)
   }
@@ -944,21 +1038,28 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
     text: truncateToWidth(statText, SIDEBAR_COLUMN_LIMIT),
     tone: "normal",
   })
+  const statRowsFor = (aggregate: SubagentTypeAggregate): PanelRow[] => [
+    statRow(tokensStatText(aggregate.processedContextTokens)),
+    statRow(savingsStatText(SIDEBAR_EVICTIONS_LABEL, aggregate.evictions, aggregate.evictionTokensSaved)),
+    statRow(savingsStatText(SIDEBAR_DEDUPED_LABEL, aggregate.dedupedUnique, aggregate.dedupTokensSaved)),
+    statRow(savingsStatText(SIDEBAR_REASONING_LABEL, aggregate.reasoningExpiredUnique, aggregate.reasoningTokensSaved)),
+    statRow(stashReadsStatText(aggregate.stashReads, aggregate.stashHits)),
+  ]
   const typeBlocks: PanelRow[][] = sortedTypes.map(([type, aggregate]) => {
     const agentsText = `${aggregate.count} ${aggregate.count === 1 ? SUBAGENT_AGENT_SINGULAR : SUBAGENT_AGENTS_UNIT}`
     const body = aggregate.hasPanel ? agentsText : SUBAGENT_NO_DATA_TEXT
     const block: PanelRow[] = [
       { text: truncateToWidth(`${capitalizeLabel(type)}: ${body}`, SIDEBAR_COLUMN_LIMIT), tone: "normal", labelTone: "info", labelBold: true },
     ]
-    if (!aggregate.hasPanel) return block
-    block.push(statRow(savingsStatText(SIDEBAR_EVICTIONS_LABEL, aggregate.evictions, aggregate.evictionTokensSaved)))
-    block.push(statRow(savingsStatText(SIDEBAR_DEDUPED_LABEL, aggregate.dedupedUnique, aggregate.dedupTokensSaved)))
-    block.push(statRow(savingsStatText(SIDEBAR_REASONING_LABEL, aggregate.reasoningExpiredUnique, aggregate.reasoningTokensSaved)))
-    block.push(statRow(stashReadsStatText(aggregate.stashReads, aggregate.stashHits)))
+    if (aggregate.hasPanel) block.push(...statRowsFor(aggregate))
     return block
   })
   const leadRow: PanelRow = { text: truncateToWidth(`${SIDEBAR_SUBAGENTS_LEAD_LABEL}: ${kept.length}`, SIDEBAR_COLUMN_LIMIT), tone: "normal" }
-  return withBlankSeparators([[leadRow], ...typeBlocks])
+  // The cumulative block renders only when some kept child's panel has
+  // landed, mirroring the per-type rule that stats render only from landed
+  // panels; the type blocks follow in their fixed order either way.
+  const cumulativeBlock = cumulative.hasPanel ? statRowsFor(cumulative) : []
+  return withBlankSeparators([[leadRow], ...(cumulativeBlock.length > 0 ? [cumulativeBlock] : []), ...typeBlocks])
 }
 
 const finishSidebarGroups = (groups: PanelRow[][], subagentRows?: PanelRow[]): PanelRow[][] =>

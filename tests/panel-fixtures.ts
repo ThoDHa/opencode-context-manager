@@ -29,6 +29,8 @@ const TOTALS_REASONING_EXPIRED_UNIQUE = 3
 const TOTALS_REASONING_BYTES_UNIQUE = 2560
 const TOTALS_FENCE_EVICTED = 2
 const TOTALS_TOUCHES = 3
+const TOTALS_PROCESSED_CONTEXT_BYTES = 78000
+const TOTALS_PROCESSED_CONTEXT_TOKENS = 19500
 const TOTALS_EVICTION_TOKENS_SAVED = 3072
 const TOTALS_DEDUP_TOKENS_SAVED = 2250
 const TOTALS_COLLAPSED_WINDOW_TOKENS_SAVED = 1024
@@ -76,6 +78,8 @@ const TOTALS_VALUES: Record<TotalsKey, number> = {
   reasoningTokensSaved: TOTALS_REASONING_TOKENS_SAVED,
   fenceEvicted: TOTALS_FENCE_EVICTED,
   postEvictionTouches: TOTALS_TOUCHES,
+  processedContextBytes: TOTALS_PROCESSED_CONTEXT_BYTES,
+  processedContextTokens: TOTALS_PROCESSED_CONTEXT_TOKENS,
 }
 
 const makeTotals = (): PanelMetricsLine["totals"] => ({ ...TOTALS_VALUES })
@@ -95,9 +99,19 @@ const makePreSchemaTotals = (): Record<string, number> => {
     reasoningBytesExpiredUnique: _reasoningBytesExpiredUnique,
     collapsedWindows: _collapsedWindows,
     collapsedWindowBytes: _collapsedWindowBytes,
+    processedContextBytes: _processedContextBytes,
+    processedContextTokens: _processedContextTokens,
     ...preSchema
   } = TOTALS_VALUES
   return preSchema
+}
+
+// A totals record written before the processed-context token totals
+// existed: the transitional shape whose absent keys parse as zero on both
+// sides instead of rejecting the record.
+const makePreTokenUsageTotals = (): Record<string, number> => {
+  const { processedContextBytes: _processedContextBytes, processedContextTokens: _processedContextTokens, ...preTokenUsage } = TOTALS_VALUES
+  return preTokenUsage
 }
 
 const makeLine = (overrides: Partial<PanelMetricsLine> = {}): PanelMetricsLine => ({
@@ -179,6 +193,8 @@ export {
   EXPECTED_REASONING_STAT,
   EXPECTED_DEDUPED_STAT,
   TOTALS_FENCE_EVICTED,
+  TOTALS_PROCESSED_CONTEXT_BYTES,
+  TOTALS_PROCESSED_CONTEXT_TOKENS,
   UNKNOWN_BUDGET_SOURCE,
   OVERRIDE_BUDGET_SOURCE,
   MODEL_BUDGET_SOURCE,
@@ -193,6 +209,7 @@ export {
   SECOND_LINE_ESTIMATED,
   makeTotals,
   makePreSchemaTotals,
+  makePreTokenUsageTotals,
   makeLine,
   serialize,
   withTempDir,

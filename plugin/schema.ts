@@ -32,6 +32,7 @@ export const RAW_COUNTER_KEYS = Object.freeze([
   "reasoningBytesExpiredUnique",
   "postEvictionTouches",
   "fenceEvicted",
+  "processedContextBytes",
 ] as const)
 
 export type RawCounterKey = (typeof RAW_COUNTER_KEYS)[number]
@@ -45,6 +46,7 @@ export const DERIVED_COUNTER_KEYS = Object.freeze([
   "dedupTokensSaved",
   "collapsedWindowTokensSaved",
   "reasoningTokensSaved",
+  "processedContextTokens",
 ] as const)
 
 export type DerivedCounterKey = (typeof DERIVED_COUNTER_KEYS)[number]

@@ -337,6 +337,7 @@ type SessionMetrics = {
   reasoningBytesExpiredUnique: number
   postEvictionTouches: number
   fenceEvicted: number
+  processedContextBytes: number
   evictedSubjects: Subject[]
   touchScanThrough: number
   // Per-entry memory for the unique-event counters: content identities of
@@ -1706,6 +1707,11 @@ const recordRunOutcome = (metrics: SessionMetrics, run: RunOutcome, rememberedSu
   metrics.fenceEvicted += fenceEvictedThisRun.blocks
   metrics.bytesReclaimed += fenceEvictedThisRun.bytes
   metrics.stashDropped += fenceEvictedThisRun.stashDropped
+  // The processed-context total rides the post-transform composition: the
+  // request the provider bills carries this list, so the running byte sum
+  // is what the derived token total divides (sum-of-chars, one ceil at
+  // read, never a sum of per-run ceils).
+  metrics.processedContextBytes += run.composition.toolPoolBytes + run.composition.textChars
 }
 
 const rotateMetricsLogPastCap = async (path: string, incomingBytes: number, capBytes: number): Promise<void> => {
@@ -1846,6 +1852,7 @@ const DERIVED_TOTAL_SOURCES: { [K in TotalsDerivedKey]: RawCounterKey } = {
   dedupTokensSaved: "dedupedBytes",
   collapsedWindowTokensSaved: "collapsedWindowBytes",
   reasoningTokensSaved: "reasoningBytesExpiredUnique",
+  processedContextTokens: "processedContextBytes",
 }
 
 const totalsOf = (metrics: SessionMetrics, charsPerToken: number): CumulativeCounters => {

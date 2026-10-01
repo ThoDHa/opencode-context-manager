@@ -3423,6 +3423,8 @@ const STATS_ZEROED_COUNTERS = {
   reasoningBytesExpiredUnique: 0,
   reasoningTokensSaved: 0,
   fenceEvicted: 0,
+  processedContextBytes: 0,
+  processedContextTokens: 0,
 }
 const STATS_LOG_FILE_LINES = 1
 
@@ -3590,6 +3592,8 @@ test("context_stats counts the eviction reclaimed bytes stash entry and last run
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
+    processedContextBytes: 482,
+    processedContextTokens: tokensForChars(482),
   })
   assert.deepEqual(stats.stash, { entries: 1, capacity: STASH_LIMIT })
   assert.deepEqual(stats.lastRun, {
@@ -3611,6 +3615,8 @@ test("context_stats derives the eviction token-savings estimate from the reclaim
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
+    processedContextBytes: 482,
+    processedContextTokens: tokensForChars(482),
   })
 })
 
@@ -3645,6 +3651,8 @@ test("context_stats counts stash hits and misses from read_evicted and leaves in
     bytesReclaimed: MIN_EVICTABLE_BYTES,
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
     stashMisses: 1,
+    processedContextBytes: 480,
+    processedContextTokens: tokensForChars(480),
   })
 
   assert.equal(await readEvicted(hooks, INVALID_SUBJECT_VALUE, SESSION_ID), invalidSubjectMissFor("number"))
@@ -3662,6 +3670,8 @@ test("context_stats counts stash hits and misses from read_evicted and leaves in
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
     stashHits: 1,
     stashMisses: 1,
+    processedContextBytes: 480,
+    processedContextTokens: tokensForChars(480),
   })
 })
 
@@ -3761,6 +3771,8 @@ test("context_stats accumulates the dedup token-savings estimate from each super
     dedupedBytes: DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES,
     dedupedUnique: DEDUP_SAVINGS_PAIR_COUNT,
     dedupTokensSaved: tokensForChars(DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES),
+    processedContextBytes: 6234,
+    processedContextTokens: tokensForChars(6234),
   })
 
   // The host re-materializes the stored messages on every run, so a standing
@@ -3877,6 +3889,8 @@ test("metrics log appends one eventful jsonl line with expected fields and nothi
       evictions: 1,
       bytesReclaimed: MIN_EVICTABLE_BYTES,
       evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
+      processedContextBytes: 474,
+      processedContextTokens: tokensForChars(474),
     })
 
     await runTransform(hooks, bundle)
@@ -3913,6 +3927,8 @@ test("metrics log records an unknown budget skip state with null watermark on an
       dedupedBytes: THREE_ENTRY_OUTPUT_BYTES,
       dedupedUnique: 1,
       dedupTokensSaved: tokensForChars(THREE_ENTRY_OUTPUT_BYTES),
+      processedContextBytes: 3117,
+      processedContextTokens: tokensForChars(3117),
     })
   } finally {
     cleanupMetricsDir(metricsDir)
@@ -3988,6 +4004,8 @@ test("metrics log records stash reads since the last line on the next transform 
       bytesReclaimed: MIN_EVICTABLE_BYTES,
       evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
       stashHits: 1,
+      processedContextBytes: 976,
+      processedContextTokens: tokensForChars(976),
     })
 
     await runTransform(hooks, bundle)
@@ -4054,6 +4072,8 @@ test("context_stats keeps metrics isolated between two sessions", async () => {
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
+    processedContextBytes: 482,
+    processedContextTokens: tokensForChars(482),
   })
   const statsB = await readStats(hooks, SESSION_ID_B)
   assert.equal(statsB.session, SESSION_ID_B)
@@ -4062,6 +4082,8 @@ test("context_stats keeps metrics isolated between two sessions", async () => {
     evictions: STATS_ISOLATION_B_EVICTED_COUNT,
     bytesReclaimed: STATS_ISOLATION_B_EVICTED_COUNT * THREE_ENTRY_OUTPUT_BYTES,
     evictionTokensSaved: tokensForChars(STATS_ISOLATION_B_EVICTED_COUNT * THREE_ENTRY_OUTPUT_BYTES),
+    processedContextBytes: 3928,
+    processedContextTokens: tokensForChars(3928),
   })
 })
 
@@ -4240,6 +4262,8 @@ test("metrics log stays byte identical at exactly the rotation cap and rotates w
       bytesReclaimed: MIN_EVICTABLE_BYTES,
       evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
       stashHits: 1,
+      processedContextBytes: 992,
+      processedContextTokens: tokensForChars(992),
     })
   } finally {
     cleanupMetricsDir(metricsDir)
@@ -4422,7 +4446,7 @@ test("live state snapshot is written on a quiet run with the exact schema budget
       modelContextTokensSource: CONTEXT_TOKENS_SOURCE_UNKNOWN,
       modelContextTokensModelKey: null,
       lastRun: { estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS), watermarkTokens: null, deficitTokens: null },
-      totals: { ...STATS_ZEROED_COUNTERS },
+      totals: { ...STATS_ZEROED_COUNTERS, processedContextBytes: STANDARD_BUNDLE_CHARS, processedContextTokens: tokensForChars(STANDARD_BUNDLE_CHARS) },
       stash: { entries: 0, capacity: STASH_LIMIT },
       hotSubjects: [LIVE_STATE_QUIET_SUBJECT],
     })
@@ -4435,7 +4459,7 @@ test("live state snapshot is written on a quiet run with the exact schema budget
       modelContextTokensSource: CONTEXT_TOKENS_SOURCE_UNKNOWN,
       modelContextTokensModelKey: null,
       lastRun: { estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS), watermarkTokens: null, deficitTokens: null },
-      totals: { ...STATS_ZEROED_COUNTERS },
+      totals: { ...STATS_ZEROED_COUNTERS, processedContextBytes: 2 * STANDARD_BUNDLE_CHARS, processedContextTokens: tokensForChars(2 * STANDARD_BUNDLE_CHARS) },
       stash: { entries: 0, capacity: STASH_LIMIT },
       hotSubjects: [LIVE_STATE_QUIET_SUBJECT],
     })
@@ -4478,7 +4502,11 @@ test("live state snapshot carries the captured budget source manual mode and the
       watermarkTokens: MANUAL_ARMED_WATERMARK_TOKENS,
       deficitTokens: MANUAL_ARMED_DEFICIT_TOKENS,
     })
-    assert.deepEqual(snapshot.totals, { ...STATS_ZEROED_COUNTERS })
+    assert.deepEqual(snapshot.totals, {
+      ...STATS_ZEROED_COUNTERS,
+      processedContextBytes: STANDARD_BUNDLE_CHARS,
+      processedContextTokens: tokensForChars(STANDARD_BUNDLE_CHARS),
+    })
     assert.deepEqual(snapshot.stash, { entries: 0, capacity: STASH_LIMIT })
     assert.deepEqual(snapshot.hotSubjects, [LIVE_STATE_MANUAL_SUBJECT])
   } finally {
@@ -4509,6 +4537,8 @@ test("live state snapshot records eviction totals stash occupancy and an empty h
       evictions: 1,
       bytesReclaimed: MIN_EVICTABLE_BYTES,
       evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
+      processedContextBytes: 484,
+      processedContextTokens: tokensForChars(484),
     })
     assert.deepEqual(snapshot.stash, { entries: 1, capacity: STASH_LIMIT })
     assert.deepEqual(snapshot.hotSubjects, [])
@@ -4762,11 +4792,17 @@ test("context_stats reports the live state options defaulting beside the metrics
   assert.equal(customOptions.liveStatePruneMinIntervalMs, LIVE_STATE_CUSTOM_PRUNE_MIN_INTERVAL_MS)
 })
 
+// The aged reasoning bundle's post-transform composition: the expired
+// reasoning parts leave the list, so only the four filler messages remain.
+const AGED_REASONING_PROCESSED_CHARS = RECENT_WINDOW_FILLER_MESSAGES * FILLER_TEXT_CHARS
+
 const SIBLING_FIRST_CROSSING_COUNTERS = {
   ...STATS_ZEROED_COUNTERS,
   reasoningExpiredUnique: EXPIRED_REASONING_PAIR_COUNT,
   reasoningBytesExpiredUnique: EXPIRED_REASONING_PAIR_BYTES,
   reasoningTokensSaved: tokensForChars(EXPIRED_REASONING_PAIR_BYTES),
+  processedContextBytes: AGED_REASONING_PROCESSED_CHARS,
+  processedContextTokens: tokensForChars(AGED_REASONING_PROCESSED_CHARS),
 }
 
 const agedReasoningBundleFor = (sessionID: string): StrictBundle =>
@@ -4787,7 +4823,11 @@ test("context_stats credits each expired reasoning part once and holds the total
   // recount the standing set per request but credit the lifetime totals
   // only at the first crossing, in count and in bytes alike.
   await runTransform(hooks, agedReasoningBundleFor(SESSION_ID))
-  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), SIBLING_FIRST_CROSSING_COUNTERS)
+  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), {
+    ...SIBLING_FIRST_CROSSING_COUNTERS,
+    processedContextBytes: 2 * AGED_REASONING_PROCESSED_CHARS,
+    processedContextTokens: tokensForChars(2 * AGED_REASONING_PROCESSED_CHARS),
+  })
 })
 
 test("sibling sessions expiring identical cold reasoning content each count their own first crossings", async () => {
@@ -4800,6 +4840,12 @@ test("sibling sessions expiring identical cold reasoning content each count thei
   assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID_B)), SIBLING_FIRST_CROSSING_COUNTERS)
 })
 
+const SIBLING_REPEATED_STANDING_COUNTERS = {
+  ...SIBLING_FIRST_CROSSING_COUNTERS,
+  processedContextBytes: (REPEATED_STANDING_RUNS + 1) * AGED_REASONING_PROCESSED_CHARS,
+  processedContextTokens: tokensForChars((REPEATED_STANDING_RUNS + 1) * AGED_REASONING_PROCESSED_CHARS),
+}
+
 test("sibling reasoning counters stay isolated across interleaved repeated standing runs", async () => {
   const hooks = await loadPluginHooks()
 
@@ -4810,8 +4856,8 @@ test("sibling reasoning counters stay isolated across interleaved repeated stand
     await runTransform(hooks, agedReasoningBundleFor(SESSION_ID_B))
   }
 
-  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), SIBLING_FIRST_CROSSING_COUNTERS)
-  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID_B)), SIBLING_FIRST_CROSSING_COUNTERS)
+  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), SIBLING_REPEATED_STANDING_COUNTERS)
+  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID_B)), SIBLING_REPEATED_STANDING_COUNTERS)
 })
 
 test("context_stats reports only the calling session's reasoning counters", async () => {
@@ -4825,7 +4871,11 @@ test("context_stats reports only the calling session's reasoning counters", asyn
   assert.deepEqual(countersOf(sessionStats), SIBLING_FIRST_CROSSING_COUNTERS)
   const siblingStats = await readStats(hooks, SESSION_ID_B)
   assert.equal(siblingStats["session"], SESSION_ID_B)
-  assert.deepEqual(countersOf(siblingStats), STATS_ZEROED_COUNTERS)
+  assert.deepEqual(countersOf(siblingStats), {
+    ...STATS_ZEROED_COUNTERS,
+    processedContextBytes: AGED_REASONING_PROCESSED_CHARS,
+    processedContextTokens: tokensForChars(AGED_REASONING_PROCESSED_CHARS),
+  })
 })
 
 test("context_stats counts identical-content reasoning parts once in the unique count and credits their bytes once", async () => {
@@ -4858,6 +4908,8 @@ test("context_stats leaves reasoning counters at zero when a pressured session h
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
+    processedContextBytes: 486,
+    processedContextTokens: tokensForChars(486),
   })
 })
 
@@ -4883,20 +4935,49 @@ test("metrics log counts expired reasoning bytes separately from evictions on a 
       reasoningExpiredUnique: EXPIRED_REASONING_SINGLE_COUNT,
       reasoningBytesExpiredUnique: REASONING_COLD_TEXT.length,
       reasoningTokensSaved: tokensForChars(REASONING_COLD_TEXT.length),
+      processedContextBytes: 50,
+      processedContextTokens: tokensForChars(50),
     })
   } finally {
     cleanupMetricsDir(metricsDir)
   }
 })
 
-// Known composition: message 0 carries an aged reasoning part (expired) and
-// a 4000-byte read of A whose identical twin at message 4 (3500 B, aged)
-// dedup-tombstones it; message 8 is a 3000-byte read of B contained in
-// message 13's 3500-byte read of B and is range-collapse-tombstoned; message
-// 13 sits inside the recent window and carries the windowed reasoning part.
-// Post-pass arithmetic asserted below: toolPoolBytes = 3500 + 3500 + 77 (the
-// dedup tombstone naming message 4), textChars = 4 x 240 + 9 x 10 + 141 (the
-// range-collapse tombstone as a text part), reasoningInWindowBytes = 24.
+// The composition-known bundle both composition tests run: 17 messages, the
+// recent window covering the last 4 (indices 13-16). Construction with
+// distinct paths so each pass's effect is countable:
+// - msg0: aged reasoning (expired, its bytes leave the list) + a 4000-byte
+//   read of A; msg4's read of A has identical input, so dedup tombstones
+//   msg0's output into a 77-char tombstone naming message 4, which stays
+//   inside the tool pool
+// - msg8: a 3000-byte read of B at (100,150), contained in msg13's (90,180)
+//   read of B -> range collapse tombstones it as a 141-char text part,
+//   leaving msg13's 3500 live
+// - msg13 sits inside the recent window, so its reasoning part survives and
+//   reasoningInWindowBytes counts it
+const compositionKnownBundle = (): StrictBundle => {
+  const compositionTextMessages = (count: number): MessagePart[][] =>
+    Array.from({ length: count }, () => [textPart(textOfChars(COMPOSITION_TEXT_CHARS))])
+  return buildBundle([
+    [reasoningPart(REASONING_COLD_TEXT), completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: COMPOSITION_PATH_A, [OFFSET_INPUT_KEY]: 100, [LIMIT_INPUT_KEY]: 50 }, outputOfBytes(COMPOSITION_TOOL_COLD_BYTES))],
+    ...compositionTextMessages(1),
+    ...fillerMessages(2),
+    [completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: COMPOSITION_PATH_A, [OFFSET_INPUT_KEY]: 100, [LIMIT_INPUT_KEY]: 50 }, outputOfBytes(COMPOSITION_TOOL_RETAINED_BYTES))],
+    ...compositionTextMessages(1),
+    ...fillerMessages(2),
+    [completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: COMPOSITION_PATH_B, [OFFSET_INPUT_KEY]: 100, [LIMIT_INPUT_KEY]: 50 }, outputOfBytes(COMPOSITION_TOOL_CONTAINED_BYTES))],
+    ...compositionTextMessages(1),
+    ...fillerMessages(2),
+    ...compositionTextMessages(1),
+    [completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: COMPOSITION_PATH_B, [OFFSET_INPUT_KEY]: 90, [LIMIT_INPUT_KEY]: 90 }, outputOfBytes(COMPOSITION_TOOL_RETAINED_BYTES)), reasoningPart(COMPOSITION_WINDOWED_REASONING_TEXT)],
+    ...fillerMessages(3),
+  ])
+}
+
+// Post-pass arithmetic asserted by the composition test: toolPoolBytes =
+// 3500 + 3500 + 77 (the dedup tombstone naming message 4), textChars =
+// 4 x 240 + 9 x 10 + 141 (the range-collapse tombstone as a text part),
+// reasoningInWindowBytes = 24.
 test("metrics line carries the post-transform composition fields on a known bundle", async () => {
   const metricsDir = makeMetricsDir()
   try {
@@ -4904,32 +4985,7 @@ test("metrics line carries the post-transform composition fields on a known bund
     const hooks = await loadPluginHooksWith({ metricsLog: true, metricsPath, manualMode: true })
     await setContextLimit(hooks, SESSION_ID, LARGE_DEFAULT_CONTEXT_TOKENS)
 
-    // 17 messages, recent window covering the last 4 (indices 13-16).
-    // Construction with distinct paths so each pass's effect is countable:
-    // - msg0: aged reasoning (expired, its bytes leave the list) + a
-    //   4000-byte read of A; msg4's read of A has identical input, so
-    //   dedup tombstones msg0's output into a 77-char tombstone naming
-    //   message 4, which stays inside the tool pool
-    // - msg8: a 3000-byte read of B at (100,150), contained in msg13's
-    //   (90,180) read of B -> range collapse tombstones it as a 141-char
-    //   text part, leaving msg13's 3500 live
-    // - msg13 sits inside the recent window, so its reasoning part
-    //   survives and reasoningInWindowBytes counts it
-    const textMessages = (count: number): MessagePart[][] => Array.from({ length: count }, () => [textPart(textOfChars(COMPOSITION_TEXT_CHARS))])
-    const bundle = buildBundle([
-      [reasoningPart(REASONING_COLD_TEXT), completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: COMPOSITION_PATH_A, [OFFSET_INPUT_KEY]: 100, [LIMIT_INPUT_KEY]: 50 }, outputOfBytes(COMPOSITION_TOOL_COLD_BYTES))],
-      ...textMessages(1),
-      ...fillerMessages(2),
-      [completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: COMPOSITION_PATH_A, [OFFSET_INPUT_KEY]: 100, [LIMIT_INPUT_KEY]: 50 }, outputOfBytes(COMPOSITION_TOOL_RETAINED_BYTES))],
-      ...textMessages(1),
-      ...fillerMessages(2),
-      [completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: COMPOSITION_PATH_B, [OFFSET_INPUT_KEY]: 100, [LIMIT_INPUT_KEY]: 50 }, outputOfBytes(COMPOSITION_TOOL_CONTAINED_BYTES))],
-      ...textMessages(1),
-      ...fillerMessages(2),
-      ...textMessages(1),
-      [completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: COMPOSITION_PATH_B, [OFFSET_INPUT_KEY]: 90, [LIMIT_INPUT_KEY]: 90 }, outputOfBytes(COMPOSITION_TOOL_RETAINED_BYTES)), reasoningPart(COMPOSITION_WINDOWED_REASONING_TEXT)],
-      ...fillerMessages(3),
-    ])
+    const bundle = compositionKnownBundle()
     await runTransform(hooks, bundle)
 
     const lines = metricsLinesIn(metricsPath)
@@ -4951,6 +5007,61 @@ test("metrics line carries the post-transform composition fields on a known bund
     assert.equal(composition.reasoningInWindowBytes, COMPOSITION_WINDOWED_REASONING_TEXT.length)
   } finally {
     cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("metrics totals accumulate the post-transform processed context chars across runs and derive their token estimate", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const hooks = await loadPluginHooksWithPersistence(metricsPath, stateDir, { manualMode: true })
+    await setContextLimit(hooks, SESSION_ID, LARGE_DEFAULT_CONTEXT_TOKENS)
+
+    // The composition-known bundle from the composition test above: its
+    // post-transform toolPoolBytes and textChars are asserted field for
+    // field there, so the processed-context total must equal their sum.
+    const bundle = compositionKnownBundle()
+    await runTransform(hooks, bundle)
+
+    const lines = metricsLinesIn(metricsPath)
+    assert.equal(lines.length, STATS_LOG_FILE_LINES)
+    const firstRunChars = (lines[0].toolPoolBytes as number) + (lines[0].textChars as number)
+    assert.ok(firstRunChars > 0)
+    assert.deepEqual(lines[0].totals, {
+      ...STATS_ZEROED_COUNTERS,
+      deduped: DEDUP_TOMBSTONE_SINGLE_COUNT,
+      dedupedBytes: COMPOSITION_TOOL_COLD_BYTES,
+      dedupedUnique: DEDUP_TOMBSTONE_SINGLE_COUNT,
+      dedupTokensSaved: tokensForChars(COMPOSITION_TOOL_COLD_BYTES),
+      collapsedWindows: DEDUP_TOMBSTONE_SINGLE_COUNT,
+      collapsedWindowBytes: COMPOSITION_TOOL_CONTAINED_BYTES,
+      collapsedWindowTokensSaved: tokensForChars(COMPOSITION_TOOL_CONTAINED_BYTES),
+      reasoningExpiredUnique: EXPIRED_REASONING_SINGLE_COUNT,
+      reasoningBytesExpiredUnique: REASONING_COLD_TEXT.length,
+      reasoningTokensSaved: tokensForChars(REASONING_COLD_TEXT.length),
+      processedContextBytes: firstRunChars,
+      processedContextTokens: tokensForChars(firstRunChars),
+    })
+    const snapshotTotals = snapshotBodyOf(stateDir, SESSION_ID).snapshot.totals as Record<string, number>
+    assert.equal(snapshotTotals.processedContextBytes, firstRunChars)
+    assert.equal(snapshotTotals.processedContextTokens, tokensForChars(firstRunChars))
+
+    // A second run accumulates on top of the first: the manual stand-down
+    // keeps the whole standard bundle in the composition, and the quiet
+    // run writes no line while the counter and the snapshot still move.
+    await runTransform(hooks, buildStandardBundle(SESSION_ID, "/data/processed-second.txt"))
+    const cumulativeChars = firstRunChars + STANDARD_BUNDLE_CHARS
+    assert.equal(metricsLinesIn(metricsPath).length, STATS_LOG_FILE_LINES)
+    const counters = countersOf(await readStats(hooks, SESSION_ID))
+    assert.equal(counters.processedContextBytes, cumulativeChars)
+    assert.equal(counters.processedContextTokens, tokensForChars(cumulativeChars))
+    const cumulativeSnapshot = snapshotBodyOf(stateDir, SESSION_ID).snapshot.totals as Record<string, number>
+    assert.equal(cumulativeSnapshot.processedContextBytes, cumulativeChars)
+    assert.equal(cumulativeSnapshot.processedContextTokens, tokensForChars(cumulativeChars))
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
   }
 })
 
@@ -5210,6 +5321,8 @@ test("transform ignores a non array attachments field when evicting and leaves t
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
+    processedContextBytes: 504,
+    processedContextTokens: tokensForChars(504),
   })
   assert.equal(await readEvicted(hooks, NON_ARRAY_ATTACHMENTS_PATH, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
 })
@@ -5294,6 +5407,8 @@ test("context_stats counts a superseded duplicate's attachment payload chars in 
     dedupedBytes: MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS,
     dedupedUnique: 1,
     dedupTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS),
+    processedContextBytes: 2165,
+    processedContextTokens: tokensForChars(2165),
   })
 })
 
@@ -5327,6 +5442,8 @@ test("context_stats counts attachment payload characters in bytesReclaimed for a
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS,
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS),
+    processedContextBytes: 499,
+    processedContextTokens: tokensForChars(499),
   })
 })
 
@@ -5355,6 +5472,8 @@ test("metrics log records attachmentBytes on each evicted entry and adds the pay
       evictions: 1,
       bytesReclaimed: MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS,
       evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS),
+      processedContextBytes: 499,
+      processedContextTokens: tokensForChars(499),
     })
   } finally {
     cleanupMetricsDir(metricsDir)
@@ -5648,6 +5767,8 @@ test("context_stats counts fence evictions in a distinct fenceEvicted counter wi
     fenceEvicted: 1,
     bytesReclaimed: block.length + FENCE_TRAILING_NEWLINE_CHARS,
     evictionTokensSaved: tokensForChars(block.length + FENCE_TRAILING_NEWLINE_CHARS),
+    processedContextBytes: 275,
+    processedContextTokens: tokensForChars(275),
   })
   assert.deepEqual(stats.options.userFenceEviction, { enabled: true, minBlockLines: FENCE_DEFAULT_MIN_BLOCK_LINES })
   assert.deepEqual(stats.stash, { entries: 1, capacity: STASH_LIMIT })
@@ -5672,6 +5793,8 @@ test("metrics log records a fence only run as eventful with the fenceEvictedThis
       fenceEvicted: 1,
       bytesReclaimed: block.length + FENCE_TRAILING_NEWLINE_CHARS,
       evictionTokensSaved: tokensForChars(block.length + FENCE_TRAILING_NEWLINE_CHARS),
+      processedContextBytes: 275,
+      processedContextTokens: tokensForChars(275),
     })
   } finally {
     cleanupMetricsDir(metricsDir)
@@ -7333,6 +7456,9 @@ const REHYDRA_FENCE_BLOCK = fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(
 const REHYDRA_FENCE_BYTES = REHYDRA_FENCE_BLOCK.length + FENCE_TRAILING_NEWLINE_CHARS
 const REHYDRA_REASONING_TEXT = "rehydrated cold reasoning block"
 const REHYDRA_PROBE_TEXT_CHARS = 60
+// The quiet probe bundle's whole post-transform composition: the probe text
+// plus the two filler messages' text.
+const REHYDRA_QUIET_PROBE_CHARS = REHYDRA_PROBE_TEXT_CHARS + 2 * FILLER_TEXT_CHARS
 const REHYDRA_DEDUP_POST_CHARS =
   dedupTombstoneFor(READ_TOOL, 1).length + THREE_ENTRY_OUTPUT_BYTES + 2 * FILLER_TEXT_CHARS
 const REHYDRA_LINES_FROM_SECOND_SITTING = 4
@@ -7433,12 +7559,18 @@ const withCounterDeltas = (baseline: Record<string, number>, deltas: Record<stri
   expected.evictionTokensSaved = tokensForChars(expected.bytesReclaimed)
   expected.dedupTokensSaved = tokensForChars(expected.dedupedBytes)
   expected.reasoningTokensSaved = tokensForChars(expected.reasoningBytesExpiredUnique)
+  expected.processedContextTokens = tokensForChars(expected.processedContextBytes)
   return expected
 }
 
 // The unique counters rehydrate from persisted totals, but the seen-key
 // lists are process memory: a fresh process re-counts each standing pair
 // and part once on its first run, so the second sitting adds one to each.
+// The second sitting reruns the first sitting's five transforms with
+// same-shaped bundles, so its processed-context accumulation repeats the
+// first sitting's figure; withCounterDeltas derives the token total.
+const REHYDRA_SITTING_PROCESSED_CHARS = 4036
+
 const SECOND_SITTING_COUNTER_DELTAS = {
   evictions: 1,
   bytesReclaimed: MIN_EVICTABLE_BYTES + REHYDRA_FENCE_BYTES,
@@ -7450,6 +7582,7 @@ const SECOND_SITTING_COUNTER_DELTAS = {
   reasoningExpiredUnique: 1,
   reasoningBytesExpiredUnique: REHYDRA_REASONING_TEXT.length,
   fenceEvicted: 1,
+  processedContextBytes: REHYDRA_SITTING_PROCESSED_CHARS,
 }
 
 const runFirstSitting = async (hooks: HookMap): Promise<void> => {
@@ -7508,7 +7641,11 @@ test("a session without persisted records starts at zeroed counters in a fresh p
     const secondSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
     assert.deepEqual(countersOf(await readStats(secondSittingHooks, REHYDRA_FRESH_SESSION)), STATS_ZEROED_COUNTERS)
     await runQuietProbeTransform(secondSittingHooks, REHYDRA_FRESH_SESSION)
-    assert.deepEqual(countersOf(await readStats(secondSittingHooks, REHYDRA_FRESH_SESSION)), STATS_ZEROED_COUNTERS)
+    assert.deepEqual(countersOf(await readStats(secondSittingHooks, REHYDRA_FRESH_SESSION)), {
+      ...STATS_ZEROED_COUNTERS,
+      processedContextBytes: REHYDRA_QUIET_PROBE_CHARS,
+      processedContextTokens: tokensForChars(REHYDRA_QUIET_PROBE_CHARS),
+    })
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)
@@ -7528,7 +7665,7 @@ test("resumed session falls back to the metrics log tail when its snapshot is mi
     const secondSittingHooks = await loadPluginHooksWithLiveState(emptyStateDir, { metricsLog: true, metricsPath })
     await runEvictionTransform(secondSittingHooks, SESSION_ID, REHYDRA_EVICTION_SUBJECT_B)
 
-    const expected = withCounterDeltas(baseline, { evictions: 1, bytesReclaimed: MIN_EVICTABLE_BYTES })
+    const expected = withCounterDeltas(baseline, { evictions: 1, bytesReclaimed: MIN_EVICTABLE_BYTES, processedContextBytes: 502 })
     const lines = metricsLinesForSession(metricsPath, SESSION_ID)
     assert.deepEqual(lines[lines.length - 1].totals, expected)
     assert.deepEqual(snapshotBodyOf(emptyStateDir, SESSION_ID).snapshot.totals, expected)
@@ -7552,6 +7689,8 @@ test("resumed session with neither snapshot nor metrics log seeds zeroed counter
       evictions: 1,
       bytesReclaimed: MIN_EVICTABLE_BYTES,
       evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
+      processedContextBytes: 502,
+      processedContextTokens: tokensForChars(502),
     })
   } finally {
     cleanupMetricsDir(metricsDir)
@@ -8166,6 +8305,63 @@ test("a metrics line predating dedupedBytes still seeds the resumed session with
     const counters = countersOf(await readStats(hooks, SESSION_ID))
     assert.equal(counters.evictions, REHYDRA_NEWER_RECORD_EVICTIONS)
     assert.equal(counters.dedupedBytes, 0)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+const REHYDRATION_SEED_PROCESSED_BYTES = 50000
+
+test("a newest metrics record carrying processedContextBytes seeds the resumed session with it and its derived tokens", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    writeFileSync(
+      metricsPath,
+      `${JSON.stringify({
+        ...rehydrateSeedLine(SESSION_ID, REHYDRA_LATER_TS, REHYDRA_NEWER_RECORD_EVICTIONS),
+        totals: {
+          ...STATS_ZEROED_COUNTERS,
+          evictions: REHYDRA_NEWER_RECORD_EVICTIONS,
+          processedContextBytes: REHYDRATION_SEED_PROCESSED_BYTES,
+          processedContextTokens: tokensForChars(REHYDRATION_SEED_PROCESSED_BYTES),
+        },
+      })}\n`,
+    )
+
+    const hooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await runQuietProbeTransform(hooks, SESSION_ID)
+
+    const counters = countersOf(await readStats(hooks, SESSION_ID))
+    assert.equal(counters.processedContextBytes, REHYDRATION_SEED_PROCESSED_BYTES + REHYDRA_QUIET_PROBE_CHARS)
+    assert.equal(counters.processedContextTokens, tokensForChars(REHYDRATION_SEED_PROCESSED_BYTES + REHYDRA_QUIET_PROBE_CHARS))
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("a metrics line predating processedContextBytes still seeds the resumed session with zero for it", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const legacyTotals: Record<string, unknown> = { ...STATS_ZEROED_COUNTERS, evictions: REHYDRA_NEWER_RECORD_EVICTIONS }
+    delete legacyTotals.processedContextBytes
+    delete legacyTotals.processedContextTokens
+    writeFileSync(
+      metricsPath,
+      `${JSON.stringify({ ...rehydrateSeedLine(SESSION_ID, REHYDRA_LATER_TS, REHYDRA_NEWER_RECORD_EVICTIONS), totals: legacyTotals })}\n`,
+    )
+
+    const hooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await runQuietProbeTransform(hooks, SESSION_ID)
+
+    const counters = countersOf(await readStats(hooks, SESSION_ID))
+    assert.equal(counters.processedContextBytes, REHYDRA_QUIET_PROBE_CHARS)
+    assert.equal(counters.processedContextTokens, tokensForChars(REHYDRA_QUIET_PROBE_CHARS))
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)

@@ -209,6 +209,7 @@ test("SidebarEntry renders, polls, and disposes against the temp HOME fixtures",
       assert.deepEqual(sidebar.calls.children, [{ sessionID: SUBAGENTS_SESSION }])
       const text = nodeText(sidebar.root)
       assert.ok(text.includes("Subagents: 1"))
+      assert.ok(text.includes("Tokens used: 19.5k tokens"))
       assert.ok(text.includes("Explore: 1 agent"))
       assert.ok(text.includes("Evictions: 2, 1.5k tokens"))
       assert.ok(text.includes("Deduped: 1, 800 tokens"))
