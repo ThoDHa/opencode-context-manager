@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 
-import { type PanelMetricsLine } from "../../plugin/panel-data.ts"
+import type { PanelMetricsLine } from "../../plugin/panel-data.ts"
 import {
   DEFAULT_LIVE_STATE_DIR_BASENAME,
   DEFAULT_METRICS_DIR_SEGMENTS,
@@ -16,10 +16,16 @@ export type TuiHome = {
   stateDir: string
 }
 
-// One temp HOME per suite process: the plugin derives DEFAULT_METRICS_PATH
-// and DEFAULT_LIVE_STATE_DIR from os.homedir() at first module load, so the
-// override must land before the first dynamic plugin import and holds for
-// the whole process. Restores HOME and removes the tree on every path.
+// The seam: the plugin derives DEFAULT_METRICS_PATH and DEFAULT_LIVE_STATE_DIR
+// from os.homedir() at its first module load, so readers of those paths need
+// HOME pointing at fixtures before that load. Importing this module is safe at
+// eval order: its plugin imports elide or carry no home-derived state (the
+// elided `import type` never loads panel-data.ts; schema.ts is pure constants
+// with no imports). The override lives exactly for the callback's scope, so it
+// cannot cover a suite's own module eval (static and top-level imports evaluate
+// before any callback runs) or a suite-lifetime HOME (the override ends and the
+// tree is removed on exit); suites with either keep their own module-eval
+// override and import the plugin dynamically behind it.
 export const withTuiHome = async (run: (paths: TuiHome) => Promise<void>): Promise<void> => {
   const home = mkdtempSync(join(tmpdir(), "ctx-tui-home-"))
   const previousHome = process.env.HOME

@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { type PanelMetricsLine } from "../plugin/panel-data.ts"
+import type { PanelMetricsLine } from "../plugin/panel-data.ts"
 import { type TotalsKey } from "../plugin/schema.ts"
 
 const SESSION_A = "sess-panel-a"

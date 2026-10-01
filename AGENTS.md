@@ -3,7 +3,7 @@
 ## Verification
 
 - `npm ci` is a prerequisite for every test target: it installs the dev-only test dependencies from the committed `package-lock.json` (test-time only; the plugin runtime stays dependency-free).
-- `make test` runs the whole suite with one `node --test` invocation over the six suite files. It loads the TUI compile hook into the runner through `NODE_OPTIONS`, so the plugin's `.tsx` imports under plain Node. Gate on the runner's own summary block (`tests`, `pass`, `fail`, `cancelled`, `skipped`, `todo`), not on the absence of red output.
+- `make test` runs the whole suite with one `node --test` invocation over the nine suite files. It loads the TUI compile hook into the runner through `NODE_OPTIONS`, so the plugin's `.tsx` imports under plain Node. Gate on the runner's own summary block (`tests`, `pass`, `fail`, `cancelled`, `skipped`, `todo`), not on the absence of red output.
 - `make ci` is the CI guard and what `.github/workflows/ci.yml` invokes. It runs each suite file in its own `node --test` invocation, requires every invocation to exit 0 and report at least one test, and requires the per-file counts to sum to the aggregate `make test` total.
 - `make install` symlinks the four plugin files into `~/.config/opencode/context-manager/`; `make uninstall` removes the symlinks only (a regular file at a target path is left alone).
 
@@ -17,13 +17,16 @@ Run `make test`, then confirm the runner-reported `tests` total matches the expe
 - `tests/sidebar-rows.test.ts`: 15
 - `tests/sidebar-subagents.test.ts`: 28
 - `tests/tui-harness.test.ts`: 5
-- aggregate: 504
+- `tests/tui-registration.test.ts`: 6
+- `tests/tui-panel.test.ts`: 8
+- `tests/tui-sidebar.test.ts`: 10
+- aggregate: 528
 
 These counts drift as tests are added; `make ci` recomputes and cross-checks them per run, so treat its numbers as current and this list as a sanity reference.
 
 ## Suite layout
 
-Six suite files under `tests/`, all plain TypeScript executed by `node --test` (the directory also holds `tests/panel-fixtures.ts`, shared by the panel suites but not run directly, and `tests/tui/`, the TUI harness support modules the `.tsx`-loading suites import): `context-manager.test.ts` (the core plugin: hooks, tools, metrics log, live state), `panel-data.test.ts` and `panel-rows.test.ts` (the `/context` panel's data layer and rendered rows), `sidebar-rows.test.ts` and `sidebar-subagents.test.ts` (the session sidebar), and `tui-harness.test.ts` (the TUI harness: `.tsx` import through the compile hook, stub-helper coverage, walker and reactivity proofs). The `tests/tui/` support modules are `hooks.mjs` (the `node:module` `registerHooks` pair: the solid-js client-build redirect and the babel-preset-solid `universal` compile mirroring the host transform), `opentui-stub.ts` (the `solid-js/universal` stub renderer over plain object trees with the walker, text reader, and settle helper), `api-mock.ts` (the `TuiPluginApi` recorder), and `fixtures.ts` (temp-HOME metrics-log and snapshot writers).
+Nine suite files under `tests/`, all plain TypeScript executed by `node --test` (the directory also holds `tests/panel-fixtures.ts`, shared by the panel, sidebar, and TUI suites but not run directly, and `tests/tui/`, the TUI harness support modules the `.tsx`-loading suites import): `context-manager.test.ts` (the core plugin: hooks, tools, metrics log, live state), `panel-data.test.ts` and `panel-rows.test.ts` (the `/context` panel's data layer and rendered rows), `sidebar-rows.test.ts` and `sidebar-subagents.test.ts` (the session sidebar), `tui-harness.test.ts` (the TUI harness: `.tsx` import through the compile hook, stub-helper coverage, walker and reactivity proofs), `tui-registration.test.ts` (the TUI registration paths: keymap layer and sidebar slot registration, command identity constants, guard gates), `tui-panel.test.ts` (the `/context` panel through the harness: dialog open flow, rendered rows, open-failure and unreadable-log paths), and `tui-sidebar.test.ts` (the session sidebar through the harness: mount, poll-tick refresh, subagents gating, dispose guard). The `tests/tui/` support modules are `hooks.mjs` (the `node:module` `registerHooks` pair: the solid-js client-build redirect and the babel-preset-solid `universal` compile mirroring the host transform), `opentui-stub.ts` (the `solid-js/universal` stub renderer over plain object trees with the walker, text reader, and settle helper), `api-mock.ts` (the `TuiPluginApi` recorder), and `fixtures.ts` (temp-HOME metrics-log and snapshot writers).
 
 ## Dependencies
 

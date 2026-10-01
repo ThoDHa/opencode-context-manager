@@ -29,16 +29,9 @@ const EXPECTED_DIALOG_SIZE = "large"
 const EXPECTED_SIDEBAR_SLOT_ORDER = 600
 const EXPECTED_SIDEBAR_SLOT_NAME = "sidebar_content"
 
-// panel-data.ts derives its default metrics paths from $HOME at module load,
-// so HOME must point at a disposable directory before the first plugin
-// import: the command run below then reads an empty isolated log instead of
-// the developer's own metrics log. This bypasses tests/tui/fixtures.ts's
-// withTuiHome because importing that module evaluates plugin/panel-data.ts
-// first through fixtures.ts's own inline type-only import (line 5, not
-// elided by Node's type stripping), freezing the paths to the real HOME
-// before the override could land; once both tests/tui/fixtures.ts:5 and
-// tests/panel-fixtures.ts:5 use the full `import type` form, this seam and
-// the same one in tests/tui-panel.test.ts can switch back.
+// Module-eval, suite-lifetime HOME override: this suite's plugin imports
+// (dynamic below) must not evaluate before it lands; see the seam and
+// withTuiHome's callback-scope limit documented in tests/tui/fixtures.ts.
 const home = mkdtempSync(join(tmpdir(), "ctx-tui-home-"))
 const previousHome = process.env.HOME
 process.env.HOME = home

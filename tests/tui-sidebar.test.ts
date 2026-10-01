@@ -8,17 +8,10 @@ import type { TestContext } from "node:test"
 import type { TuiApiMock } from "./tui/api-mock.ts"
 import type { StubElementNode } from "./tui/opentui-stub.ts"
 
-// Workaround for the harness support files, not a style choice: the
-// `import { type X } from` bindings in tests/tui/fixtures.ts:5 and
-// tests/panel-fixtures.ts:5 survive node v24.18.0's native type stripping
-// (Amaro) as side-effect imports, unlike under babel which elides them,
-// so any static import of those helpers evaluates plugin/panel-data.ts at
-// module load and freezes DEFAULT_METRICS_PATH/DEFAULT_LIVE_STATE_DIR via
-// os.homedir() before withTuiHome ever runs (observed: the suite reading
-// the real home's metrics log). The temp HOME is therefore created at
-// module-eval, before the first local import, and every local helper is
-// imported dynamically inside it. Remove this shape once those support
-// files switch to the elidable `import type` form.
+// Module-eval, suite-lifetime HOME override, with the plugin imports (the
+// dynamic panel-data import below and the .tsx inside the test) kept behind
+// it: the seam and withTuiHome's callback-scope limit are documented in
+// tests/tui/fixtures.ts.
 const previousHome = process.env.HOME
 const home = mkdtempSync(join(tmpdir(), "ctx-tui-home-"))
 process.env.HOME = home
@@ -133,10 +126,9 @@ test("the suite's temp HOME owns the plugin's default paths", () => {
 })
 
 test("SidebarEntry renders, polls, and disposes against the temp HOME fixtures", async (suite) => {
-  // First import of the plugin's .tsx module, kept inside the test like
-  // every other local import: a static import at the top would load
-  // plugin/panel-data.ts through it before the HOME override, freezing
-  // the default path constants the component reads to the real home.
+  // First .tsx import, inside the test so the compiled module evaluates
+  // after the module-eval HOME override above; the seam is documented on
+  // withTuiHome in tests/tui/fixtures.ts.
   const tui: SidebarTuiEntry = (await import("../plugin/context-manager.tui.tsx")).default.tui
 
   await suite.test("startup ENOENT transient keeps the entry hidden on mount and on a data-less poll tick", async (st) => {

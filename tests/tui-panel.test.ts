@@ -73,17 +73,10 @@ const styleFgOf = (node: StubElementNode): string | undefined => (node.props["st
 const spansWithFg = (root: StubNode, fg: string): StubElementNode[] =>
   elementsOfName(root, "span").filter((node) => styleFgOf(node) === fg)
 
-// panel-data.ts derives its default metrics and state paths from $HOME at
-// module load, and the open flow renders from those default paths, so HOME
-// must point at the fixture directory before the first plugin import. This
-// bypasses tests/tui/fixtures.ts's withTuiHome because importing that module
-// evaluates plugin/panel-data.ts first through fixtures.ts's own inline
-// type-only import (line 5, not elided by Node's type stripping), freezing
-// the paths to the real HOME before the override could land; once both
-// tests/tui/fixtures.ts:5 and tests/panel-fixtures.ts:5 use the full
-// `import type` form, this seam and the same one in
-// tests/tui-registration.test.ts can switch back to withTuiHome. Fixture
-// writes still go through the fixtures.ts writers, with paths taken from the
+// Module-eval, suite-lifetime HOME override: this suite's plugin imports
+// (dynamic below) must not evaluate before it lands; see the seam and
+// withTuiHome's callback-scope limit documented in tests/tui/fixtures.ts.
+// Fixture writes go through the fixtures.ts writers, with paths from the
 // plugin's own exported constants so writer and reader cannot drift.
 const home = mkdtempSync(join(tmpdir(), "ctx-tui-home-"))
 const previousHome = process.env.HOME
@@ -144,10 +137,10 @@ test("open flow sizes the dialog large and replaces its content", async () => {
 
 test("session route renders the session's snapshot data plus its log evictions", async () => {
   writeSessionSnapshot(DEFAULT_LIVE_STATE_DIR, SNAPSHOT_SESSION, { session: SNAPSHOT_SESSION })
-  // Tests in this file share the one metrics log under the temp HOME, so the
-  // suite is order-sensitive by design: each rewrite below replaces the log
-  // whole, and the EISDIR test's directory substitution relies on running
-  // after the writes it must clobber.
+  // Tests in this file share the one metrics log under the temp HOME; the
+  // sharing is safe because every write replaces the file whole, the
+  // unreadable-log test's directory substitution is restored to a writable
+  // path in its finally, and node --test runs a file's tests serially.
   writeMetricsLog(DEFAULT_METRICS_PATH, [makeLine({ session: SNAPSHOT_SESSION })])
   const mock = createTuiApiMock()
   mock.setSessionRoute(SNAPSHOT_SESSION)
