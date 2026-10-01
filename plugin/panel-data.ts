@@ -270,9 +270,8 @@ const parseEvictedEntries = (value: unknown): PanelEvictedEntry[] | undefined =>
 // Every totals key is required and must be a finite number, with one
 // transitional exception: `dedupedBytes` postdates the other raw counters,
 // and rotation now holds weeks of records written before it existed, so an
-// absent `dedupedBytes` defaults to 0 (mirroring the producer's
-// `persistedCounterOf` tolerance for the same gap) while a present
-// non-finite value still rejects the record.
+// absent `dedupedBytes` defaults to 0 while a present non-finite value
+// still rejects the record.
 const TRANSITIONAL_ABSENT_ZERO_KEYS: readonly TotalsKey[] = ["dedupedBytes"]
 
 const parseTotals = (value: unknown): PanelTotals | undefined => {
@@ -858,9 +857,11 @@ const savingsStatText = (label: string, count: number, tokensSaved: number): str
 const stashReadsStatText = (stashReads: number, stashHits: number): string =>
   `${SIDEBAR_STASH_READS_LABEL}: ${stashReads}, ${stashHits} ${SIDEBAR_HITS_UNIT}`
 
-// The deduped and reasoning-expired counts are unique-event counts (first
-// tombstone per pair, first crossing per reasoning part); the token savings
-// stay the cumulative per-request estimate over the byte totals.
+// The deduped and reasoning-expired counts are unique-event lifetime
+// figures (first tombstone per pair, first crossing per reasoning part,
+// identical content counted once in count and bytes alike); the token
+// savings divide those same first-crossing byte totals, so the pair each
+// row shows is one coherent distinct-work statement.
 const sidebarCountersGroup = (current: SessionPanel): PanelRow[] => [
   { text: savingsStatText(SIDEBAR_EVICTIONS_LABEL, current.totals.evictions, current.totals.evictionTokensSaved), tone: "success" },
   { text: savingsStatText(SIDEBAR_DEDUPED_LABEL, current.totals.dedupedUnique, current.totals.dedupTokensSaved), tone: "success" },
