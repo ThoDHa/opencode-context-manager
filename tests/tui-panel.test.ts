@@ -32,6 +32,7 @@ const BUDGET_LABEL_SPAN = "budget: "
 const TOAST_TRIGGER_FAILURE = "setSize exploded"
 const SUBAGENT_ROW_MARKER = "General:"
 const SUBAGENT_STRONG_LABEL = "General: "
+const SUBAGENT_LEAD_STRONG_LABEL = "Subagents: "
 const CHILD_ID = "child-tui-sidebar"
 const CHILD_AGENT_TYPE = "general"
 const CHILD_UPDATED_MS = 1000
@@ -247,9 +248,11 @@ test("sidebar slot renderer renders bold info labels and success tone values", a
     await settleUntil(() => nodeText(tree.root).includes(SUBAGENT_ROW_MARKER))
     assert.deepEqual(mock.calls.children, [{ sessionID: SIDEBAR_SESSION }])
     const strongLabels = elementsOfName(tree.root, "strong")
-    assert.equal(strongLabels.length, 1)
-    assert.equal(nodeText(strongLabels[0]), SUBAGENT_STRONG_LABEL)
+    assert.equal(strongLabels.length, 2)
+    assert.equal(nodeText(strongLabels[0]), SUBAGENT_LEAD_STRONG_LABEL)
     assert.equal(styleFgOf(strongLabels[0]), MOCK_THEME.info)
+    assert.equal(nodeText(strongLabels[1]), SUBAGENT_STRONG_LABEL)
+    assert.equal(styleFgOf(strongLabels[1]), MOCK_THEME.info)
     const successSpans = spansWithFg(tree.root, MOCK_THEME.success)
     assert.equal(successSpans.length, EXPECTED_SUCCESS_SPAN_COUNT)
     const successText = successSpans.map((node) => nodeText(node)).join(" ")

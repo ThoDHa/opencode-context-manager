@@ -67,7 +67,9 @@ test("resolveSidebarMode defaults to full and falls back to full on unrecognized
   }
 })
 
-test("tui entry in context mode deactivates exactly the five host sidebar content built-ins once each", async () => {
+const EXPECTED_UNTOUCHED_CONTEXT_PLUGIN_ID = "internal:sidebar-context"
+
+test("tui entry in context mode deactivates exactly the four host sidebar content built-ins once each", async () => {
   const mock = createTuiApiMock()
   await plugin.tui(mock.api, { sidebarMode: SIDEBAR_MODE_CONTEXT })
   assert.deepEqual(
@@ -75,6 +77,7 @@ test("tui entry in context mode deactivates exactly the five host sidebar conten
     HOST_SIDEBAR_CONTENT_PLUGIN_IDS.map((pluginID) => ({ pluginID })),
   )
   assert.equal(mock.calls.pluginsDeactivate.some((call) => call.pluginID === EXPECTED_FOOTER_PLUGIN_ID), false)
+  assert.equal(mock.calls.pluginsDeactivate.some((call) => call.pluginID === EXPECTED_UNTOUCHED_CONTEXT_PLUGIN_ID), false)
   assert.equal(mock.calls.slotsRegister.length, 1)
 })
 

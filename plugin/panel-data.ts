@@ -33,9 +33,10 @@ export const resolveSidebarMode = (value: unknown): SidebarMode =>
 
 // The host's built-in sidebar content plugins contributing to the same
 // sidebar_content slot the plugin registers into, in their host order. The
-// footer lives in the separate sidebar_footer slot and is never listed.
+// Context block (`internal:sidebar-context`) is deliberately absent: the
+// user wants that summary in context mode too. The footer lives in the
+// separate sidebar_footer slot and is never listed.
 export const HOST_SIDEBAR_CONTENT_PLUGIN_IDS: readonly string[] = Object.freeze([
-  "internal:sidebar-context",
   "internal:sidebar-mcp",
   "internal:sidebar-lsp",
   "internal:sidebar-todo",
@@ -810,10 +811,11 @@ export type PanelRow = {
   text: string
   tone: PanelRowTone
   // Overrides the renderer's default accent label color for a "Label:
-  // value" row; set on the subagents group's agent-type rows.
+  // value" row; set on the subagents group's lead row and agent-type rows.
   labelTone?: PanelRowTone
   // Marks the label span of a "Label: value" row as bold in the TUI. Set
-  // only by the subagents group's per-type rows; absent everywhere else.
+  // only by the subagents group's lead row and per-type rows; absent
+  // everywhere else.
   labelBold?: boolean
 }
 
@@ -1039,6 +1041,13 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
     text: truncateToWidth(statText, SIDEBAR_COLUMN_LIMIT),
     tone: "normal",
   })
+  // The label treatment the lead row and every type header share.
+  const labelRow = (labelText: string): PanelRow => ({
+    text: truncateToWidth(labelText, SIDEBAR_COLUMN_LIMIT),
+    tone: "normal",
+    labelTone: "info",
+    labelBold: true,
+  })
   const statRowsFor = (aggregate: SubagentTypeAggregate): PanelRow[] => [
     statRow(tokensStatText(aggregate.processedContextTokens)),
     statRow(savingsStatText(SIDEBAR_EVICTIONS_LABEL, aggregate.evictions, aggregate.evictionTokensSaved)),
@@ -1049,18 +1058,19 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
   const typeBlocks: PanelRow[][] = sortedTypes.map(([type, aggregate]) => {
     const agentsText = `${aggregate.count} ${aggregate.count === 1 ? SUBAGENT_AGENT_SINGULAR : SUBAGENT_AGENTS_UNIT}`
     const body = aggregate.hasPanel ? agentsText : SUBAGENT_NO_DATA_TEXT
-    const block: PanelRow[] = [
-      { text: truncateToWidth(`${capitalizeLabel(type)}: ${body}`, SIDEBAR_COLUMN_LIMIT), tone: "normal", labelTone: "info", labelBold: true },
-    ]
+    const block: PanelRow[] = [labelRow(`${capitalizeLabel(type)}: ${body}`)]
     if (aggregate.hasPanel) block.push(...statRowsFor(aggregate))
     return block
   })
-  const leadRow: PanelRow = { text: truncateToWidth(`${SIDEBAR_SUBAGENTS_LEAD_LABEL}: ${kept.length}`, SIDEBAR_COLUMN_LIMIT), tone: "normal" }
+  // The lead row carries the type headers' label treatment so the count
+  // anchors the group visually; the value span's tone stays normal.
+  const leadRow = labelRow(`${SIDEBAR_SUBAGENTS_LEAD_LABEL}: ${kept.length}`)
   // The cumulative block renders only when some kept child's panel has
   // landed, mirroring the per-type rule that stats render only from landed
-  // panels; the type blocks follow in their fixed order either way.
+  // panels; the lead row and the cumulative rows ship as one group so no
+  // blank separates them, while every type block keeps its blank before it.
   const cumulativeBlock = cumulative.hasPanel ? statRowsFor(cumulative) : []
-  return withBlankSeparators([[leadRow], ...(cumulativeBlock.length > 0 ? [cumulativeBlock] : []), ...typeBlocks])
+  return withBlankSeparators([[leadRow, ...cumulativeBlock], ...typeBlocks])
 }
 
 const finishSidebarGroups = (groups: PanelRow[][], subagentRows?: PanelRow[]): PanelRow[][] =>

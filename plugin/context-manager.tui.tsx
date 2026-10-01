@@ -61,9 +61,9 @@ type RowsViewProps = { api: TuiPluginApi; rows: PanelRow[] }
 
 // The label/value color contract: a "Label: value" row's label span
 // defaults to the theme's accent color, labelTone overrides that default
-// (the subagents group's agent-name rows use info), and the value span
-// carries the row's tone. Rows without the "Label: value" shape keep the
-// single-span render in the row tone.
+// (the subagents group's lead and agent-name rows use info), and the value
+// span carries the row's tone. Rows without the "Label: value" shape keep
+// the single-span render in the row tone.
 //
 // Per-part color rides the style prop, not fg: on the host runtime
 // (opencode 1.18.33), setProperty applies only href and style to
