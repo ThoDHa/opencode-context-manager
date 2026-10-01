@@ -1,6 +1,7 @@
 {
   "name": "opencode-context-manager",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "engines": {
     "node": ">=24"
