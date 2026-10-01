@@ -4762,29 +4762,70 @@ test("context_stats reports the live state options defaulting beside the metrics
   assert.equal(customOptions.liveStatePruneMinIntervalMs, LIVE_STATE_CUSTOM_PRUNE_MIN_INTERVAL_MS)
 })
 
+const SIBLING_FIRST_CROSSING_COUNTERS = {
+  ...STATS_ZEROED_COUNTERS,
+  reasoningExpiredUnique: EXPIRED_REASONING_PAIR_COUNT,
+  reasoningBytesExpiredUnique: EXPIRED_REASONING_PAIR_BYTES,
+  reasoningTokensSaved: tokensForChars(EXPIRED_REASONING_PAIR_BYTES),
+}
+
+const agedReasoningBundleFor = (sessionID: string): StrictBundle =>
+  buildBundle(
+    [[reasoningPart(REASONING_COLD_TEXT), reasoningPart(REASONING_SECOND_COLD_TEXT)], ...fillerMessages()],
+    sessionID,
+  )
+
 test("context_stats credits each expired reasoning part once and holds the totals constant across repeated standing runs", async () => {
   const hooks = await loadPluginHooks()
-  const agedReasoningParts = (): MessagePart[][] => [
-    [reasoningPart(REASONING_COLD_TEXT), reasoningPart(REASONING_SECOND_COLD_TEXT)],
-    ...fillerMessages(),
-  ]
 
-  await runTransform(hooks, buildBundle(agedReasoningParts()))
+  await runTransform(hooks, agedReasoningBundleFor(SESSION_ID))
 
-  const firstCrossingCounters = {
-    ...STATS_ZEROED_COUNTERS,
-    reasoningExpiredUnique: EXPIRED_REASONING_PAIR_COUNT,
-    reasoningBytesExpiredUnique: EXPIRED_REASONING_PAIR_BYTES,
-    reasoningTokensSaved: tokensForChars(EXPIRED_REASONING_PAIR_BYTES),
-  }
-  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), firstCrossingCounters)
+  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), SIBLING_FIRST_CROSSING_COUNTERS)
 
   // The stored session retains its parts, so the same aged reasoning set is
   // re-expired on every run: the repeat runs on a fresh identical copy
   // recount the standing set per request but credit the lifetime totals
   // only at the first crossing, in count and in bytes alike.
-  await runTransform(hooks, buildBundle(agedReasoningParts()))
-  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), firstCrossingCounters)
+  await runTransform(hooks, agedReasoningBundleFor(SESSION_ID))
+  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), SIBLING_FIRST_CROSSING_COUNTERS)
+})
+
+test("sibling sessions expiring identical cold reasoning content each count their own first crossings", async () => {
+  const hooks = await loadPluginHooks()
+
+  await runTransform(hooks, agedReasoningBundleFor(SESSION_ID))
+  await runTransform(hooks, agedReasoningBundleFor(SESSION_ID_B))
+
+  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), SIBLING_FIRST_CROSSING_COUNTERS)
+  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID_B)), SIBLING_FIRST_CROSSING_COUNTERS)
+})
+
+test("sibling reasoning counters stay isolated across interleaved repeated standing runs", async () => {
+  const hooks = await loadPluginHooks()
+
+  await runTransform(hooks, agedReasoningBundleFor(SESSION_ID))
+  await runTransform(hooks, agedReasoningBundleFor(SESSION_ID_B))
+  for (let round = 0; round < REPEATED_STANDING_RUNS; round += 1) {
+    await runTransform(hooks, agedReasoningBundleFor(SESSION_ID))
+    await runTransform(hooks, agedReasoningBundleFor(SESSION_ID_B))
+  }
+
+  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), SIBLING_FIRST_CROSSING_COUNTERS)
+  assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID_B)), SIBLING_FIRST_CROSSING_COUNTERS)
+})
+
+test("context_stats reports only the calling session's reasoning counters", async () => {
+  const hooks = await loadPluginHooks()
+
+  await runTransform(hooks, agedReasoningBundleFor(SESSION_ID))
+  await runTransform(hooks, buildBundle(fillerMessages(), SESSION_ID_B))
+
+  const sessionStats = await readStats(hooks, SESSION_ID)
+  assert.equal(sessionStats["session"], SESSION_ID)
+  assert.deepEqual(countersOf(sessionStats), SIBLING_FIRST_CROSSING_COUNTERS)
+  const siblingStats = await readStats(hooks, SESSION_ID_B)
+  assert.equal(siblingStats["session"], SESSION_ID_B)
+  assert.deepEqual(countersOf(siblingStats), STATS_ZEROED_COUNTERS)
 })
 
 test("context_stats counts identical-content reasoning parts once in the unique count and credits their bytes once", async () => {
@@ -7565,6 +7606,53 @@ test("resumed session seeds from the newer of the metrics log and the snapshot w
   }
 })
 
+const SEEDING_RECORD_A_EVICTIONS = 5
+const SEEDING_RECORD_A_REASONING_UNIQUE = 3
+const SEEDING_RECORD_A_REASONING_BYTES_UNIQUE = 90
+const SEEDING_RECORD_B_EVICTIONS = 2
+const SEEDING_RECORD_B_REASONING_UNIQUE = 1
+const SEEDING_RECORD_B_REASONING_BYTES_UNIQUE = REASONING_COLD_TEXT.length
+
+test("resumed sessions seed reasoning counters only from their own persisted records", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const ownRecord = (session: string, ts: string, evictions: number, reasoningUnique: number, reasoningBytesUnique: number): Record<string, unknown> => ({
+      ...rehydrateSeedLine(session, ts, evictions),
+      totals: {
+        ...STATS_ZEROED_COUNTERS,
+        evictions,
+        reasoningExpiredUnique: reasoningUnique,
+        reasoningBytesExpiredUnique: reasoningBytesUnique,
+      },
+    })
+    writeFileSync(
+      metricsPath,
+      `${JSON.stringify(ownRecord(SESSION_ID, REHYDRA_LATER_TS, SEEDING_RECORD_A_EVICTIONS, SEEDING_RECORD_A_REASONING_UNIQUE, SEEDING_RECORD_A_REASONING_BYTES_UNIQUE))}\n` +
+        `${JSON.stringify(ownRecord(SESSION_ID_B, REHYDRA_EARLIER_TS, SEEDING_RECORD_B_EVICTIONS, SEEDING_RECORD_B_REASONING_UNIQUE, SEEDING_RECORD_B_REASONING_BYTES_UNIQUE))}\n`,
+    )
+
+    const hooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await runQuietProbeTransform(hooks, SESSION_ID)
+    await runQuietProbeTransform(hooks, SESSION_ID_B)
+
+    const sessionCounters = countersOf(await readStats(hooks, SESSION_ID))
+    assert.equal(sessionCounters.evictions, SEEDING_RECORD_A_EVICTIONS)
+    assert.equal(sessionCounters.reasoningExpiredUnique, SEEDING_RECORD_A_REASONING_UNIQUE)
+    assert.equal(sessionCounters.reasoningBytesExpiredUnique, SEEDING_RECORD_A_REASONING_BYTES_UNIQUE)
+    assert.equal(sessionCounters.reasoningTokensSaved, tokensForChars(SEEDING_RECORD_A_REASONING_BYTES_UNIQUE))
+    const siblingCounters = countersOf(await readStats(hooks, SESSION_ID_B))
+    assert.equal(siblingCounters.evictions, SEEDING_RECORD_B_EVICTIONS)
+    assert.equal(siblingCounters.reasoningExpiredUnique, SEEDING_RECORD_B_REASONING_UNIQUE)
+    assert.equal(siblingCounters.reasoningBytesExpiredUnique, SEEDING_RECORD_B_REASONING_BYTES_UNIQUE)
+    assert.equal(siblingCounters.reasoningTokensSaved, tokensForChars(SEEDING_RECORD_B_REASONING_BYTES_UNIQUE))
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
 test("resumed session resolves the budget persisted in its snapshot and logs it instead of null unknown", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
@@ -7974,6 +8062,42 @@ test("context_stats re-counts the standing reasoning set when the metrics store 
     assert.equal(counters.reasoningExpiredUnique, EXPIRED_REASONING_PAIR_COUNT * REPEATED_STANDING_RUNS)
     assert.equal(counters.reasoningBytesExpiredUnique, EXPIRED_REASONING_PAIR_BYTES * REPEATED_STANDING_RUNS)
     assert.equal(counters.reasoningTokensSaved, tokensForChars(EXPIRED_REASONING_PAIR_BYTES * REPEATED_STANDING_RUNS))
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+const SEED_PLUS_RECOUNT_SETS = 2
+
+test("metrics-store bound eviction of one sibling leaves the other's reasoning counters intact and reseeds the evicted sibling from its own records", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const hooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    await runTransform(hooks, agedReasoningBundleFor(SESSION_ID))
+    await runTransform(hooks, buildBundle([[reasoningPart(REASONING_COLD_TEXT)], ...fillerMessages()], SESSION_ID_B))
+    // Default bound 8 with two occupied entries: the seventh fresher session
+    // evicts SESSION_ID's entry while SESSION_ID_B's stays resident.
+    for (let index = 0; index < METRICS_SESSION_BOUND - 1; index += 1) await storeMetricsSession(hooks, index)
+
+    const siblingCountersAfterEviction = countersOf(await readStats(hooks, SESSION_ID_B))
+    assert.equal(siblingCountersAfterEviction.reasoningExpiredUnique, EXPIRED_REASONING_SINGLE_COUNT)
+    assert.equal(siblingCountersAfterEviction.reasoningBytesExpiredUnique, REASONING_COLD_TEXT.length)
+    assert.equal(siblingCountersAfterEviction.reasoningTokensSaved, tokensForChars(REASONING_COLD_TEXT.length))
+
+    // The re-created entry seeds its lifetime totals from the session's own
+    // newest persisted record, then re-counts the standing set with an
+    // empty ring: one seeded crossing set plus one re-counted set.
+    await runTransform(hooks, agedReasoningBundleFor(SESSION_ID))
+    const reseededCounters = countersOf(await readStats(hooks, SESSION_ID))
+    assert.equal(reseededCounters.reasoningExpiredUnique, EXPIRED_REASONING_PAIR_COUNT * SEED_PLUS_RECOUNT_SETS)
+    assert.equal(reseededCounters.reasoningBytesExpiredUnique, EXPIRED_REASONING_PAIR_BYTES * SEED_PLUS_RECOUNT_SETS)
+    assert.equal(reseededCounters.reasoningTokensSaved, tokensForChars(EXPIRED_REASONING_PAIR_BYTES * SEED_PLUS_RECOUNT_SETS))
+
+    const siblingCountersFinal = countersOf(await readStats(hooks, SESSION_ID_B))
+    assert.deepEqual(siblingCountersFinal, siblingCountersAfterEviction)
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)
