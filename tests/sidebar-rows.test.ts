@@ -20,15 +20,14 @@ import {
 import {
   EVICTED_BYTES,
   EVICTED_MESSAGES_AGO,
+  EXPECTED_DEDUPED_STAT,
+  EXPECTED_REASONING_STAT,
   HUGE_RECLAIMED_BYTES,
   LOG_LINE_ONLY_EVICTIONS,
   OVERRIDE_BUDGET_SOURCE,
   SESSION_A,
   SESSION_B,
-  TOTALS_DEDUPED_UNIQUE,
   TOTALS_EVICTIONS,
-  TOTALS_REASONING_EXPIRED_UNIQUE,
-  TOTALS_REASONING_TOKENS_SAVED,
   TOTALS_STASH_HITS,
   TOTALS_STASH_MISSES,
   UNKNOWN_BUDGET_SOURCE,
@@ -44,8 +43,6 @@ const OVER_LONG_SUBJECT = `/data/${"b".repeat(60)}.txt`
 const LONG_READ_ERROR = "EACCES: permission denied, open '/sessions/deep/path/metrics.jsonl' for reading"
 const ZERO_DEFICIT = 0
 const NEGATIVE_DEFICIT = -5
-const EXPECTED_REASONING_STAT = `Reasoning expired: ${TOTALS_REASONING_EXPIRED_UNIQUE}, ${TOTALS_REASONING_TOKENS_SAVED} tokens`
-const EXPECTED_DEDUPED_STAT = `Deduped: ${TOTALS_DEDUPED_UNIQUE}, 2.3k tokens`
 
 const sidebarRowsWithinWidth = (data: PanelData): PanelRow[] => {
   const rows = sidebarRows(data)

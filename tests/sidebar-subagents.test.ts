@@ -17,7 +17,7 @@ import {
   type SessionPanel,
   type SubagentChild,
 } from "../plugin/panel-data.ts"
-import { makeLine, makeTotals, TOTALS_DEDUPED_UNIQUE, TOTALS_REASONING_EXPIRED_UNIQUE, TOTALS_REASONING_TOKENS_SAVED } from "./panel-fixtures.ts"
+import { EXPECTED_DEDUPED_STAT, EXPECTED_REASONING_STAT, makeLine, makeTotals } from "./panel-fixtures.ts"
 
 const MINUTE_MS = 60 * 1000
 const HOUR_MS = 60 * MINUTE_MS
@@ -47,9 +47,6 @@ const dataWithChildren = (panels: Array<{ id: string; panel: SessionPanel | unde
   error: undefined,
   subagentPanels: panels,
 })
-
-const EXPECTED_REASONING_STAT = `Reasoning expired: ${TOTALS_REASONING_EXPIRED_UNIQUE}, ${TOTALS_REASONING_TOKENS_SAVED} tokens`
-const EXPECTED_DEDUPED_STAT = `Deduped: ${TOTALS_DEDUPED_UNIQUE}, 2.3k tokens`
 
 const rowsWithinWidth = (rows: PanelRow[]): PanelRow[] => {
   for (const row of rows) assert.ok(row.text.length <= SIDEBAR_COLUMN_LIMIT, `row exceeds the sidebar width: ${row.text}`)
@@ -246,6 +243,7 @@ test("sidebarSubagentsGroup caps an over-long type label's row at the sidebar co
   const rows = rowsWithinWidth(sidebarSubagentsGroup([child], data))
 
   assert.equal(rows.length, 7)
+  assert.deepEqual(rows[1], { text: " ", tone: "normal" })
   assert.equal(rows[2].text, `A${"a".repeat(SIDEBAR_COLUMN_LIMIT - 2)}…`)
   assert.equal(rows[3].text, "Evictions: 5, 3.1k tokens")
   assert.equal(rows[4].text, EXPECTED_DEDUPED_STAT)
