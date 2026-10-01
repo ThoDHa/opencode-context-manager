@@ -270,8 +270,9 @@ const parseEvictedEntries = (value: unknown): PanelEvictedEntry[] | undefined =>
 // Every totals key is required and must be a finite number, with one
 // transitional exception: `dedupedBytes` postdates the other raw counters,
 // and rotation now holds weeks of records written before it existed, so an
-// absent `dedupedBytes` defaults to 0 while a present non-finite value
-// still rejects the record.
+// absent `dedupedBytes` defaults to 0 (mirroring the producer's
+// `persistedCounterOf` tolerance for the same gap) while a present
+// non-finite value still rejects the record.
 const TRANSITIONAL_ABSENT_ZERO_KEYS: readonly TotalsKey[] = ["dedupedBytes"]
 
 const parseTotals = (value: unknown): PanelTotals | undefined => {
@@ -832,6 +833,8 @@ const SIDEBAR_HITS_UNIT = "hits"
 const SIDEBAR_BUDGET_INACTIVE_TEXT = `${SIDEBAR_BUDGET_LABEL}: inactive (no budget)`
 const SIDEBAR_WATERMARK_MISSING_TEXT = `${SIDEBAR_WATERMARK_LABEL}: none`
 const SIDEBAR_SUBAGENTS_LEAD_LABEL = "Subagents"
+// Fixed positions, not recency: a delegation burst would otherwise reshuffle the type blocks on every tick.
+const FLEET_SUBAGENT_TYPE_ORDER = ["worker", "verifier", "reviewer", "planner"]
 const SUBAGENT_AGENT_SINGULAR = "agent"
 const SUBAGENT_AGENTS_UNIT = "agents"
 const SUBAGENT_NO_DATA_TEXT = "no data yet"
@@ -855,11 +858,9 @@ const savingsStatText = (label: string, count: number, tokensSaved: number): str
 const stashReadsStatText = (stashReads: number, stashHits: number): string =>
   `${SIDEBAR_STASH_READS_LABEL}: ${stashReads}, ${stashHits} ${SIDEBAR_HITS_UNIT}`
 
-// The deduped and reasoning-expired counts are unique-event lifetime
-// figures (first tombstone per pair, first crossing per reasoning part,
-// identical content counted once in count and bytes alike); the token
-// savings divide those same first-crossing byte totals, so the pair each
-// row shows is one coherent distinct-work statement.
+// The deduped and reasoning-expired counts are unique-event counts (first
+// tombstone per pair, first crossing per reasoning part); the token savings
+// stay the cumulative per-request estimate over the byte totals.
 const sidebarCountersGroup = (current: SessionPanel): PanelRow[] => [
   { text: savingsStatText(SIDEBAR_EVICTIONS_LABEL, current.totals.evictions, current.totals.evictionTokensSaved), tone: "success" },
   { text: savingsStatText(SIDEBAR_DEDUPED_LABEL, current.totals.dedupedUnique, current.totals.dedupTokensSaved), tone: "success" },
@@ -874,6 +875,11 @@ const sidebarEvictionGroup = (entry: PanelEvictedEntry): PanelRow[] => [
 
 const withBlankSeparators = (groups: PanelRow[][]): PanelRow[] =>
   groups.flatMap((group, index) => (index === 0 ? group : [SIDEBAR_BLANK_ROW, ...group]))
+
+const fleetSubagentTypeRank = (type: string): number => {
+  const fleetIndex = FLEET_SUBAGENT_TYPE_ORDER.indexOf(type.toLowerCase())
+  return fleetIndex === -1 ? FLEET_SUBAGENT_TYPE_ORDER.length : fleetIndex
+}
 
 export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: PanelData): PanelRow[] => {
   const kept = filterSubagentChildren(children)
@@ -926,7 +932,13 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
     }
     aggregates.set(child.type, aggregate)
   }
-  const sortedTypes = [...aggregates.entries()].sort(([, first], [, second]) => second.newestUpdatedAtMs - first.newestUpdatedAtMs)
+  const sortedTypes = [...aggregates.entries()].sort(([firstType], [secondType]) => {
+    const rankDelta = fleetSubagentTypeRank(firstType) - fleetSubagentTypeRank(secondType)
+    if (rankDelta !== 0) return rankDelta
+    if (firstType < secondType) return -1
+    if (firstType > secondType) return 1
+    return 0
+  })
   const statRow = (statText: string): PanelRow => ({
     text: truncateToWidth(statText, SIDEBAR_COLUMN_LIMIT),
     tone: "normal",
