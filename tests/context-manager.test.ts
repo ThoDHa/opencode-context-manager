@@ -161,8 +161,8 @@ const OCCUPANCY_CAPPED_SIXTH_TOOL = "webfetch"
 const OCCUPANCY_CAPPED_SIXTH_PREFIX = "/data/capped-sixth"
 const FENCE_MIXED_TAG = "mixed"
 const STASH_INVALID_SUBJECT_LEAD = "requires a non-empty subject string"
-const PAGE_STORE_RESTORED_LEAD = "restored from the prior-session page store"
-const PAGE_STORE_OLDER_LEAD = "older prior-session pages for subject"
+const PAGE_STORE_RESTORED_LINE = `${STASH_MARKER} restored from the page store.`
+const PAGE_STORE_OLDER_LEAD = "older pages for subject"
 const PAGE_STORE_MISS_LEAD = "no prior-session page for subject"
 const RECEIVED_LABEL = "received"
 const UNKNOWN_TARGET_LABEL = "unknown target"
@@ -595,8 +595,6 @@ const outputDigestFor = (tool: string, subject: string, output: string): string 
 
 const digestSentenceFor = (tool: string, subject: string, output: string): string =>
   `${DIGEST_POINTER_LEAD}${outputDigestFor(tool, subject, output)}${DIGEST_SENTENCE_TAIL}`
-
-const pageStoreRestoredLineFor = (): string => `${STASH_MARKER} ${PAGE_STORE_RESTORED_LEAD}.`
 
 const pageStoreOlderLineFor = (subject: string, count: number): string =>
   `${STASH_MARKER} ${PAGE_STORE_OLDER_LEAD} "${subject}": ${count}.`
@@ -9178,6 +9176,7 @@ const PAGE_STORE_CORRUPT_GOOD_OUTPUT = "the one well-formed page"
 const PAGE_STORE_FAULT_RELOADED = "/data/page-store-fault-reloaded.txt"
 const PAGE_STORE_FAULT_SIBLING = "/data/page-store-fault-sibling.txt"
 const PAGE_STORE_ABSENT_MISS_SUBJECT = "/data/page-store-absent.txt"
+const PAGE_STORE_DIRECTORY_NAME = "store-dir"
 const PAGE_STORE_WRITE_BLOCKED_DIR = "missing-subdir"
 const PAGE_STORE_STALE_ROTATED_CONTENT = "stale rotated pages\n"
 const PAGE_STORE_CUSTOM_PATH_TAIL = "custom-pages.jsonl"
@@ -9364,7 +9363,7 @@ test("a fresh plugin instance reloads a prior session's evicted original through
     const secondSittingHooks = await loadPluginHooksWithPageStore(storePath)
     assert.equal(
       await readEvicted(secondSittingHooks, PAGE_STORE_ROUNDTRIP_SUBJECT, SESSION_ID_B),
-      `${outputOfBytes(MIN_EVICTABLE_BYTES)}\n${pageStoreRestoredLineFor()}`,
+      `${outputOfBytes(MIN_EVICTABLE_BYTES)}\n${PAGE_STORE_RESTORED_LINE}`,
     )
     assert.equal(countersOf(await readStats(secondSittingHooks, SESSION_ID_B)).stashHits, 1)
   } finally {
@@ -9381,7 +9380,7 @@ test("a page store hit returns the newest page in full and counts the older page
 
     assert.equal(
       await readEvicted(hooks, PAGE_STORE_OLDER_SUBJECT, SESSION_ID),
-      `${PAGE_STORE_OLDER_OUTPUTS[2]}\n${pageStoreRestoredLineFor()}\n${pageStoreOlderLineFor(PAGE_STORE_OLDER_SUBJECT, 2)}`,
+      `${PAGE_STORE_OLDER_OUTPUTS[2]}\n${PAGE_STORE_RESTORED_LINE}\n${pageStoreOlderLineFor(PAGE_STORE_OLDER_SUBJECT, 2)}`,
     )
   } finally {
     cleanupMetricsDir(pagesDir)
@@ -9401,7 +9400,7 @@ test("a page store hit appends the attachments manifest when the page carries at
 
     assert.equal(
       await readEvicted(hooks, PAGE_STORE_ATTACHED_SUBJECT, SESSION_ID),
-      `${outputOfBytes(MIN_EVICTABLE_BYTES)}\n${pageStoreRestoredLineFor()}\n${attachmentManifestLineFor([
+      `${outputOfBytes(MIN_EVICTABLE_BYTES)}\n${PAGE_STORE_RESTORED_LINE}\n${attachmentManifestLineFor([
         attachmentSummaryFor(ATTACHMENT_MIME_PNG, ATTACHED_URL_PRIMARY_CHARS),
       ])}`,
     )
@@ -9456,7 +9455,7 @@ test("a page store holding corrupt lines skips them and still serves the well-fo
 
     assert.equal(
       await readEvicted(hooks, PAGE_STORE_CORRUPT_SUBJECT, SESSION_ID),
-      `${PAGE_STORE_CORRUPT_GOOD_OUTPUT}\n${pageStoreRestoredLineFor()}`,
+      `${PAGE_STORE_CORRUPT_GOOD_OUTPUT}\n${PAGE_STORE_RESTORED_LINE}`,
     )
   } finally {
     cleanupMetricsDir(pagesDir)
@@ -9492,6 +9491,22 @@ test("an unreadable page store degrades to the composed miss instead of a tool e
     const result = await readEvicted(hooks, PAGE_STORE_ABSENT_MISS_SUBJECT, SESSION_ID)
 
     assert.equal(result, stashMissFor(PAGE_STORE_ABSENT_MISS_SUBJECT, STASH_EMPTY_OCCUPANCY))
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a page store path pointing at a directory degrades to the composed miss instead of a tool error", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storeDir = join(pagesDir, PAGE_STORE_DIRECTORY_NAME)
+    mkdirSync(storeDir)
+    const hooks = await loadPluginHooksWithPageStore(storeDir)
+
+    assert.equal(
+      await readEvicted(hooks, PAGE_STORE_ABSENT_MISS_SUBJECT, SESSION_ID),
+      stashMissFor(PAGE_STORE_ABSENT_MISS_SUBJECT, STASH_EMPTY_OCCUPANCY),
+    )
   } finally {
     cleanupMetricsDir(pagesDir)
   }

@@ -97,8 +97,9 @@ const STASH_OCCUPANCY_RANGE_OLDEST_LABEL = "oldest"
 const STASH_OCCUPANCY_RANGE_NEWEST_LABEL = "newest"
 const MAX_OCCUPANCY_CATEGORIES = 5
 const STASH_INVALID_SUBJECT_LEAD = "requires a non-empty subject string"
-const PAGE_STORE_RESTORED_LEAD = "restored from the prior-session page store"
-const PAGE_STORE_OLDER_LEAD = "older prior-session pages for subject"
+const PAGE_STORE_RESTORED_LEAD = "restored from the page store"
+const PAGE_STORE_RESTORED_LINE = `${STASH_MARKER} ${PAGE_STORE_RESTORED_LEAD}.`
+const PAGE_STORE_OLDER_LEAD = "older pages for subject"
 const PAGE_STORE_MISS_LEAD = "no prior-session page for subject"
 const RECEIVED_LABEL = "received"
 const FALLBACK_SESSION_KEY = "no-session"
@@ -1532,8 +1533,6 @@ const pageStoreMatchesFor = async (options: ResolvedOptions, subject: string): P
   return matches
 }
 
-const pageStoreRestoredLineFor = (): string => `${STASH_MARKER} ${PAGE_STORE_RESTORED_LEAD}.`
-
 const pageStoreOlderLineFor = (subject: string, count: number): string =>
   `${STASH_MARKER} ${PAGE_STORE_OLDER_LEAD} "${subject}": ${count}.`
 
@@ -1573,7 +1572,7 @@ const executeReadEvicted = async (
     rememberFaultForSubject(sessionMetrics.faultCounts, subject, DEFAULT_REMEMBERED_FAULT_SUBJECTS)
     const newest = pages[pages.length - 1]
     const olderCount = pages.length - 1
-    const restored = `${newest.output}\n${pageStoreRestoredLineFor()}`
+    const restored = `${newest.output}\n${PAGE_STORE_RESTORED_LINE}`
     const withOlder = olderCount === 0 ? restored : `${restored}\n${pageStoreOlderLineFor(subject, olderCount)}`
     return newest.attachments === undefined ? withOlder : `${withOlder}\n${stashedAttachmentsLineFor(newest.attachments)}`
   }
@@ -1964,11 +1963,14 @@ const recordPageStoreLines = async (
 ): Promise<void> => {
   if (options.pageStore === false || entries.length === 0) return
   if (options.pageStoreRotationMaxBytes === METRICS_ROTATION_DISABLED_MAX_BYTES) return
+  // One clock read per run: the lines a single eviction produced share one
+  // timestamp instead of drifting across the walk.
+  const ts = new Date(options.now()).toISOString()
   try {
     const pageStoreJsonLine = `${entries
       .map((entry) =>
         JSON.stringify({
-          ts: new Date(options.now()).toISOString(),
+          ts,
           session: sessionKey,
           tool: entry.tool,
           subject: entry.subject,
