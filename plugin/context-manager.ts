@@ -475,7 +475,7 @@ type StatsSource = {
   options: ResolvedOptions
   limits: Map<string, ContextLimitEntry>
   modelKeys: Map<string, string | undefined>
-  stashes: StashStore
+  pageStores: PageStoreBySession
   metrics: MetricsStore
 }
 
@@ -494,7 +494,7 @@ type MessageBundle = {
   parts: Array<Record<string, unknown>>
 }
 
-type StashEntry = {
+type PageEntry = {
   output: string
   tool: string
   subject: string
@@ -504,9 +504,9 @@ type StashEntry = {
   stashSlot?: number
 }
 
-type SessionStash = Map<string, StashEntry>
+type SessionPageStore = Map<string, PageEntry>
 
-type StashStore = Map<string, SessionStash>
+type PageStoreBySession = Map<string, SessionPageStore>
 
 const modelContextTokensOf = (raw: Record<string, number> | undefined): Record<string, number> => {
   if (typeof raw !== "object" || raw === null) return {}
@@ -1262,7 +1262,7 @@ const fenceFirstNonEmptyLineOf = (lines: string[], startLine: number, endLine: n
   return undefined
 }
 
-const evictLargeUserFences = (messages: MessageBundle[], options: ResolvedOptions, stash: SessionStash, pageStoreEntries: StashEntry[]): FenceEviction => {
+const evictLargeUserFences = (messages: MessageBundle[], options: ResolvedOptions, pageStore: SessionPageStore, pageStoreEntries: PageEntry[]): FenceEviction => {
   if (options.userFenceEviction.enabled === false) return { blocks: 0, bytes: 0, stashDropped: 0 }
   const hotFromIndex = hotFromIndexOf(messages, options)
   const { minBlockLines } = options.userFenceEviction
@@ -1291,7 +1291,7 @@ const evictLargeUserFences = (messages: MessageBundle[], options: ResolvedOption
         const blockText = text.slice(startOffset, endOffset)
         const subject = boundedSingleLineOf(firstLine)
         const tombstone = buildFenceTombstone(span.language, contentLines, subject)
-        const stashed: StashEntry = {
+        const stored: PageEntry = {
           output: blockText,
           tool: FENCE_STASH_TOOL_LABEL,
           subject,
@@ -1299,8 +1299,8 @@ const evictLargeUserFences = (messages: MessageBundle[], options: ResolvedOption
           partIndex,
           stashSlot: span.startLine,
         }
-        stashDropped += stashEvictedOutput(stash, stashed, options.stashLimit)
-        pageStoreEntries.push(stashed)
+        stashDropped += storeEvictedPage(pageStore, stored, options.stashLimit)
+        pageStoreEntries.push(stored)
         plans.push({
           startOffset,
           endOffset,
@@ -1353,7 +1353,7 @@ const buildReloadPointer = (subject: string): string =>
 const buildFenceTombstone = (language: string | undefined, contentLines: number, subject: string): string =>
   `${FENCE_EVICTION_MARKER} ${language === undefined ? FENCE_BLOCK_NOUN : `${language} ${FENCE_BLOCK_NOUN}`} (${contentLines} ${FENCE_LINE_COUNT_LABEL}, ${FENCE_FIRST_LINE_LABEL} "${subject}") ${FENCE_EVICTED_NOTICE}${buildReloadPointer(subject)}`
 
-const stashKeyOf = (tool: string, subject: string, msgIndex: number, partIndex: number, stashSlot?: number): string =>
+const pageKeyOf = (tool: string, subject: string, msgIndex: number, partIndex: number, stashSlot?: number): string =>
   `${tool}:${subject}:${msgIndex}:${partIndex}${stashSlot === undefined ? "" : `:${stashSlot}`}`
 
 const touchMapEntry = <T>(map: Map<string, T>, key: string): T | undefined => {
@@ -1386,41 +1386,41 @@ const rememberFaultForSubject = (faultCounts: Map<string, number>, subject: stri
   rememberSessionValue(faultCounts, subject, (existing ?? 0) + 1, bound)
 }
 
-const stashForSession = (stashes: StashStore, sessionKey: string, sessionBound: number): SessionStash => {
-  const touched = touchMapEntry(stashes, sessionKey)
+const pagesForSession = (pageStores: PageStoreBySession, sessionKey: string, sessionBound: number): SessionPageStore => {
+  const touched = touchMapEntry(pageStores, sessionKey)
   if (touched !== undefined) return touched
-  trimMapToBound(stashes, sessionBound)
-  const created: SessionStash = new Map()
-  stashes.set(sessionKey, created)
+  trimMapToBound(pageStores, sessionBound)
+  const created: SessionPageStore = new Map()
+  pageStores.set(sessionKey, created)
   return created
 }
 
-const trimStash = (stash: SessionStash, limit: number): number => {
+const trimPages = (pageStore: SessionPageStore, limit: number): number => {
   let dropped = 0
-  while (stash.size > limit) {
-    const oldest = stash.keys().next()
+  while (pageStore.size > limit) {
+    const oldest = pageStore.keys().next()
     if (oldest.done === true) break
-    stash.delete(oldest.value)
+    pageStore.delete(oldest.value)
     dropped += 1
   }
   return dropped
 }
 
-const stashEvictedOutput = (stash: SessionStash, entry: StashEntry, limit: number): number => {
-  stash.set(stashKeyOf(entry.tool, entry.subject, entry.msgIndex, entry.partIndex, entry.stashSlot), entry)
-  return trimStash(stash, limit)
+const storeEvictedPage = (pageStore: SessionPageStore, entry: PageEntry, limit: number): number => {
+  pageStore.set(pageKeyOf(entry.tool, entry.subject, entry.msgIndex, entry.partIndex, entry.stashSlot), entry)
+  return trimPages(pageStore, limit)
 }
 
-const stashMissTextFor = (subject: string): string =>
+const pageMissTextFor = (subject: string): string =>
   `${STASH_MARKER} ${STASH_MISS_LEAD} "${subject}"; ${STASH_MISS_HINT}.`
 
-const stashOccupancyLineFor = (stash: SessionStash): string => {
-  if (stash.size === 0) return `${STASH_MARKER} ${STASH_OCCUPANCY_LEAD} ${STASH_OCCUPANCY_EMPTY_TAIL}.`
+const pageStoreOccupancyLineFor = (pageStore: SessionPageStore): string => {
+  if (pageStore.size === 0) return `${STASH_MARKER} ${STASH_OCCUPANCY_LEAD} ${STASH_OCCUPANCY_EMPTY_TAIL}.`
   const categoryCounts = new Map<string, number>()
   const subjects = new Set<string>()
   let oldest = Number.POSITIVE_INFINITY
   let newest = Number.NEGATIVE_INFINITY
-  for (const entry of stash.values()) {
+  for (const entry of pageStore.values()) {
     categoryCounts.set(entry.tool, (categoryCounts.get(entry.tool) ?? 0) + 1)
     subjects.add(entry.subject)
     oldest = Math.min(oldest, entry.msgIndex)
@@ -1434,25 +1434,25 @@ const stashOccupancyLineFor = (stash: SessionStash): string => {
     .concat(overflowCount > 0 ? `+${overflowCount} ${STASH_OCCUPANCY_OVERFLOW_LABEL}` : [])
     .join(STASH_OCCUPANCY_CATEGORY_SEPARATOR)
   const range =
-    stash.size === 1
+    pageStore.size === 1
       ? `${STASH_MESSAGE_LABEL} ${oldest}`
       : `${STASH_OCCUPANCY_RANGE_OLDEST_LABEL} ${STASH_MESSAGE_LABEL} ${oldest}, ${STASH_OCCUPANCY_RANGE_NEWEST_LABEL} ${STASH_MESSAGE_LABEL} ${newest}`
-  const entryNoun = stash.size === 1 ? STASH_OCCUPANCY_ENTRY_LABEL : STASH_OCCUPANCY_ENTRIES_LABEL
+  const entryNoun = pageStore.size === 1 ? STASH_OCCUPANCY_ENTRY_LABEL : STASH_OCCUPANCY_ENTRIES_LABEL
   const subjectNoun = subjects.size === 1 ? STASH_OCCUPANCY_SUBJECT_LABEL : STASH_OCCUPANCY_SUBJECTS_LABEL
-  return `${STASH_MARKER} ${STASH_OCCUPANCY_LEAD} ${stash.size} ${entryNoun} across ${subjects.size} ${subjectNoun}: ${categoryList}; ${range}.`
+  return `${STASH_MARKER} ${STASH_OCCUPANCY_LEAD} ${pageStore.size} ${entryNoun} across ${subjects.size} ${subjectNoun}: ${categoryList}; ${range}.`
 }
 
 const invalidSubjectTextFor = (received: string): string =>
   `${STASH_MARKER} ${RELOAD_TOOL_NAME} ${STASH_INVALID_SUBJECT_LEAD} (${RECEIVED_LABEL} ${received}).`
 
-const olderMatchesLineFor = (subject: string, older: StashEntry[]): string =>
+const olderMatchesLineFor = (subject: string, older: PageEntry[]): string =>
   `${STASH_MARKER} ${STASH_OLDER_LEAD} "${subject}": ${older
     .map((entry) => `${entry.tool} ${STASH_MESSAGE_LABEL} ${entry.msgIndex}`)
     .join(STASH_MATCH_SEPARATOR)}`
 
-const stashedMatchesFor = (stash: SessionStash, subject: string): StashEntry[] => {
-  const matches: StashEntry[] = []
-  for (const entry of stash.values()) {
+const pageMatchesFor = (pageStore: SessionPageStore, subject: string): PageEntry[] => {
+  const matches: PageEntry[] = []
+  for (const entry of pageStore.values()) {
     if (entry.subject === subject) matches.push(entry)
   }
   return matches
@@ -1467,7 +1467,7 @@ const attachmentSummaryOf = (attachment: unknown): string => {
   return `${mimeLabel} data URI ${uriChars} chars`
 }
 
-const stashedAttachmentsLineFor = (attachments: unknown[]): string =>
+const pageAttachmentsLineFor = (attachments: unknown[]): string =>
   `${STASH_MARKER} ${STASH_ATTACHMENTS_LEAD}: ${attachments.map(attachmentSummaryOf).join(SUBJECT_SEPARATOR)}; ${STASH_ATTACHMENT_DROPPED_TAIL}.`
 
 const sessionIDFromContext = (source: unknown): string | undefined => {
@@ -1481,7 +1481,7 @@ const sessionKeyFromContext = (source: unknown): string => sessionIDFromContext(
 // The store's line shape, validated field by field: a line failing any
 // required field is skipped (per-line tolerance, mirroring the log seeder's
 // corrupt-line skip) rather than failing the whole read.
-const pageStoreLineOf = (parsed: unknown): StashEntry | undefined => {
+const pageStoreLineOf = (parsed: unknown): PageEntry | undefined => {
   if (!isRecord(parsed)) return undefined
   const output = parsed["output"]
   const tool = parsed["tool"]
@@ -1509,7 +1509,7 @@ const pageStoreLineOf = (parsed: unknown): StashEntry | undefined => {
 // rare path) in file order, so the last matching line is the newest page.
 // Any read or parse failure degrades to no pages: a corrupt or unreadable
 // store is a clean miss, never a thrown tool error.
-const pageStoreMatchesFor = async (options: ResolvedOptions, subject: string): Promise<StashEntry[]> => {
+const pageStoreMatchesFor = async (options: ResolvedOptions, subject: string): Promise<PageEntry[]> => {
   if (options.pageStore === false) return []
   let content: string
   try {
@@ -1517,7 +1517,7 @@ const pageStoreMatchesFor = async (options: ResolvedOptions, subject: string): P
   } catch {
     return []
   }
-  const matches: StashEntry[] = []
+  const matches: PageEntry[] = []
   for (const line of content.split("\n")) {
     const trimmed = line.trim()
     if (trimmed.length === 0) continue
@@ -1539,7 +1539,7 @@ const pageStoreOlderLineFor = (subject: string, count: number): string =>
 const pageStoreMissLineFor = (subject: string): string => `${STASH_MARKER} ${PAGE_STORE_MISS_LEAD} "${subject}".`
 
 const executeReadEvicted = async (
-  stashes: StashStore,
+  pageStores: PageStoreBySession,
   metrics: MetricsStore,
   hydrations: MetricsHydration,
   persistedTotalsForSession: (sessionKey: string) => Promise<PersistedTotals | undefined>,
@@ -1551,8 +1551,8 @@ const executeReadEvicted = async (
   const subject = typeof args === "object" && args !== null ? (args as { subject?: unknown }).subject : undefined
   if (typeof subject !== "string" || subject.length === 0) return invalidSubjectTextFor(typeof subject)
   const sessionKey = sessionKeyFromContext(toolContext)
-  const stash = stashes.get(sessionKey)
-  const matches = stash === undefined ? [] : stashedMatchesFor(stash, subject)
+  const pageStore = pageStores.get(sessionKey)
+  const matches = pageStore === undefined ? [] : pageMatchesFor(pageStore, subject)
   if (matches.length === 0) {
     const pages = await pageStoreMatchesFor(options, subject)
     if (pages.length === 0) {
@@ -1563,7 +1563,7 @@ const executeReadEvicted = async (
       if (inFlight !== undefined) await inFlight.promise
       const existing = metrics.get(sessionKey)
       if (existing !== undefined) existing.stashMisses += 1
-      return `${stashMissTextFor(subject)}\n${stashOccupancyLineFor(stash ?? new Map())}\n${pageStoreMissLineFor(subject)}`
+      return `${pageMissTextFor(subject)}\n${pageStoreOccupancyLineFor(pageStore ?? new Map())}\n${pageStoreMissLineFor(subject)}`
     }
     // A page-store hit counts and fault-protects exactly like an in-session
     // hit: the reload is the same event to the eviction policy.
@@ -1574,18 +1574,18 @@ const executeReadEvicted = async (
     const olderCount = pages.length - 1
     const restored = `${newest.output}\n${PAGE_STORE_RESTORED_LINE}`
     const withOlder = olderCount === 0 ? restored : `${restored}\n${pageStoreOlderLineFor(subject, olderCount)}`
-    return newest.attachments === undefined ? withOlder : `${withOlder}\n${stashedAttachmentsLineFor(newest.attachments)}`
+    return newest.attachments === undefined ? withOlder : `${withOlder}\n${pageAttachmentsLineFor(newest.attachments)}`
   }
   // Refreshed before the await so the hit counts even if stash churn during
   // the hydration read evicts this session's stash entry.
-  touchMapEntry(stashes, sessionKey)
+  touchMapEntry(pageStores, sessionKey)
   const sessionMetrics = await metricsForSession(metrics, hydrations, persistedTotalsForSession, sessionKey, metricsSessionBound)
   sessionMetrics.stashHits += 1
   rememberFaultForSubject(sessionMetrics.faultCounts, subject, DEFAULT_REMEMBERED_FAULT_SUBJECTS)
   const newest = matches[matches.length - 1]
   const older = matches.slice(0, -1)
   const output = older.length === 0 ? newest.output : `${newest.output}\n${olderMatchesLineFor(subject, older)}`
-  return newest.attachments === undefined ? output : `${output}\n${stashedAttachmentsLineFor(newest.attachments)}`
+  return newest.attachments === undefined ? output : `${output}\n${pageAttachmentsLineFor(newest.attachments)}`
 }
 
 // Raw counters start at zero, derived from the shared schema key list so a
@@ -1959,7 +1959,7 @@ const recordPageStoreLines = async (
   options: ResolvedOptions,
   metrics: MetricsStore,
   sessionKey: string,
-  entries: StashEntry[],
+  entries: PageEntry[],
 ): Promise<void> => {
   if (options.pageStore === false || entries.length === 0) return
   if (options.pageStoreRotationMaxBytes === METRICS_ROTATION_DISABLED_MAX_BYTES) return
@@ -2102,7 +2102,7 @@ const sessionCheckpointOf = (
   options: ResolvedOptions,
   metrics: SessionMetrics,
   lastRun: LastRunMetrics,
-  stash: SessionStash,
+  pageStore: SessionPageStore,
   hotSubjects: HotSubject[],
 ): SessionCheckpoint => ({
   ts: new Date(options.now()).toISOString(),
@@ -2113,7 +2113,7 @@ const sessionCheckpointOf = (
   modelContextTokensModelKey: budget.modelKey ?? null,
   lastRun,
   totals: totalsOf(metrics, options.charsPerToken),
-  stash: { entries: stash.size, capacity: options.stashLimit },
+  stash: { entries: pageStore.size, capacity: options.stashLimit },
   hotSubjects: orderedRenderedSubjectsOf(hotSubjects, options.hintSubjects),
 })
 
@@ -2174,7 +2174,7 @@ const recordSessionCheckpoint = async (
   sessionKey: string,
   budget: ContextLimit,
   metrics: SessionMetrics,
-  stash: SessionStash,
+  pageStore: SessionPageStore,
   hotSubjects: HotSubject[],
   pruneThrottle: PruneThrottle,
 ): Promise<void> => {
@@ -2182,7 +2182,7 @@ const recordSessionCheckpoint = async (
   const lastRun = metrics.lastRun
   if (lastRun === undefined) return
   if (!isSafeSessionFileStem(sessionKey)) return
-  const snapshot = sessionCheckpointOf(sessionKey, budget, options, metrics, lastRun, stash, hotSubjects)
+  const snapshot = sessionCheckpointOf(sessionKey, budget, options, metrics, lastRun, pageStore, hotSubjects)
   const stateFile = join(options.liveStatePath, `${sessionKey}${LIVE_STATE_FILE_SUFFIX}`)
   const tempFile = `${stateFile}${LIVE_STATE_TEMP_FILE_SUFFIX}`
   try {
@@ -2284,7 +2284,7 @@ const executeStatsTool = (source: StatsSource, toolContext: unknown): string => 
   const sessionLimit = sessionID === undefined ? undefined : touchMapEntry(source.limits, sessionID)
   const metrics = touchMapEntry(source.metrics, sessionKey) ?? createSessionMetrics()
   const { budget } = contextLimitForRun(sessionLimit, metrics.persistedBudget, sessionID === undefined ? undefined : source.modelKeys.get(sessionID), source.options)
-  const stash = source.stashes.get(sessionKey)
+  const pageStore = source.pageStores.get(sessionKey)
   const report = {
     session: sessionKey,
     options: {
@@ -2319,7 +2319,7 @@ const executeStatsTool = (source: StatsSource, toolContext: unknown): string => 
     },
     modelContextTokens: budget.tokens,
     modelContextTokensSource: budget.source,
-    stash: { entries: stash === undefined ? 0 : stash.size, capacity: source.options.stashLimit },
+    stash: { entries: pageStore === undefined ? 0 : pageStore.size, capacity: source.options.stashLimit },
     counters: totalsOf(metrics, source.options.charsPerToken),
     lastRun: metrics.lastRun ?? null,
     ...(metrics.lastDryRun === undefined
@@ -2531,8 +2531,8 @@ const evictLeastRecentlyUsed = (
   candidates: EvictionCandidates,
   options: ResolvedOptions,
   watermarkTokens: number | null,
-  stash: SessionStash,
-  pageStoreEntries: StashEntry[],
+  pageStore: SessionPageStore,
+  pageStoreEntries: PageEntry[],
 ): EvictionResult => {
   const { evictable } = candidates
 
@@ -2551,16 +2551,16 @@ const evictLeastRecentlyUsed = (
     const droppedAttachments = nonEmptyAttachmentsOf(entry.stateRef)
     const digest = buildOutputDigest(entry.tool, subject, entry.stateRef.output)
     const tombstone = buildTombstone(entry.tool, subject, entry.bytes, messagesAgo, droppedAttachments !== undefined, digest)
-    const stashed: StashEntry = {
+    const stored: PageEntry = {
       output: entry.stateRef.output,
       tool: entry.tool,
       subject,
       msgIndex: entry.msgIndex,
       partIndex: entry.partIndex,
     }
-    if (droppedAttachments !== undefined) stashed.attachments = droppedAttachments
-    stashDropped += stashEvictedOutput(stash, stashed, options.stashLimit)
-    pageStoreEntries.push(stashed)
+    if (droppedAttachments !== undefined) stored.attachments = droppedAttachments
+    stashDropped += storeEvictedPage(pageStore, stored, options.stashLimit)
+    pageStoreEntries.push(stored)
     stripStateAttachments(entry.stateRef)
     entry.stateRef.output = `${tombstone}${buildReloadPointer(subject)}`
     reclaimedTokens += entry.bytes / options.charsPerToken
@@ -2620,16 +2620,16 @@ const storeHint = (hintBySession: Map<string, string>, sessionKey: string, hotSu
 // through read_evicted. Appends context strings only; the native prompt
 // is never replaced, and an unknown session attaches nothing.
 const COMPACTION_BLOCK_MARKER = "[ctx]"
-const compactionContextFor = (metricsEntry: SessionMetrics | undefined, stash: SessionStash | undefined, limit: number): string[] => {
+const compactionContextFor = (metricsEntry: SessionMetrics | undefined, pageStore: SessionPageStore | undefined, limit: number): string[] => {
   if (metricsEntry === undefined) return []
   const hotSubjects = orderedRenderedSubjectsOf(metricsEntry.evictedSubjects.map((subject, index) => ({ subject, lastTouch: index })), limit)
   const context: string[] = []
   if (hotSubjects.length > 0) context.push(`${HINT_LINE_PREFIX} ${hotSubjects.join(SUBJECT_SEPARATOR)}`)
-  // slice(-0) is slice(0), the whole stash, so the bound must be checked
+  // slice(-0) is slice(0), the whole store, so the bound must be checked
   // here instead of trusted to slice; 0 disables subject rendering for the
-  // hint line and disables the stash note with it.
-  if (limit > 0 && stash !== undefined && stash.size > 0) {
-    const entries = [...stash.values()]
+  // hint line and disables the store note with it.
+  if (limit > 0 && pageStore !== undefined && pageStore.size > 0) {
+    const entries = [...pageStore.values()]
     const newestSubjects: string[] = []
     const seenSubjects = new Set<string>()
     for (let index = entries.length - 1; index >= 0 && newestSubjects.length < limit; index -= 1) {
@@ -2663,7 +2663,7 @@ type TransformHookDeps = {
   metricsBySession: MetricsStore
   metricsHydrationBySession: MetricsHydration
   persistedTotalsForSession: (sessionKey: string) => Promise<PersistedTotals | undefined>
-  stashBySession: StashStore
+  pageStoreBySession: PageStoreBySession
   hintBySession: Map<string, string>
   pruneThrottle: PruneThrottle
   options: ResolvedOptions
@@ -2684,10 +2684,10 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
   const { budget, fallbackSuppressed } = contextLimitForRun(sessionLimit, sessionMetrics.persistedBudget, sittingModelKey, options)
   if (fallbackSuppressed) sessionMetrics.persistedBudget = undefined
   else if (budget.source !== CONTEXT_TOKENS_SOURCE_UNKNOWN) sessionMetrics.persistedBudget = { tokens: budget.tokens, source: budget.source, modelKey: budget.modelKey }
-  const sessionStash = stashForSession(deps.stashBySession, sessionKey, options.stashSessions)
+  const sessionPageStore = pagesForSession(deps.pageStoreBySession, sessionKey, options.stashSessions)
   // The run's stashed entries, gathered at the two stash sites so the write
   // below lands them eagerly in the same run as the eviction that built them.
-  const pageStoreEntries: StashEntry[] = []
+  const pageStoreEntries: PageEntry[] = []
   stripLegacyHintParts(messages)
   const toolDedup = deduplicateToolOutputs(messages, options)
   const fileDedup = deduplicateFileAttachments(messages, options)
@@ -2699,7 +2699,7 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
   ])
   purgeErroredToolInputs(messages, options)
   const reasoningExpiredThisRun = expireAgedReasoning(sessionMetrics, messages, options)
-  const fenceEvictedThisRun = evictLargeUserFences(messages, options, sessionStash, pageStoreEntries)
+  const fenceEvictedThisRun = evictLargeUserFences(messages, options, sessionPageStore, pageStoreEntries)
   const effectiveWatermarkTokens = effectiveWatermarkTokensOf(budget.tokens, options)
   // One scan and one candidate walk feed whichever path runs: the
   // stand-downs (manual mode, or no watermark with the aged read tier
@@ -2711,7 +2711,7 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
   const standDown = options.manualMode || (effectiveWatermarkTokens === null && options.agedReadEvictionMessages === undefined)
   const eviction = standDown
     ? measureWithoutEvicting(candidates, effectiveWatermarkTokens)
-    : evictLeastRecentlyUsed(messages, candidates, options, effectiveWatermarkTokens, sessionStash, pageStoreEntries)
+    : evictLeastRecentlyUsed(messages, candidates, options, effectiveWatermarkTokens, sessionPageStore, pageStoreEntries)
   // The manual-mode dry run: with an effective watermark set, report
   // what the evictor would reclaim (the combined watermark and aged
   // read policy) so a staged watermark or staged age threshold can be
@@ -2744,7 +2744,7 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
   storeHint(deps.hintBySession, sessionKey, eviction.hotSubjects, options.hintSubjects, options.hintSessions)
   await recordPageStoreLines(options, deps.metricsBySession, sessionKey, pageStoreEntries)
   await recordMetricsLine(options, sessionMetrics, sessionKey, budget, runOutcome)
-  await recordSessionCheckpoint(options, sessionKey, budget, sessionMetrics, sessionStash, eviction.hotSubjects, deps.pruneThrottle)
+  await recordSessionCheckpoint(options, sessionKey, budget, sessionMetrics, sessionPageStore, eviction.hotSubjects, deps.pruneThrottle)
 }
 
 // A throwing tool degrades to a structured error string the TUI can
@@ -2902,7 +2902,7 @@ const server = (async (_input, rawOptions) => {
   const options = resolveOptions(raw)
   const contextLimits = new Map<string, ContextLimitEntry>()
   const modelKeyBySession = new Map<string, string | undefined>()
-  const stashBySession = new Map<string, SessionStash>()
+  const pageStoreBySession = new Map<string, SessionPageStore>()
   const hintBySession = new Map<string, string>()
   const metricsBySession: MetricsStore = new Map()
   const metricsHydrationBySession: MetricsHydration = new Map()
@@ -2917,7 +2917,7 @@ const server = (async (_input, rawOptions) => {
     metricsBySession,
     metricsHydrationBySession,
     persistedTotalsForSession,
-    stashBySession,
+    pageStoreBySession,
     hintBySession,
     pruneThrottle,
     options,
@@ -2936,10 +2936,10 @@ const server = (async (_input, rawOptions) => {
   // { type: "string" } schema below is sufficient. If this file ever ships
   // somewhere @opencode-ai/plugin resolves, switch back to tool().
   const readEvicted = async (args: unknown, toolContext: unknown): Promise<string> =>
-    executeReadEvicted(stashBySession, metricsBySession, metricsHydrationBySession, persistedTotalsForSession, options.metricsSessions, options, args, toolContext)
+    executeReadEvicted(pageStoreBySession, metricsBySession, metricsHydrationBySession, persistedTotalsForSession, options.metricsSessions, options, args, toolContext)
 
   const statsTool = async (_args: unknown, toolContext: unknown): Promise<string> =>
-    executeStatsTool({ options, limits: contextLimits, modelKeys: modelKeyBySession, stashes: stashBySession, metrics: metricsBySession }, toolContext)
+    executeStatsTool({ options, limits: contextLimits, modelKeys: modelKeyBySession, pageStores: pageStoreBySession, metrics: metricsBySession }, toolContext)
 
   return {
     "chat.params": async (input: { sessionID: string; model?: ChatParamsModel }) => {
@@ -2982,7 +2982,7 @@ const server = (async (_input, rawOptions) => {
         if (options.faultCompaction !== undefined) options.faultCompaction()
         const context = compactionContextFor(
           touchMapEntry(metricsBySession, sessionKey),
-          stashBySession.get(sessionKey),
+          pageStoreBySession.get(sessionKey),
           options.hintSubjects,
         )
         if (context.length === 0) return

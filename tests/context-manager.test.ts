@@ -606,7 +606,7 @@ const stashMissFor = (subject: string, occupancy: string): string =>
 
 type OccupancyEntryShape = { tool: string; subject: string; msgIndex: number }
 
-const stashOccupancyLineFor = (entries: OccupancyEntryShape[]): string => {
+const pageStoreOccupancyLineFor = (entries: OccupancyEntryShape[]): string => {
   const categoryCounts = new Map<string, number>()
   let oldest = entries[0].msgIndex
   let newest = entries[0].msgIndex
@@ -2214,7 +2214,7 @@ test("read_evicted evicts the oldest stashed entry when a session stash exceeds 
     await readEvicted(hooks, stashSubjects[0], SESSION_ID),
     stashMissFor(
       stashSubjects[0],
-      stashOccupancyLineFor(stashSubjects.slice(1).map((subject, index) => ({ tool: READ_TOOL, subject, msgIndex: index + 1 }))),
+      pageStoreOccupancyLineFor(stashSubjects.slice(1).map((subject, index) => ({ tool: READ_TOOL, subject, msgIndex: index + 1 }))),
     ),
   )
   assert.equal(await readEvicted(hooks, stashSubjects[1], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
@@ -3250,7 +3250,7 @@ test("transform never stashes a protected output so read_evicted misses it after
     await readEvicted(hooks, STASH_PROTECTED_PATTERN, SESSION_ID),
     stashMissFor(
       STASH_PROTECTED_PATTERN,
-      stashOccupancyLineFor([{ tool: READ_TOOL, subject: STASH_PROTECTED_VICTIM_PATH, msgIndex: 1 }]),
+      pageStoreOccupancyLineFor([{ tool: READ_TOOL, subject: STASH_PROTECTED_VICTIM_PATH, msgIndex: 1 }]),
     ),
   )
   assert.equal(await readEvicted(hooks, STASH_PROTECTED_VICTIM_PATH, SESSION_ID), outputOfBytes(PROTECTED_OUTPUT_BYTES))
@@ -3536,7 +3536,7 @@ test("read_evicted does not refresh a session stash on a miss probe so the probi
     await readEvicted(hooks, STASH_MISS_PROBE_SUBJECT, stashSessionId(0)),
     stashMissFor(
       STASH_MISS_PROBE_SUBJECT,
-      stashOccupancyLineFor([{ tool: READ_TOOL, subject: stashSessionSubject(0), msgIndex: 0 }]),
+      pageStoreOccupancyLineFor([{ tool: READ_TOOL, subject: stashSessionSubject(0), msgIndex: 0 }]),
     ),
   )
 
@@ -3997,7 +3997,7 @@ test("context_stats counts stash hits and misses from read_evicted and leaves in
     await readEvicted(hooks, STATS_MISS_SUBJECT, SESSION_ID),
     stashMissFor(
       STATS_MISS_SUBJECT,
-      stashOccupancyLineFor([{ tool: READ_TOOL, subject: STATS_HIT_SUBJECT, msgIndex: 0 }]),
+      pageStoreOccupancyLineFor([{ tool: READ_TOOL, subject: STATS_HIT_SUBJECT, msgIndex: 0 }]),
     ),
   )
   const afterMiss = await readStats(hooks, SESSION_ID)
@@ -4330,7 +4330,7 @@ test("read_evicted drops the earliest runs' entries first when later runs push a
     await readEvicted(hooks, firstRunSubjects[0], SESSION_ID),
     stashMissFor(
       firstRunSubjects[0],
-      stashOccupancyLineFor([
+      pageStoreOccupancyLineFor([
         ...firstRunSubjects.slice(STASH_CROSS_RUN_DROP_COUNT).map((subject, index) => ({
           tool: READ_TOOL,
           subject,
@@ -6053,7 +6053,7 @@ test("transform never opens a span from a fence opener whose info string contain
     await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID),
     stashMissFor(
       fenceFirstLineOf(FENCE_LINE_TAG),
-      stashOccupancyLineFor([{ tool: FENCE_STASH_TOOL_LABEL, subject: fenceFirstLineOf(FENCE_LINE_TAG_B), msgIndex: 0 }]),
+      pageStoreOccupancyLineFor([{ tool: FENCE_STASH_TOOL_LABEL, subject: fenceFirstLineOf(FENCE_LINE_TAG_B), msgIndex: 0 }]),
     ),
   )
 })
@@ -6179,7 +6179,7 @@ test("read_evicted evicts the oldest stashed entry when fence evictions push a s
     await readEvicted(hooks, fenceFirstLineOf("block0"), SESSION_ID),
     stashMissFor(
       fenceFirstLineOf("block0"),
-      stashOccupancyLineFor(
+      pageStoreOccupancyLineFor(
         Array.from({ length: STASH_LIMIT }, (_, index) => ({
           tool: FENCE_STASH_TOOL_LABEL,
           subject: fenceFirstLineOf(`block${index + 1}`),
@@ -7767,7 +7767,7 @@ test("read_evicted applies a custom stashLimit dropping the oldest stashed entry
     await readEvicted(hooks, subjects[0], SESSION_ID),
     stashMissFor(
       subjects[0],
-      stashOccupancyLineFor(subjects.slice(1).map((subject, index) => ({ tool: READ_TOOL, subject, msgIndex: index + 1 }))),
+      pageStoreOccupancyLineFor(subjects.slice(1).map((subject, index) => ({ tool: READ_TOOL, subject, msgIndex: index + 1 }))),
     ),
   )
   assert.equal(await readEvicted(hooks, subjects[1], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
@@ -8138,7 +8138,7 @@ const runFirstSitting = async (hooks: HookMap): Promise<void> => {
     await readEvicted(hooks, REHYDRA_MISS_SUBJECT, SESSION_ID),
     stashMissFor(
       REHYDRA_MISS_SUBJECT,
-      stashOccupancyLineFor([{ tool: READ_TOOL, subject: REHYDRA_EVICTION_SUBJECT_A, msgIndex: 0 }]),
+      pageStoreOccupancyLineFor([{ tool: READ_TOOL, subject: REHYDRA_EVICTION_SUBJECT_A, msgIndex: 0 }]),
     ),
   )
   await runQuietProbeTransform(hooks, SESSION_ID)
@@ -8157,7 +8157,7 @@ const runSecondSitting = async (hooks: HookMap): Promise<void> => {
     await readEvicted(hooks, REHYDRA_MISS_SUBJECT, SESSION_ID),
     stashMissFor(
       REHYDRA_MISS_SUBJECT,
-      stashOccupancyLineFor([
+      pageStoreOccupancyLineFor([
         { tool: READ_TOOL, subject: REHYDRA_EVICTION_SUBJECT_B, msgIndex: 0 },
         { tool: FENCE_STASH_TOOL_LABEL, subject: fenceFirstLineOf(REHYDRA_FENCE_TAG), msgIndex: 0 },
       ]),
@@ -8297,7 +8297,7 @@ test("a quiet post restart run writes no metrics line because seeded stash reads
       await readEvicted(firstSittingHooks, REHYDRA_MISS_SUBJECT, SESSION_ID),
       stashMissFor(
         REHYDRA_MISS_SUBJECT,
-        stashOccupancyLineFor([{ tool: READ_TOOL, subject: REHYDRA_EVICTION_SUBJECT_A, msgIndex: 0 }]),
+        pageStoreOccupancyLineFor([{ tool: READ_TOOL, subject: REHYDRA_EVICTION_SUBJECT_A, msgIndex: 0 }]),
       ),
     )
     await runQuietProbeTransform(firstSittingHooks, SESSION_ID)
@@ -8847,7 +8847,7 @@ test("a stash miss issued while the session's first hydration is in flight count
       await readEvicted(firstSittingHooks, REHYDRA_MISS_SUBJECT, SESSION_ID),
       stashMissFor(
         REHYDRA_MISS_SUBJECT,
-        stashOccupancyLineFor([{ tool: READ_TOOL, subject: REHYDRA_EVICTION_SUBJECT_A, msgIndex: 0 }]),
+        pageStoreOccupancyLineFor([{ tool: READ_TOOL, subject: REHYDRA_EVICTION_SUBJECT_A, msgIndex: 0 }]),
       ),
     )
     await runQuietProbeTransform(firstSittingHooks, SESSION_ID)
