@@ -1963,20 +1963,23 @@ const recordPageStoreLines = async (
   entries: StashEntry[],
 ): Promise<void> => {
   if (options.pageStore === false || entries.length === 0) return
-  if (options.pageStoreRotationMaxBytes === HYGIENE_COPY_DISABLED_MAX_BYTES) return
-  const lines = entries.map((entry) => ({
-    ts: new Date(options.now()).toISOString(),
-    session: sessionKey,
-    tool: entry.tool,
-    subject: entry.subject,
-    msgIndex: entry.msgIndex,
-    partIndex: entry.partIndex,
-    ...(entry.stashSlot === undefined ? {} : { stashSlot: entry.stashSlot }),
-    output: entry.output,
-    ...(entry.attachments === undefined ? {} : { attachments: entry.attachments }),
-  }))
+  if (options.pageStoreRotationMaxBytes === METRICS_ROTATION_DISABLED_MAX_BYTES) return
   try {
-    const pageStoreJsonLine = `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`
+    const pageStoreJsonLine = `${entries
+      .map((entry) =>
+        JSON.stringify({
+          ts: new Date(options.now()).toISOString(),
+          session: sessionKey,
+          tool: entry.tool,
+          subject: entry.subject,
+          msgIndex: entry.msgIndex,
+          partIndex: entry.partIndex,
+          ...(entry.stashSlot === undefined ? {} : { stashSlot: entry.stashSlot }),
+          output: entry.output,
+          ...(entry.attachments === undefined ? {} : { attachments: entry.attachments }),
+        }),
+      )
+      .join("\n")}\n`
     await rotateMetricsLogPastCap(options.pageStorePath, Buffer.byteLength(pageStoreJsonLine), options.pageStoreRotationMaxBytes)
     await appendFile(options.pageStorePath, pageStoreJsonLine)
     const entry = touchMapEntry(metrics, sessionKey)
