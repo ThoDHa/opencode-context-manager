@@ -42,10 +42,10 @@ const HINT_LABEL = "recently active:"
 const DEDUP_MARKER = "[ctx-deduped]"
 const PURGED_INPUT_MARKER = "[ctx-purged-input]"
 const STASH_MARKER = "[ctx-stash]"
-const RELOAD_TOOL_NAME = "read_evicted"
-const OFF_FORBIDDEN_STRINGS = [EVICTION_MARKER, HINT_MARKER, DEDUP_MARKER, PURGED_INPUT_MARKER, STASH_MARKER, RELOAD_TOOL_NAME]
+const RECALL_TOOL_NAME = "recall"
+const OFF_FORBIDDEN_STRINGS = [EVICTION_MARKER, HINT_MARKER, DEDUP_MARKER, PURGED_INPUT_MARKER, STASH_MARKER, RECALL_TOOL_NAME]
 const RELOAD_POINTER_SENTENCE = "re-run the tool to reload its output."
-const RELOAD_POINTER_LEAD = 'reload it with read_evicted (subject "'
+const RECALL_POINTER_LEAD = 'recall it with recall (subject "'
 const CHARS_PER_TOKEN = 4
 const WATERMARK_SLACK_TOKENS = 128
 const EXCERPT_MAX_CHARS = 300
@@ -97,7 +97,7 @@ const sessionSteps = (demoDir) => [
   { type: "tool", name: "bash", args: { command: subjectOf(demoDir, TINY_FILE) } },
   { type: "tool", name: "bash", args: { command: subjectOf(demoDir, TINY_FILE) }, onServe: "truncate-tinydup" },
   { type: "tool", name: "bash", args: { command: subjectOf(demoDir, TOUCH_FILE) } },
-  { type: "tool", name: RELOAD_TOOL_NAME, args: { subject: subjectOf(demoDir, RELOAD_FILE) }, gateTool: RELOAD_TOOL_NAME },
+  { type: "tool", name: RECALL_TOOL_NAME, args: { subject: subjectOf(demoDir, RELOAD_FILE) }, gateTool: RECALL_TOOL_NAME },
   { type: "final", text: "All scripted steps are complete. Reply with a one-sentence summary and stop." },
 ]
 
@@ -353,7 +353,7 @@ const runReport = (args) => {
     offMarkerCounts[needle] = total
   }
   check(
-    "OFF purity: zero plugin markers and zero read_evicted references in every captured OFF request",
+    "OFF purity: zero plugin markers and zero recall references in every captured OFF request",
     OFF_FORBIDDEN_STRINGS.every((needle) => offMarkerCounts[needle] === 0),
     `occurrence counts across all OFF requests: ${JSON.stringify(offMarkerCounts)}`,
   )
@@ -390,8 +390,8 @@ const runReport = (args) => {
   const offTools = toolsOf(off.parsed)
   const onTools = toolsOf(on.parsed)
   check(
-    "ON registration: read_evicted present in ON tool listing, absent from OFF",
-    onTools.includes(RELOAD_TOOL_NAME) && !offTools.includes(RELOAD_TOOL_NAME),
+    "ON registration: recall present in ON tool listing, absent from OFF",
+    onTools.includes(RECALL_TOOL_NAME) && !offTools.includes(RECALL_TOOL_NAME),
     `ON tools=[${onTools.join(",")}] OFF tools=[${offTools.join(",")}]`,
   )
 
@@ -399,7 +399,7 @@ const runReport = (args) => {
   check(
     "ON eviction: tombstones on cold outputs, each carrying the reload-pointer sentences",
     onTombstones.length >= MIN_TOMBSTONES &&
-      onTombstones.every((c) => c.result.includes(RELOAD_POINTER_SENTENCE) && c.result.includes(RELOAD_POINTER_LEAD)),
+      onTombstones.every((c) => c.result.includes(RELOAD_POINTER_SENTENCE) && c.result.includes(RECALL_POINTER_LEAD)),
     `tombstoned calls=${onTombstones.length}: [${onTombstones.map((c) => c.args.slice(0, 60)).join(" | ")}]`,
     `first tombstone verbatim: ${exc(onTombstones[0]?.result, 520)}`,
   )
@@ -516,10 +516,10 @@ const runReport = (args) => {
     `todowrite head: ${exc(onTodo?.result, 200)}`,
   )
 
-  const onReload = onCalls.find((c) => c.name === RELOAD_TOOL_NAME)
+  const onReload = onCalls.find((c) => c.name === RECALL_TOOL_NAME)
   const reloadExpected = bigFileContent(RELOAD_FILE)
   check(
-    "ON reload: read_evicted returns the original evicted bytes within the session",
+    "ON reload: recall returns the original evicted bytes within the session",
     typeof onReload?.result === "string" &&
       (onReload.result === reloadExpected || onReload.result.startsWith(`${reloadExpected}\n${STASH_MARKER}`)),
     `result=${onReload?.result?.length} chars (expected ${reloadExpected.length}) call=${JSON.stringify(onReload?.args)} subject=${JSON.stringify(reloadSubject)}`,
