@@ -85,6 +85,17 @@ const STASH_MESSAGE_LABEL = "at message"
 const STASH_MATCH_SEPARATOR = "; "
 const STASH_MISS_LEAD = "no stashed output for subject"
 const STASH_MISS_HINT = "only outputs evicted during this session are stashed"
+const STASH_OCCUPANCY_LEAD = "stash holds"
+const STASH_OCCUPANCY_EMPTY_TAIL = "nothing from this session"
+const STASH_OCCUPANCY_ENTRY_LABEL = "entry"
+const STASH_OCCUPANCY_ENTRIES_LABEL = "entries"
+const STASH_OCCUPANCY_SUBJECT_LABEL = "subject"
+const STASH_OCCUPANCY_SUBJECTS_LABEL = "subjects"
+const STASH_OCCUPANCY_CATEGORY_SEPARATOR = ", "
+const STASH_OCCUPANCY_OVERFLOW_LABEL = "more"
+const STASH_OCCUPANCY_RANGE_OLDEST_LABEL = "oldest"
+const STASH_OCCUPANCY_RANGE_NEWEST_LABEL = "newest"
+const MAX_OCCUPANCY_CATEGORIES = 5
 const STASH_INVALID_SUBJECT_LEAD = "requires a non-empty subject string"
 const RECEIVED_LABEL = "received"
 const FALLBACK_SESSION_KEY = "no-session"
@@ -1352,6 +1363,34 @@ const stashEvictedOutput = (stash: SessionStash, entry: StashEntry, limit: numbe
 const stashMissTextFor = (subject: string): string =>
   `${STASH_MARKER} ${STASH_MISS_LEAD} "${subject}"; ${STASH_MISS_HINT}.`
 
+const stashOccupancyLineFor = (stash: SessionStash): string => {
+  if (stash.size === 0) return `${STASH_MARKER} ${STASH_OCCUPANCY_LEAD} ${STASH_OCCUPANCY_EMPTY_TAIL}.`
+  const categoryCounts = new Map<string, number>()
+  const subjects = new Set<string>()
+  let oldest = Number.POSITIVE_INFINITY
+  let newest = Number.NEGATIVE_INFINITY
+  for (const entry of stash.values()) {
+    categoryCounts.set(entry.tool, (categoryCounts.get(entry.tool) ?? 0) + 1)
+    subjects.add(entry.subject)
+    oldest = Math.min(oldest, entry.msgIndex)
+    newest = Math.max(newest, entry.msgIndex)
+  }
+  const categories = [...categoryCounts.keys()].sort()
+  const shown = categories.slice(0, MAX_OCCUPANCY_CATEGORIES)
+  const overflowCount = categories.length - shown.length
+  const categoryList = shown
+    .map((tool) => `${tool} ${categoryCounts.get(tool)}`)
+    .concat(overflowCount > 0 ? `+${overflowCount} ${STASH_OCCUPANCY_OVERFLOW_LABEL}` : [])
+    .join(STASH_OCCUPANCY_CATEGORY_SEPARATOR)
+  const range =
+    stash.size === 1
+      ? `${STASH_MESSAGE_LABEL} ${oldest}`
+      : `${STASH_OCCUPANCY_RANGE_OLDEST_LABEL} ${STASH_MESSAGE_LABEL} ${oldest}, ${STASH_OCCUPANCY_RANGE_NEWEST_LABEL} ${STASH_MESSAGE_LABEL} ${newest}`
+  const entryNoun = stash.size === 1 ? STASH_OCCUPANCY_ENTRY_LABEL : STASH_OCCUPANCY_ENTRIES_LABEL
+  const subjectNoun = subjects.size === 1 ? STASH_OCCUPANCY_SUBJECT_LABEL : STASH_OCCUPANCY_SUBJECTS_LABEL
+  return `${STASH_MARKER} ${STASH_OCCUPANCY_LEAD} ${stash.size} ${entryNoun} across ${subjects.size} ${subjectNoun}: ${categoryList}; ${range}.`
+}
+
 const invalidSubjectTextFor = (received: string): string =>
   `${STASH_MARKER} ${RELOAD_TOOL_NAME} ${STASH_INVALID_SUBJECT_LEAD} (${RECEIVED_LABEL} ${received}).`
 
@@ -1410,7 +1449,7 @@ const executeReadEvicted = async (
     if (inFlight !== undefined) await inFlight.promise
     const existing = metrics.get(sessionKey)
     if (existing !== undefined) existing.stashMisses += 1
-    return stashMissTextFor(subject)
+    return `${stashMissTextFor(subject)}\n${stashOccupancyLineFor(stash ?? new Map())}`
   }
   // Refreshed before the await so the hit counts even if stash churn during
   // the hydration read evicts this session's stash entry.

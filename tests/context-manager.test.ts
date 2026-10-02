@@ -128,6 +128,35 @@ const STASH_MESSAGE_LABEL = "at message"
 const STASH_MATCH_SEPARATOR = "; "
 const STASH_MISS_LEAD = "no stashed output for subject"
 const STASH_MISS_HINT = "only outputs evicted during this session are stashed"
+const STASH_OCCUPANCY_LEAD = "stash holds"
+const STASH_OCCUPANCY_EMPTY_TAIL = "nothing from this session"
+const STASH_OCCUPANCY_ENTRY_LABEL = "entry"
+const STASH_OCCUPANCY_ENTRIES_LABEL = "entries"
+const STASH_OCCUPANCY_SUBJECT_LABEL = "subject"
+const STASH_OCCUPANCY_SUBJECTS_LABEL = "subjects"
+const STASH_OCCUPANCY_CATEGORY_SEPARATOR = ", "
+const STASH_OCCUPANCY_OVERFLOW_LABEL = "more"
+const MAX_OCCUPANCY_CATEGORIES = 5
+const STASH_EMPTY_OCCUPANCY = `${STASH_MARKER} ${STASH_OCCUPANCY_LEAD} ${STASH_OCCUPANCY_EMPTY_TAIL}.`
+const OCCUPANCY_MISS_SUBJECT = "/data/occupancy-miss.txt"
+const OCCUPANCY_PATH_A = "/data/occupancy-a.txt"
+const OCCUPANCY_PATH_B = "/data/occupancy-b.txt"
+const OCCUPANCY_COMMAND_A = "echo occupancy-a"
+const OCCUPANCY_COMMAND_B = "echo occupancy-b"
+const OCCUPANCY_PATTERN_A = "occupancy/*.go"
+const OCCUPANCY_PATTERN_B = "OccupancyProbe"
+const OCCUPANCY_SLIM_STASH_LIMIT = 1
+const OCCUPANCY_SLIM_PATH = "/data/occupancy-slim.txt"
+const OCCUPANCY_ZERO_STASH_LIMIT = 0
+const OCCUPANCY_DROPPED_PATH = "/data/occupancy-dropped.txt"
+const OCCUPANCY_CAPPED_TOOL_COUNT = 3
+const OCCUPANCY_CAPPED_PATHS = ["/data/capped-a.txt", "/data/capped-b.txt", "/data/capped-c.txt"]
+const OCCUPANCY_CAPPED_COMMAND_PREFIX = "echo capped"
+const OCCUPANCY_CAPPED_GLOB_PREFIX = "/data/capped-glob"
+const OCCUPANCY_CAPPED_GREP_PREFIX = "CappedProbe"
+const OCCUPANCY_CAPPED_SIXTH_TOOL = "webfetch"
+const OCCUPANCY_CAPPED_SIXTH_PREFIX = "/data/capped-sixth"
+const FENCE_MIXED_TAG = "mixed"
 const STASH_INVALID_SUBJECT_LEAD = "requires a non-empty subject string"
 const RECEIVED_LABEL = "received"
 const UNKNOWN_TARGET_LABEL = "unknown target"
@@ -530,8 +559,36 @@ const outputDigestFor = (tool: string, subject: string, output: string): string 
 const digestSentenceFor = (tool: string, subject: string, output: string): string =>
   `${DIGEST_POINTER_LEAD}${outputDigestFor(tool, subject, output)}${DIGEST_SENTENCE_TAIL}`
 
-const stashMissFor = (subject: string): string =>
-  `${STASH_MARKER} ${STASH_MISS_LEAD} "${subject}"; ${STASH_MISS_HINT}.`
+const stashMissFor = (subject: string, occupancy: string): string =>
+  `${STASH_MARKER} ${STASH_MISS_LEAD} "${subject}"; ${STASH_MISS_HINT}.\n${occupancy}`
+
+type OccupancyEntryShape = { tool: string; subject: string; msgIndex: number }
+
+const stashOccupancyLineFor = (entries: OccupancyEntryShape[]): string => {
+  if (entries.length === 0) return STASH_EMPTY_OCCUPANCY
+  const categoryCounts = new Map<string, number>()
+  let oldest = entries[0].msgIndex
+  let newest = entries[0].msgIndex
+  for (const entry of entries) {
+    categoryCounts.set(entry.tool, (categoryCounts.get(entry.tool) ?? 0) + 1)
+    oldest = Math.min(oldest, entry.msgIndex)
+    newest = Math.max(newest, entry.msgIndex)
+  }
+  const categories = [...categoryCounts.keys()].sort()
+  const shown = categories.slice(0, MAX_OCCUPANCY_CATEGORIES)
+  const overflowCount = categories.length - shown.length
+  const categoryList =
+    shown.map((tool) => `${tool} ${categoryCounts.get(tool)}`).join(STASH_OCCUPANCY_CATEGORY_SEPARATOR) +
+    (overflowCount > 0 ? `${STASH_OCCUPANCY_CATEGORY_SEPARATOR}+${overflowCount} ${STASH_OCCUPANCY_OVERFLOW_LABEL}` : "")
+  const bounds =
+    entries.length === 1
+      ? `${STASH_MESSAGE_LABEL} ${oldest}`
+      : `oldest ${STASH_MESSAGE_LABEL} ${oldest}, newest ${STASH_MESSAGE_LABEL} ${newest}`
+  const subjectCount = new Set(entries.map((entry) => entry.subject)).size
+  return `${STASH_MARKER} ${STASH_OCCUPANCY_LEAD} ${entries.length} ${
+    entries.length === 1 ? STASH_OCCUPANCY_ENTRY_LABEL : STASH_OCCUPANCY_ENTRIES_LABEL
+  } across ${subjectCount} ${subjectCount === 1 ? STASH_OCCUPANCY_SUBJECT_LABEL : STASH_OCCUPANCY_SUBJECTS_LABEL}: ${categoryList}; ${bounds}.`
+}
 
 const invalidSubjectMissFor = (received: string): string =>
   `${STASH_MARKER} ${RELOAD_TOOL_NAME} ${STASH_INVALID_SUBJECT_LEAD} (${RECEIVED_LABEL} ${received}).`
@@ -1866,7 +1923,133 @@ test("read_evicted lists every older match oldest first when three evictions sha
 test("read_evicted returns an error-style miss naming the subject when nothing was stashed for it", async () => {
   const hooks = await loadPluginHooks()
 
-  assert.equal(await readEvicted(hooks, "/data/never-evicted.txt", SESSION_ID), stashMissFor("/data/never-evicted.txt"))
+  assert.equal(await readEvicted(hooks, "/data/never-evicted.txt", SESSION_ID), stashMissFor("/data/never-evicted.txt", STASH_EMPTY_OCCUPANCY))
+})
+
+test("read_evicted appends a populated occupancy line with alphabetical categories and the message range on a miss against a multi tool stash", async () => {
+  const hooks = await loadPluginHooksWith({ protectedTools: [] })
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const bundle = buildBundle([
+    [pathToolPart(OCCUPANCY_PATH_A, MIN_EVICTABLE_BYTES)],
+    [bashToolPart(OCCUPANCY_COMMAND_A, MIN_EVICTABLE_BYTES)],
+    [completedToolPart(GLOB_TOOL, { [PATH_INPUT_KEY]: OCCUPANCY_PATTERN_A }, outputOfBytes(MIN_EVICTABLE_BYTES))],
+    [bashToolPart(OCCUPANCY_COMMAND_B, MIN_EVICTABLE_BYTES)],
+    [completedToolPart(GREP_TOOL, { [PATTERN_INPUT_KEY]: OCCUPANCY_PATTERN_B }, outputOfBytes(MIN_EVICTABLE_BYTES))],
+    [pathToolPart(OCCUPANCY_PATH_B, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(
+    await readEvicted(hooks, OCCUPANCY_MISS_SUBJECT, SESSION_ID),
+    stashMissFor(
+      OCCUPANCY_MISS_SUBJECT,
+      "[ctx-stash] stash holds 6 entries across 6 subjects: bash 2, glob 1, grep 1, read 2; oldest at message 0, newest at message 5.",
+    ),
+  )
+})
+
+test("read_evicted reports the single message bound on a miss whose stashed entries all sit at one message index", async () => {
+  const hooks = await loadPluginHooksWith({ stashLimit: OCCUPANCY_SLIM_STASH_LIMIT })
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const bundle = buildBundle([
+    [pathToolPart(OCCUPANCY_SLIM_PATH, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(
+    await readEvicted(hooks, OCCUPANCY_MISS_SUBJECT, SESSION_ID),
+    stashMissFor(
+      OCCUPANCY_MISS_SUBJECT,
+      "[ctx-stash] stash holds 1 entry across 1 subject: read 1; at message 0.",
+    ),
+  )
+})
+
+test("read_evicted states the stash holds nothing when the session stash exists but is empty", async () => {
+  const hooks = await loadPluginHooksWith({ stashLimit: OCCUPANCY_ZERO_STASH_LIMIT })
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const bundle = buildBundle([
+    [pathToolPart(OCCUPANCY_DROPPED_PATH, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+  assert.deepEqual((await readStats(hooks, SESSION_ID)).stash, {
+    entries: OCCUPANCY_ZERO_STASH_LIMIT,
+    capacity: OCCUPANCY_ZERO_STASH_LIMIT,
+  })
+
+  assert.equal(
+    await readEvicted(hooks, OCCUPANCY_MISS_SUBJECT, SESSION_ID),
+    stashMissFor(OCCUPANCY_MISS_SUBJECT, "[ctx-stash] stash holds nothing from this session."),
+  )
+})
+
+test("read_evicted caps the occupancy category list at five categories with an overflow clause", async () => {
+  const hooks = await loadPluginHooksWith({ protectedTools: [], userFenceEviction: { enabled: true } })
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const cappedBashSubjects = Array.from({ length: OCCUPANCY_CAPPED_TOOL_COUNT }, (_, index) => OCCUPANCY_CAPPED_PATHS[index])
+  const bundle = buildBundle([
+    ...cappedBashSubjects.map((path) => [pathToolPart(path, MIN_EVICTABLE_BYTES)]),
+    ...Array.from({ length: OCCUPANCY_CAPPED_TOOL_COUNT }, (_, index) => [
+      bashToolPart(`${OCCUPANCY_CAPPED_COMMAND_PREFIX}${index}`, MIN_EVICTABLE_BYTES),
+    ]),
+    ...Array.from({ length: OCCUPANCY_CAPPED_TOOL_COUNT }, (_, index) => [
+      completedToolPart(GLOB_TOOL, { [PATH_INPUT_KEY]: `${OCCUPANCY_CAPPED_GLOB_PREFIX}${index}.ts` }, outputOfBytes(MIN_EVICTABLE_BYTES)),
+    ]),
+    ...Array.from({ length: OCCUPANCY_CAPPED_TOOL_COUNT }, (_, index) => [
+      completedToolPart(GREP_TOOL, { [PATTERN_INPUT_KEY]: `${OCCUPANCY_CAPPED_GREP_PREFIX}${index}` }, outputOfBytes(MIN_EVICTABLE_BYTES)),
+    ]),
+    ...Array.from({ length: OCCUPANCY_CAPPED_TOOL_COUNT }, (_, index) => [
+      completedToolPart(OCCUPANCY_CAPPED_SIXTH_TOOL, { [SECONDARY_PATH_INPUT_KEY]: `${OCCUPANCY_CAPPED_SIXTH_PREFIX}${index}.txt` }, outputOfBytes(MIN_EVICTABLE_BYTES)),
+    ]),
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  const cappedBlocks = [
+    fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, `${FENCE_MIXED_TAG}-a`)),
+    fenceBlockText(FENCE_LANGUAGE_JS, fenceContentLines(FENCE_OVER_LINES + 1, `${FENCE_MIXED_TAG}-b`)),
+  ]
+  await runTransform(
+    hooks,
+    userFenceBundle(`${FENCE_PROSE_BEFORE}\n${cappedBlocks[0]}\n${FENCE_PROSE_MIDDLE}\n${cappedBlocks[1]}\n${FENCE_PROSE_AFTER}`),
+  )
+
+  assert.equal(
+    await readEvicted(hooks, OCCUPANCY_MISS_SUBJECT, SESSION_ID),
+    stashMissFor(
+      OCCUPANCY_MISS_SUBJECT,
+      "[ctx-stash] stash holds 17 entries across 17 subjects: bash 3, fence 2, glob 3, grep 3, read 3, +1 more; oldest at message 0, newest at message 14.",
+    ),
+  )
+})
+
+test("read_evicted categorizes fence stashed entries under the fence label alongside tool entries", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const block = fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_MIXED_TAG))
+  const bundle = buildBundle([
+    [pathToolPart(OCCUPANCY_PATH_A, MIN_EVICTABLE_BYTES)],
+    [pathToolPart(OCCUPANCY_PATH_B, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+  await runTransform(hooks, userFenceBundle(block))
+
+  assert.equal(
+    await readEvicted(hooks, OCCUPANCY_MISS_SUBJECT, SESSION_ID),
+    stashMissFor(
+      OCCUPANCY_MISS_SUBJECT,
+      "[ctx-stash] stash holds 3 entries across 3 subjects: fence 1, read 2; oldest at message 0, newest at message 1.",
+    ),
+  )
 })
 
 test("read_evicted evicts the oldest stashed entry when a session stash exceeds the fifty entry bound", async () => {
@@ -1880,7 +2063,13 @@ test("read_evicted evicts the oldest stashed entry when a session stash exceeds 
   ])
   await runTransform(hooks, bundle)
 
-  assert.equal(await readEvicted(hooks, stashSubjects[0], SESSION_ID), stashMissFor(stashSubjects[0]))
+  assert.equal(
+    await readEvicted(hooks, stashSubjects[0], SESSION_ID),
+    stashMissFor(
+      stashSubjects[0],
+      stashOccupancyLineFor(stashSubjects.slice(1).map((subject, index) => ({ tool: READ_TOOL, subject, msgIndex: index + 1 }))),
+    ),
+  )
   assert.equal(await readEvicted(hooks, stashSubjects[1], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
   assert.equal(await readEvicted(hooks, stashSubjects[STASH_LIMIT], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
 })
@@ -1905,7 +2094,7 @@ test("read_evicted keeps stashes isolated between sessions", async () => {
   assert.equal(await readEvicted(hooks, STASH_ISOLATION_SUBJECT, SESSION_ID_B), outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
   assert.equal(
     await readEvicted(hooks, STASH_ISOLATION_SUBJECT, STASH_ISOLATION_SESSION_C),
-    stashMissFor(STASH_ISOLATION_SUBJECT),
+    stashMissFor(STASH_ISOLATION_SUBJECT, STASH_EMPTY_OCCUPANCY),
   )
 })
 
@@ -1917,7 +2106,7 @@ test("transform leaves no stash behind when the estimate sits under the watermar
   await runTransform(hooks, bundle)
 
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
-  assert.equal(await readEvicted(hooks, "/data/kept.txt", SESSION_ID), stashMissFor("/data/kept.txt"))
+  assert.equal(await readEvicted(hooks, "/data/kept.txt", SESSION_ID), stashMissFor("/data/kept.txt", STASH_EMPTY_OCCUPANCY))
 })
 
 test("read_evicted returns an error-style miss when the subject is not a non-empty string", async () => {
@@ -1991,7 +2180,7 @@ test("transform never stashes a dedup tombstoned output so read_evicted misses i
 
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, dedupTombstoneFor(READ_TOOL, 1))
   assert.equal(toolPartAt(bundle.messages[1], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
-  assert.equal(await readEvicted(hooks, DEDUP_PATH, SESSION_ID), stashMissFor(DEDUP_PATH))
+  assert.equal(await readEvicted(hooks, DEDUP_PATH, SESSION_ID), stashMissFor(DEDUP_PATH, STASH_EMPTY_OCCUPANCY))
 })
 
 test("transform lists a deduped subject once from the retained copy and never from the tombstone", async () => {
@@ -2910,7 +3099,13 @@ test("transform never stashes a protected output so read_evicted misses it after
 
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(PROTECTED_OUTPUT_BYTES))
   assert.ok(toolPartAt(bundle.messages[1], 0).state.output.startsWith(TOMBSTONE_MARKER))
-  assert.equal(await readEvicted(hooks, STASH_PROTECTED_PATTERN, SESSION_ID), stashMissFor(STASH_PROTECTED_PATTERN))
+  assert.equal(
+    await readEvicted(hooks, STASH_PROTECTED_PATTERN, SESSION_ID),
+    stashMissFor(
+      STASH_PROTECTED_PATTERN,
+      stashOccupancyLineFor([{ tool: READ_TOOL, subject: STASH_PROTECTED_VICTIM_PATH, msgIndex: 1 }]),
+    ),
+  )
   assert.equal(await readEvicted(hooks, STASH_PROTECTED_VICTIM_PATH, SESSION_ID), outputOfBytes(PROTECTED_OUTPUT_BYTES))
 })
 
@@ -3128,7 +3323,7 @@ test("read_evicted drops the least recently active session stash when a ninth se
   )
   assert.equal(
     await readEvicted(hooks, stashSessionSubject(1), stashSessionId(1)),
-    stashMissFor(stashSessionSubject(1)),
+    stashMissFor(stashSessionSubject(1), STASH_EMPTY_OCCUPANCY),
   )
   assert.equal(
     await readEvicted(hooks, stashSessionSubject(STASH_SESSION_BOUND - 1), stashSessionId(STASH_SESSION_BOUND - 1)),
@@ -3153,7 +3348,7 @@ test("read_evicted protects a refreshed hot session stash when a ninth session s
   )
   assert.equal(
     await readEvicted(hooks, stashSessionSubject(1), stashSessionId(1)),
-    stashMissFor(stashSessionSubject(1)),
+    stashMissFor(stashSessionSubject(1), STASH_EMPTY_OCCUPANCY),
   )
   assert.equal(
     await readEvicted(hooks, stashSessionSubject(STASH_SESSION_OVERFLOW_COUNT - 1), stashSessionId(STASH_SESSION_OVERFLOW_COUNT - 1)),
@@ -3178,7 +3373,7 @@ test("read_evicted refreshes a reloading session stash so it survives when a nin
   )
   assert.equal(
     await readEvicted(hooks, stashSessionSubject(1), stashSessionId(1)),
-    stashMissFor(stashSessionSubject(1)),
+    stashMissFor(stashSessionSubject(1), STASH_EMPTY_OCCUPANCY),
   )
   assert.equal(
     await readEvicted(hooks, stashSessionSubject(STASH_SESSION_OVERFLOW_COUNT - 1), stashSessionId(STASH_SESSION_OVERFLOW_COUNT - 1)),
@@ -3192,14 +3387,17 @@ test("read_evicted does not refresh a session stash on a miss probe so the probi
 
   assert.equal(
     await readEvicted(hooks, STASH_MISS_PROBE_SUBJECT, stashSessionId(0)),
-    stashMissFor(STASH_MISS_PROBE_SUBJECT),
+    stashMissFor(
+      STASH_MISS_PROBE_SUBJECT,
+      stashOccupancyLineFor([{ tool: READ_TOOL, subject: stashSessionSubject(0), msgIndex: 0 }]),
+    ),
   )
 
   await evictStashSession(hooks, STASH_SESSION_OVERFLOW_COUNT - 1)
 
   assert.equal(
     await readEvicted(hooks, stashSessionSubject(0), stashSessionId(0)),
-    stashMissFor(stashSessionSubject(0)),
+    stashMissFor(stashSessionSubject(0), STASH_EMPTY_OCCUPANCY),
   )
   assert.equal(
     await readEvicted(hooks, stashSessionSubject(1), stashSessionId(1)),
@@ -3637,13 +3835,19 @@ test("context_stats counts stash hits and misses from read_evicted and leaves in
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
-  assert.equal(await readEvicted(hooks, STATS_MISS_SUBJECT, SESSION_ID), stashMissFor(STATS_MISS_SUBJECT))
+  assert.equal(await readEvicted(hooks, STATS_MISS_SUBJECT, SESSION_ID), stashMissFor(STATS_MISS_SUBJECT, STASH_EMPTY_OCCUPANCY))
   assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), STATS_ZEROED_COUNTERS)
 
   const bundle = buildStandardBundle(SESSION_ID, STATS_HIT_SUBJECT)
   await runTransform(hooks, bundle)
 
-  assert.equal(await readEvicted(hooks, STATS_MISS_SUBJECT, SESSION_ID), stashMissFor(STATS_MISS_SUBJECT))
+  assert.equal(
+    await readEvicted(hooks, STATS_MISS_SUBJECT, SESSION_ID),
+    stashMissFor(
+      STATS_MISS_SUBJECT,
+      stashOccupancyLineFor([{ tool: READ_TOOL, subject: STATS_HIT_SUBJECT, msgIndex: 0 }]),
+    ),
+  )
   const afterMiss = await readStats(hooks, SESSION_ID)
   assert.deepEqual(countersOf(afterMiss), {
     ...STATS_ZEROED_COUNTERS,
@@ -3850,7 +4054,24 @@ test("read_evicted drops the earliest runs' entries first when later runs push a
   assert.equal(countersOf(stats).evictions, STASH_CROSS_RUN_FIRST_COUNT + STASH_CROSS_RUN_SECOND_COUNT)
   assert.equal(countersOf(stats).stashDropped, STASH_CROSS_RUN_DROP_COUNT)
   assert.deepEqual(stats.stash, { entries: STASH_LIMIT, capacity: STASH_LIMIT })
-  assert.equal(await readEvicted(hooks, firstRunSubjects[0], SESSION_ID), stashMissFor(firstRunSubjects[0]))
+  assert.equal(
+    await readEvicted(hooks, firstRunSubjects[0], SESSION_ID),
+    stashMissFor(
+      firstRunSubjects[0],
+      stashOccupancyLineFor([
+        ...firstRunSubjects.slice(STASH_CROSS_RUN_DROP_COUNT).map((subject, index) => ({
+          tool: READ_TOOL,
+          subject,
+          msgIndex: index + STASH_CROSS_RUN_DROP_COUNT,
+        })),
+        ...secondRunSubjects.map((subject) => ({
+          tool: READ_TOOL,
+          subject,
+          msgIndex: STASH_CROSS_RUN_FIRST_COUNT + RECENT_WINDOW_FILLER_MESSAGES,
+        })),
+      ]),
+    ),
+  )
   assert.equal(
     await readEvicted(hooks, firstRunSubjects[STASH_CROSS_RUN_DROP_COUNT], SESSION_ID),
     outputOfBytes(MIN_EVICTABLE_BYTES),
@@ -4105,7 +4326,7 @@ test("read_evicted leaves live session metrics untouched when a never-transforme
 
   assert.equal(
     await readEvicted(hooks, METRICS_PROBE_MISS_SUBJECT, METRICS_PROBE_SESSION_ID),
-    stashMissFor(METRICS_PROBE_MISS_SUBJECT),
+    stashMissFor(METRICS_PROBE_MISS_SUBJECT, STASH_EMPTY_OCCUPANCY),
   )
 
   assert.equal(countersOf(await readStats(hooks, metricsSessionId(0))).evictions, 1)
@@ -4143,7 +4364,7 @@ test("context_stats does not refresh a session stash so a stats-only probe leave
 
   assert.equal(
     await readEvicted(hooks, stashSessionSubject(0), stashSessionId(0)),
-    stashMissFor(stashSessionSubject(0)),
+    stashMissFor(stashSessionSubject(0), STASH_EMPTY_OCCUPANCY),
   )
   assert.equal(
     await readEvicted(hooks, stashSessionSubject(1), stashSessionId(1)),
@@ -5556,7 +5777,13 @@ test("transform never opens a span from a fence opener whose info string contain
     textAt(bundle, 0),
     `${FENCE_PROSE_BEFORE}\n${unclosedBacktickBlock}\n${FENCE_PROSE_MIDDLE}\n${fenceTombstoneFor(FENCE_LANGUAGE_TS, FENCE_OVER_LINES, fenceFirstLineOf(FENCE_LINE_TAG_B))}\n${FENCE_PROSE_AFTER}`,
   )
-  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG)))
+  assert.equal(
+    await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID),
+    stashMissFor(
+      fenceFirstLineOf(FENCE_LINE_TAG),
+      stashOccupancyLineFor([{ tool: FENCE_STASH_TOOL_LABEL, subject: fenceFirstLineOf(FENCE_LINE_TAG_B), msgIndex: 0 }]),
+    ),
+  )
 })
 
 test("transform leaves every user fenced block byte-identical while userFenceEviction stays disabled by default", async () => {
@@ -5567,7 +5794,7 @@ test("transform leaves every user fenced block byte-identical while userFenceEvi
   await runTransform(hooks, bundle)
 
   assert.equal(textAt(bundle, 0), text)
-  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG)))
+  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG), STASH_EMPTY_OCCUPANCY))
 })
 
 test("transform evicts an over threshold fenced block from an old user message into a tombstone naming language line count and first non empty line", async () => {
@@ -5633,7 +5860,7 @@ test("transform never evicts an unterminated fence however large it grows", asyn
   await runTransform(hooks, bundle)
 
   assert.equal(textAt(bundle, 0), text)
-  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG)))
+  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG), STASH_EMPTY_OCCUPANCY))
 })
 
 test("transform keeps an all blank fenced block untouched no matter how many blank lines it holds", async () => {
@@ -5644,7 +5871,7 @@ test("transform keeps an all blank fenced block untouched no matter how many bla
   await runTransform(hooks, bundle)
 
   assert.equal(textAt(bundle, 0), text)
-  assert.equal(await readEvicted(hooks, UNKNOWN_TARGET_LABEL, SESSION_ID), stashMissFor(UNKNOWN_TARGET_LABEL))
+  assert.equal(await readEvicted(hooks, UNKNOWN_TARGET_LABEL, SESSION_ID), stashMissFor(UNKNOWN_TARGET_LABEL, STASH_EMPTY_OCCUPANCY))
 })
 
 test("transform truncates a long fence first line in the tombstone and reload pointer to the same capped subject", async () => {
@@ -5676,7 +5903,19 @@ test("read_evicted evicts the oldest stashed entry when fence evictions push a s
   assert.equal(countersOf(stats).fenceEvicted, fenceCount)
   assert.equal(countersOf(stats).stashDropped, 1)
   assert.deepEqual(stats.stash, { entries: STASH_LIMIT, capacity: STASH_LIMIT })
-  assert.equal(await readEvicted(hooks, fenceFirstLineOf("block0"), SESSION_ID), stashMissFor(fenceFirstLineOf("block0")))
+  assert.equal(
+    await readEvicted(hooks, fenceFirstLineOf("block0"), SESSION_ID),
+    stashMissFor(
+      fenceFirstLineOf("block0"),
+      stashOccupancyLineFor(
+        Array.from({ length: STASH_LIMIT }, (_, index) => ({
+          tool: FENCE_STASH_TOOL_LABEL,
+          subject: fenceFirstLineOf(`block${index + 1}`),
+          msgIndex: 0,
+        })),
+      ),
+    ),
+  )
   assert.equal(await readEvicted(hooks, fenceFirstLineOf("block1"), SESSION_ID), `${blocks[1]}\n`)
 })
 
@@ -6039,7 +6278,7 @@ test("transform never opens a fence span on a four space indented fence line", a
   await runTransform(hooks, bundle)
 
   assert.equal(textAt(bundle, 0), text)
-  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG)))
+  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG), STASH_EMPTY_OCCUPANCY))
 })
 
 test("transform never closes a fence span on a four space indented fence line", async () => {
@@ -6051,7 +6290,7 @@ test("transform never closes a fence span on a four space indented fence line", 
   await runTransform(hooks, bundle)
 
   assert.equal(textAt(bundle, 0), text)
-  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG)))
+  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG), STASH_EMPTY_OCCUPANCY))
 })
 
 test("transform evicts a four backtick fence holding three backtick lines as content", async () => {
@@ -6098,7 +6337,7 @@ test("transform keeps the user message sitting exactly at hotFromIndex untouched
   await runTransform(hooks, bundle)
 
   assert.equal(textAt(bundle, 1), text)
-  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG)))
+  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG), STASH_EMPTY_OCCUPANCY))
 })
 
 const MANUAL_MODE_INVALID_VALUE = "yes"
@@ -6610,7 +6849,7 @@ test("a re-touched aged read survives aged eviction while its message index is a
 
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
   assert.equal(toolPartAt(bundle.messages[6], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
-  assert.equal(await readEvicted(hooks, AGED_RETOUCHED_PATH, SESSION_ID), stashMissFor(AGED_RETOUCHED_PATH))
+  assert.equal(await readEvicted(hooks, AGED_RETOUCHED_PATH, SESSION_ID), stashMissFor(AGED_RETOUCHED_PATH, STASH_EMPTY_OCCUPANCY))
 })
 
 test("a read inside the recent window survives aged eviction despite passing the age threshold", async () => {
@@ -6634,7 +6873,7 @@ test("an aged read below minEvictableBytes survives aged eviction", async () => 
   await runTransform(hooks, bundle)
 
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES - 1))
-  assert.equal(await readEvicted(hooks, AGED_READ_PATH, SESSION_ID), stashMissFor(AGED_READ_PATH))
+  assert.equal(await readEvicted(hooks, AGED_READ_PATH, SESSION_ID), stashMissFor(AGED_READ_PATH, STASH_EMPTY_OCCUPANCY))
 })
 
 test("an aged read matching a protected pattern survives aged eviction", async () => {
@@ -7223,7 +7462,13 @@ test("read_evicted applies a custom stashLimit dropping the oldest stashed entry
     entries: STASH_LIMIT_OVERRIDE,
     capacity: STASH_LIMIT_OVERRIDE,
   })
-  assert.equal(await readEvicted(hooks, subjects[0], SESSION_ID), stashMissFor(subjects[0]))
+  assert.equal(
+    await readEvicted(hooks, subjects[0], SESSION_ID),
+    stashMissFor(
+      subjects[0],
+      stashOccupancyLineFor(subjects.slice(1).map((subject, index) => ({ tool: READ_TOOL, subject, msgIndex: index + 1 }))),
+    ),
+  )
   assert.equal(await readEvicted(hooks, subjects[1], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
   assert.equal(await readEvicted(hooks, subjects[2], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
 })
@@ -7245,7 +7490,7 @@ test("read_evicted drops the least recently active session stash when the stashS
 
   assert.equal(
     await readEvicted(hooks, stashSessionSubject(0), stashSessionId(0)),
-    stashMissFor(stashSessionSubject(0)),
+    stashMissFor(stashSessionSubject(0), STASH_EMPTY_OCCUPANCY),
   )
   assert.equal(
     await readEvicted(hooks, stashSessionSubject(1), stashSessionId(1)),
@@ -7263,7 +7508,7 @@ test("read_evicted keeps early session stashes when an invalid stashSessions fal
 
   assert.equal(
     await readEvicted(hooks, stashSessionSubject(0), stashSessionId(0)),
-    stashMissFor(stashSessionSubject(0)),
+    stashMissFor(stashSessionSubject(0), STASH_EMPTY_OCCUPANCY),
   )
   assert.equal(
     await readEvicted(hooks, stashSessionSubject(1), stashSessionId(1)),
@@ -7588,7 +7833,13 @@ const SECOND_SITTING_COUNTER_DELTAS = {
 const runFirstSitting = async (hooks: HookMap): Promise<void> => {
   await runEvictionTransform(hooks, SESSION_ID, REHYDRA_EVICTION_SUBJECT_A)
   assert.equal(await readEvicted(hooks, REHYDRA_EVICTION_SUBJECT_A, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
-  assert.equal(await readEvicted(hooks, REHYDRA_MISS_SUBJECT, SESSION_ID), stashMissFor(REHYDRA_MISS_SUBJECT))
+  assert.equal(
+    await readEvicted(hooks, REHYDRA_MISS_SUBJECT, SESSION_ID),
+    stashMissFor(
+      REHYDRA_MISS_SUBJECT,
+      stashOccupancyLineFor([{ tool: READ_TOOL, subject: REHYDRA_EVICTION_SUBJECT_A, msgIndex: 0 }]),
+    ),
+  )
   await runQuietProbeTransform(hooks, SESSION_ID)
   await runDedupTransform(hooks, SESSION_ID)
   await runReasoningTransform(hooks, SESSION_ID)
@@ -7601,7 +7852,16 @@ const runSecondSitting = async (hooks: HookMap): Promise<void> => {
   await runDedupTransform(hooks, SESSION_ID)
   await runReasoningTransform(hooks, SESSION_ID)
   await runFenceTransform(hooks)
-  assert.equal(await readEvicted(hooks, REHYDRA_MISS_SUBJECT, SESSION_ID), stashMissFor(REHYDRA_MISS_SUBJECT))
+  assert.equal(
+    await readEvicted(hooks, REHYDRA_MISS_SUBJECT, SESSION_ID),
+    stashMissFor(
+      REHYDRA_MISS_SUBJECT,
+      stashOccupancyLineFor([
+        { tool: READ_TOOL, subject: REHYDRA_EVICTION_SUBJECT_B, msgIndex: 0 },
+        { tool: FENCE_STASH_TOOL_LABEL, subject: fenceFirstLineOf(REHYDRA_FENCE_TAG), msgIndex: 0 },
+      ]),
+    ),
+  )
   await runQuietProbeTransform(hooks, SESSION_ID)
 }
 
@@ -7706,7 +7966,13 @@ test("a quiet post restart run writes no metrics line because seeded stash reads
     const firstSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
     await runEvictionTransform(firstSittingHooks, SESSION_ID, REHYDRA_EVICTION_SUBJECT_A)
     assert.equal(await readEvicted(firstSittingHooks, REHYDRA_EVICTION_SUBJECT_A, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
-    assert.equal(await readEvicted(firstSittingHooks, REHYDRA_MISS_SUBJECT, SESSION_ID), stashMissFor(REHYDRA_MISS_SUBJECT))
+    assert.equal(
+      await readEvicted(firstSittingHooks, REHYDRA_MISS_SUBJECT, SESSION_ID),
+      stashMissFor(
+        REHYDRA_MISS_SUBJECT,
+        stashOccupancyLineFor([{ tool: READ_TOOL, subject: REHYDRA_EVICTION_SUBJECT_A, msgIndex: 0 }]),
+      ),
+    )
     await runQuietProbeTransform(firstSittingHooks, SESSION_ID)
     const lineCountAfterFirstSitting = metricsLinesForSession(metricsPath, SESSION_ID).length
 
@@ -8250,13 +8516,22 @@ test("a stash miss issued while the session's first hydration is in flight count
     const metricsPath = metricsLogPathIn(metricsDir)
     const firstSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
     await runEvictionTransform(firstSittingHooks, SESSION_ID, REHYDRA_EVICTION_SUBJECT_A)
-    assert.equal(await readEvicted(firstSittingHooks, REHYDRA_MISS_SUBJECT, SESSION_ID), stashMissFor(REHYDRA_MISS_SUBJECT))
+    assert.equal(
+      await readEvicted(firstSittingHooks, REHYDRA_MISS_SUBJECT, SESSION_ID),
+      stashMissFor(
+        REHYDRA_MISS_SUBJECT,
+        stashOccupancyLineFor([{ tool: READ_TOOL, subject: REHYDRA_EVICTION_SUBJECT_A, msgIndex: 0 }]),
+      ),
+    )
     await runQuietProbeTransform(firstSittingHooks, SESSION_ID)
 
     const secondSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
     await setContextLimit(secondSittingHooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
     const resumeTransform = runTransform(secondSittingHooks, buildStandardBundle(SESSION_ID, REHYDRA_EVICTION_SUBJECT_B))
-    assert.equal(await readEvicted(secondSittingHooks, REHYDRA_MISS_SUBJECT, SESSION_ID), stashMissFor(REHYDRA_MISS_SUBJECT))
+    assert.equal(
+      await readEvicted(secondSittingHooks, REHYDRA_MISS_SUBJECT, SESSION_ID),
+      stashMissFor(REHYDRA_MISS_SUBJECT, STASH_EMPTY_OCCUPANCY),
+    )
     await resumeTransform
 
     assert.equal(countersOf(await readStats(secondSittingHooks, SESSION_ID)).stashMisses, 2)
