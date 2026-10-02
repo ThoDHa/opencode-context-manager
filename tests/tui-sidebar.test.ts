@@ -28,6 +28,8 @@ const { createTuiApiMock } = await import("./tui/api-mock.ts")
 const { nodeText, renderTree, settleUntil } = await import("./tui/opentui-stub.ts")
 const { assertTempHomeOwnsPaths, writeMetricsLog, writeSessionSnapshot } = await import("./tui/fixtures.ts")
 const { EXPECTED_TOKENS_PROCESSED_STAT, makeAdvisory, makeLine, makeTotals } = await import("./panel-fixtures.ts")
+const { SNAPSHOT_ADVISORY_BAND_START_TOKENS, SNAPSHOT_ADVISORY_RATIO } = await import("./panel-fixtures.ts")
+const { formatTokenCount } = await import("../plugin/panel-data.ts")
 const { DEFAULT_LIVE_STATE_DIR, DEFAULT_METRICS_PATH } = await import("../plugin/panel-data.ts")
 
 const POLL_INTERVAL_MS = 5000
@@ -46,6 +48,7 @@ const HIDDEN_SESSION = "sess-tui-hidden"
 const REPAINT_SESSION = "sess-tui-repaint"
 const MOUNT_SESSION = "sess-tui-mount"
 const ADVISORY_SESSION = "sess-tui-advisory"
+const ADVISORY_BAND_START_FRAGMENT = `${SNAPSHOT_ADVISORY_RATIO} of watermark (${formatTokenCount(SNAPSHOT_ADVISORY_BAND_START_TOKENS)}`
 const POLL_SESSION = "sess-tui-poll"
 const SUBAGENTS_SESSION = "sess-tui-subagents"
 const SUBAGENTS_CHILD = "sess-tui-subagents-child"
@@ -187,7 +190,7 @@ test("SidebarEntry renders, polls, and disposes against the temp HOME fixtures",
       assert.ok(advisoryIndex !== -1, "expected the Advisory row to render")
       assert.ok(tokensIndex !== -1)
       assert.ok(windowIndex < advisoryIndex && advisoryIndex < tokensIndex, `the Advisory row must sit after Window and before Tokens processed: ${text}`)
-      assert.ok(text.includes("0.85 of watermark (105.4k"))
+      assert.ok(text.includes(ADVISORY_BAND_START_FRAGMENT))
     })
   })
 

@@ -6,6 +6,7 @@ import { test } from "node:test"
 import {
   DEFAULT_SIDEBAR_ENABLED,
   SIDEBAR_COLUMN_LIMIT,
+  formatTokenCount,
   globalTotals,
   loadPanelData,
   panelRows,
@@ -29,6 +30,7 @@ import {
   SESSION_A,
   SESSION_B,
   SNAPSHOT_ADVISORY_BAND_START_TOKENS,
+  SNAPSHOT_ADVISORY_RATIO,
   SNAPSHOT_ADVISORY_SUBJECTS,
   TOTALS_EVICTIONS,
   TOTALS_RECALL_HITS,
@@ -53,6 +55,7 @@ const NEWEST_RUN_ESTIMATE = 22222
 const LONG_ADVISORY_SUBJECT = `/data/${"c".repeat(60)}.txt`
 
 const ADVISORY_ROW_PREFIX = "Advisory:"
+const ADVISORY_BAND_START_FRAGMENT = `${SNAPSHOT_ADVISORY_RATIO} of watermark (${formatTokenCount(SNAPSHOT_ADVISORY_BAND_START_TOKENS)}`
 
 const sidebarDataWithAdvisory = (advisory: Record<string, unknown>): PanelData => ({
   source: "/tmp/metrics.jsonl",
@@ -73,7 +76,7 @@ test("sidebarRows renders the Advisory row after Window and before the counters 
   assert.ok(tokensIndex !== -1)
   assert.ok(windowIndex < advisoryIndex && advisoryIndex < tokensIndex, `Advisory row must sit after Window and before Tokens processed: ${JSON.stringify(rows)}`)
   assert.equal(rows[advisoryIndex].tone, "warning")
-  assert.ok(rows[advisoryIndex].text.includes("0.85 of watermark (105.4k"))
+  assert.ok(rows[advisoryIndex].text.includes(ADVISORY_BAND_START_FRAGMENT))
   assert.ok(rows[advisoryIndex].text.includes(SNAPSHOT_ADVISORY_SUBJECTS[0]) === false, "the Advisory row must be truncated before the subjects")
 })
 

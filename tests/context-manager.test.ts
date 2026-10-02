@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { test } from "node:test"
 
 import contextManagerEntry, {
+  ADVISORY_BAND_RATIO_DEFAULT,
   DEFAULT_INGESTION_HYGIENE_ROTATION_MAX_BYTES,
   DEFAULT_METRICS_ROTATION_MAX_BYTES,
   DEFAULT_PAGE_STORE_ROTATION_MAX_BYTES,
@@ -7727,8 +7728,9 @@ const DRY_RUN_EXPECTED_BYTES = DRY_RUN_CANDIDATE_BYTES
 
 // Advisory-band probe figures: the standard bundle's estimate (522 tokens)
 // sits between 0.85 x 600 = 510 (band start) and the 600-token watermark,
-// while 0.85 x 620 = 527 clears the estimate entirely.
-const ADVISORY_BAND_RATIO_DEFAULT = 0.85
+// while 0.85 x 620 = 527 clears the estimate entirely. The ratio comes
+// from the plugin's own exported default so expectation and behavior
+// cannot drift.
 const ADVISORY_BAND_RATIO_CUSTOM = 0.7
 const ADVISORY_BAND_RATIO_INVALID_VALUES: unknown[] = [0, 1, 1.5, -0.5, "0.9", Number.NaN, Number.POSITIVE_INFINITY]
 const ADVISORY_BAND_INVALID_VALUES: unknown[] = ["yes", 1, 0, null]

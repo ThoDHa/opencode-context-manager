@@ -632,8 +632,8 @@ export const parseCheckpoint = (raw: string): PanelCheckpoint | undefined => {
   if (pageStore === undefined) return undefined
   const hotSubjects = parseSnapshotHotSubjects(parsed["hotSubjects"])
   if (hotSubjects === undefined) return undefined
-  const advisory = parsed["advisory"] === undefined ? undefined : parseSnapshotAdvisory(parsed["advisory"])
-  if (parsed["advisory"] !== undefined && advisory === undefined) return undefined
+  const advisory = parseSnapshotAdvisory(parsed["advisory"])
+  if (advisory === undefined && parsed["advisory"] !== undefined) return undefined
   return {
     ts: parsed["ts"],
     session: parsed["session"],
