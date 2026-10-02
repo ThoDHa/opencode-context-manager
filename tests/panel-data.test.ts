@@ -1323,6 +1323,24 @@ test("loadPanelData omits the subagent panels when no child ids were requested",
   })
 })
 
+test("loadPanelData threads the injected nowMs into the panel data and the rendered staleness row", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "metrics.jsonl")
+    writeFileSync(path, serialize([logLineStaleAgainstSnapshot()]))
+    const nowMs = Date.parse("2026-09-18T08:05:00.000Z")
+
+    const data = await loadPanelData({ path, sessionID: SESSION_A, nowMs })
+
+    assert.equal(data.error, undefined)
+    assert.equal(data.nowMs, nowMs)
+    assert.ok(panelRows(data).some((row) => row.text === "metrics last written 5 minutes ago"))
+
+    const production = await loadPanelData({ path, sessionID: SESSION_A })
+
+    assert.equal(production.nowMs, undefined)
+  })
+})
+
 test("loadPanelData serves child snapshots alongside the log warning when the metrics log cannot be read", async () => {
   await withTempDir(async (dir) => {
     const directoryPath = join(dir, "metrics-dir")

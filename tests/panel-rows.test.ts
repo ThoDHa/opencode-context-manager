@@ -5,7 +5,9 @@ import {
   formatTokenCount,
   globalTotals,
   panelRows,
+  parseCheckpoint,
   sessionPanelData,
+  snapshotSessionPanel,
   splitRowText,
 } from "../plugin/panel-data.ts"
 import {
@@ -26,11 +28,16 @@ import {
   TOTALS_RECALL_HITS,
   TOTALS_RECALL_MISSES,
   UNKNOWN_CONTEXT_LIMIT_SOURCE,
+  logLineStaleAgainstSnapshot,
   makeAdvisory,
   makeLine,
+  makeSnapshot,
 } from "./panel-fixtures.ts"
 
 const COLLECTED_EVICTION_COUNT = 2
+const STALENESS_NOW_MS = Date.parse("2026-09-18T09:30:00.000Z")
+const STALENESS_TRANSFORM_CLAUSE = "last transform"
+const STALENESS_METRICS_CLAUSE = "metrics last written"
 
 const panelDataWithAdvisory = () => ({
   source: "/tmp/metrics.jsonl",
@@ -264,4 +271,53 @@ test("panelRows surfaces a log read error as the warning row and omits session d
     { text: "Context Manager", tone: "header" },
     { text: "metrics log unreadable: EACCES: permission denied", tone: "warning" },
   ])
+})
+
+test("panelRows renders the staleness sentence as the final row with the transform and metrics ages", () => {
+  const checkpoint = parseCheckpoint(JSON.stringify(makeSnapshot()))
+  assert.ok(checkpoint !== undefined)
+  const data = {
+    source: "/tmp/metrics.jsonl",
+    activeSession: SESSION_A,
+    current: snapshotSessionPanel(checkpoint, [logLineStaleAgainstSnapshot()], SESSION_A),
+    global: globalTotals([]),
+    error: undefined,
+  }
+
+  const rows = panelRows(data, { nowMs: STALENESS_NOW_MS })
+
+  const stalenessText = "last transform 30 minutes ago; metrics last written 1 hour ago"
+  assert.ok(rows.some((row) => row.text === stalenessText))
+  assert.equal(rows[rows.length - 1].text, stalenessText)
+  assert.ok(rows[rows.length - 2].text.startsWith("last evicted:"))
+})
+
+test("panelRows renders only the metrics age for a log-fallback session and omits the staleness row when neither timestamp is available", () => {
+  const logOnlyCurrent = sessionPanelData([logLineStaleAgainstSnapshot()], SESSION_A)
+  assert.ok(logOnlyCurrent !== undefined)
+  const logOnlyData = {
+    source: "/tmp/metrics.jsonl",
+    activeSession: SESSION_A,
+    current: logOnlyCurrent,
+    global: globalTotals([]),
+    error: undefined,
+  }
+  const logOnlyRows = panelRows(logOnlyData, { nowMs: STALENESS_NOW_MS })
+
+  assert.ok(logOnlyRows.some((row) => row.text === "metrics last written 1 hour ago"))
+  assert.ok(!logOnlyRows.some((row) => row.text.startsWith("last transform")))
+  assert.equal(logOnlyRows[logOnlyRows.length - 1].text, "metrics last written 1 hour ago")
+
+  const noTimestampData = {
+    source: "/tmp/metrics.jsonl",
+    activeSession: SESSION_A,
+    current: { ...logOnlyCurrent, lastTransformAtMs: undefined, lastMetricsLineAtMs: undefined },
+    global: globalTotals([]),
+    error: undefined,
+  }
+  const noTimestampRows = panelRows(noTimestampData, { nowMs: STALENESS_NOW_MS })
+
+  assert.ok(!noTimestampRows.some((row) => row.text.startsWith(STALENESS_TRANSFORM_CLAUSE)))
+  assert.ok(!noTimestampRows.some((row) => row.text.startsWith(STALENESS_METRICS_CLAUSE)))
+  assert.ok(noTimestampRows[noTimestampRows.length - 1].text.startsWith("last evicted:"))
 })

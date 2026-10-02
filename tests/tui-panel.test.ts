@@ -27,6 +27,10 @@ const EXPECTED_SIDEBAR_SLOT_NAME = "sidebar_content"
 const NO_SESSION_ROW_TEXT = "no active session"
 const UNREADABLE_ROW_MARKER = "metrics log unreadable:"
 const EVICTION_ROW_MARKER = "last evicted:"
+const STALENESS_METRICS_MARKER = "metrics last written"
+const STALENESS_EXPECTED_AGE = "2 minutes ago"
+const ONE_MINUTE_MS = 60_000
+const STALENESS_LOOKBACK_MINUTES = 2
 const MANUAL_MODE_HEADER_SUFFIX = " (manual)"
 const BUDGET_LABEL_SPAN = "context limit: "
 const TOAST_TRIGGER_FAILURE = "setSize exploded"
@@ -252,6 +256,22 @@ test("panel rows carry tone colors through fg and style.fg spans", async () => {
     const infoSpans = spansWithFg(tree.root, MOCK_THEME.info)
     assert.equal(infoSpans.length, 1)
     assert.ok(nodeText(infoSpans[0]).includes("read /data/a.txt"))
+  })
+})
+
+test("session route renders the staleness sentence with the log line's age", async () => {
+  const STALENESS_SESSION = "sess-tui-panel-staleness"
+  writeMetricsLog(DEFAULT_METRICS_PATH, [
+    makeLine({ session: STALENESS_SESSION, ts: new Date(Date.now() - STALENESS_LOOKBACK_MINUTES * ONE_MINUTE_MS).toISOString() }),
+  ])
+  const mock = createTuiApiMock()
+  mock.setSessionRoute(STALENESS_SESSION)
+  const renderer = await openPanelRenderer(mock)
+  await withRenderedTree(renderer, async (tree) => {
+    const rendered = nodeText(tree.root)
+    assert.ok(rendered.includes(STALENESS_METRICS_MARKER))
+    assert.ok(rendered.includes(`metrics last written ${STALENESS_EXPECTED_AGE}`))
+    assert.equal(rendered.includes("last transform"), false)
   })
 })
 

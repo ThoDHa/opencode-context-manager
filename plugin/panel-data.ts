@@ -222,6 +222,7 @@ export const PANEL_COMMAND_CATEGORY = "Context"
 export const PANEL_COMMAND_SLASH_NAME = "context"
 const COUNTERS_ROW_LABEL = "counters:"
 const LAST_EVICTION_ROW_LABEL = "last evicted:"
+const STALENESS_ROW_TONE: PanelRowTone = "info"
 const AGE_JUST_NOW_TEXT = "just now"
 const AGE_MINUTE_UNIT = "minute"
 const AGE_HOUR_UNIT = "hour"
@@ -312,6 +313,7 @@ export type PanelData = {
   global: GlobalTotals
   error: string | undefined
   subagentPanels?: SubagentPanelEntry[]
+  nowMs?: number | undefined
 }
 
 export type LoadPanelDataOptions = {
@@ -325,6 +327,9 @@ export type LoadPanelDataOptions = {
   // calls so each load parses only appended bytes; without one, each call
   // creates a fresh reader and behaves as a full read, today's behavior.
   reader?: MetricsLogReader
+  // The clock the staleness row ages against, for deterministic tests;
+  // undefined reads Date.now() at row render.
+  nowMs?: number
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -794,6 +799,7 @@ export const loadPanelData = async (options: LoadPanelDataOptions = {}): Promise
   const childSessionIDs = options.childSessionIDs
   const recentEvictionsLimit = options.recentEvictions ?? DEFAULT_RECENT_EVICTIONS
   const reader = options.reader ?? createMetricsLogReader(path)
+  const nowMs = options.nowMs
   const snapshot = sessionID === undefined ? undefined : await readSessionSnapshot(stateDir, sessionID)
   const childSnapshots = childSessionIDs === undefined ? [] : await Promise.all(childSessionIDs.map((childID) => readSessionSnapshot(stateDir, childID)))
   const childPanels = (lines: PanelMetricsLine[]): SubagentPanelEntry[] | undefined =>
@@ -814,7 +820,7 @@ export const loadPanelData = async (options: LoadPanelDataOptions = {}): Promise
     const message = error instanceof Error ? error.message : String(error)
     const current =
       snapshot !== undefined && sessionID !== undefined ? snapshotSessionPanel(snapshot, [], sessionID, recentEvictionsLimit) : undefined
-    return { source: path, activeSession: sessionID, current, global: globalTotals([]), error: message, subagentPanels: childPanels([]) }
+    return { source: path, activeSession: sessionID, current, global: globalTotals([]), error: message, subagentPanels: childPanels([]), nowMs }
   }
   let current: SessionPanel | undefined
   if (sessionID !== undefined) {
@@ -823,7 +829,7 @@ export const loadPanelData = async (options: LoadPanelDataOptions = {}): Promise
         ? sessionPanelData(lines, sessionID, recentEvictionsLimit)
         : snapshotSessionPanel(snapshot, lines, sessionID, recentEvictionsLimit)
   }
-  return { source: path, activeSession: sessionID, current, global: globalTotals(lines), error: undefined, subagentPanels: childPanels(lines) }
+  return { source: path, activeSession: sessionID, current, global: globalTotals(lines), error: undefined, subagentPanels: childPanels(lines), nowMs }
 }
 
 export const contextLimitSourceLabel = (source: string): string => {
@@ -944,7 +950,28 @@ const headerText = (current: SessionPanel | undefined): string =>
 const emptyStateText = (data: PanelData): string =>
   data.activeSession === undefined ? NO_SESSION_ROW_TEXT : NO_RUNS_ROW_TEXT
 
-export const panelRows = (data: PanelData): PanelRow[] => {
+const STALENESS_TRANSFORM_CLAUSE = "last transform"
+const STALENESS_METRICS_CLAUSE = "metrics last written"
+const STALENESS_CLAUSE_SEPARATOR = "; "
+
+// The panel's one staleness sentence: the two clause texts the ages feed,
+// composed only from the timestamps availability actually resolved.
+const stalenessText = (current: SessionPanel, nowMs: number): string | undefined => {
+  const clauses: string[] = []
+  if (current.lastTransformAtMs !== undefined) clauses.push(`${STALENESS_TRANSFORM_CLAUSE} ${formatAgeText(nowMs, current.lastTransformAtMs)}`)
+  if (current.lastMetricsLineAtMs !== undefined) clauses.push(`${STALENESS_METRICS_CLAUSE} ${formatAgeText(nowMs, current.lastMetricsLineAtMs)}`)
+  if (clauses.length === 0) return undefined
+  return clauses.join(STALENESS_CLAUSE_SEPARATOR)
+}
+
+export type PanelRowsOptions = {
+  // Overrides the clock the staleness row ages against, for deterministic
+  // direct calls; absent, the data's own nowMs (the loader's injected
+  // clock) serves, falling back to Date.now().
+  nowMs?: number
+}
+
+export const panelRows = (data: PanelData, options: PanelRowsOptions = {}): PanelRow[] => {
   const current = data.current
   const rows: PanelRow[] = [{ text: headerText(current), tone: "header" }]
   if (data.error !== undefined) {
@@ -962,6 +989,10 @@ export const panelRows = (data: PanelData): PanelRow[] => {
   const newestEviction = current.recentEvictions[0]
   if (newestEviction !== undefined) {
     rows.push({ text: `${LAST_EVICTION_ROW_LABEL} ${evictionText(newestEviction)}`, tone: "info" })
+  }
+  const staleness = stalenessText(current, options.nowMs ?? data.nowMs ?? Date.now())
+  if (staleness !== undefined) {
+    rows.push({ text: staleness, tone: STALENESS_ROW_TONE })
   }
   return rows
 }
