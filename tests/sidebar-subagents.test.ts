@@ -208,6 +208,16 @@ test("sidebarSubagentsGroup renders the cumulative token-first block directly un
   ])
 })
 
+test("sidebarSubagentsGroup keeps the processed total only and renders no Window row", () => {
+  const child = makeChild({ type: "scout" })
+  const data = dataWithChildren([{ id: child.id, panel: makePanel(child.id) }])
+
+  const rows = rowsWithinWidth(sidebarSubagentsGroup([child], data))
+
+  assert.ok(rows.some((row) => row.text === EXPECTED_TOKENS_PROCESSED_STAT))
+  assert.ok(!rows.some((row) => row.text.startsWith("Window:")), "subagent blocks keep the processed total only")
+})
+
 test("sidebarSubagentsGroup renders no cumulative block when no child's panel has landed", () => {
   const scout = makeChild({ id: "sess-child-1", type: "scout" })
   const worker = makeChild({ id: "sess-child-2", type: "worker", updatedAtMs: NOW_MS - MINUTE_MS })

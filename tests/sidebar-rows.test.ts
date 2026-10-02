@@ -45,6 +45,8 @@ const OVER_LONG_SUBJECT = `/data/${"b".repeat(60)}.txt`
 const LONG_READ_ERROR = "EACCES: permission denied, open '/sessions/deep/path/metrics.jsonl' for reading"
 const ZERO_DEFICIT = 0
 const NEGATIVE_DEFICIT = -5
+const STALE_RUN_ESTIMATE = 11111
+const NEWEST_RUN_ESTIMATE = 22222
 
 const sidebarRowsWithinWidth = (data: PanelData): PanelRow[] => {
   const rows = sidebarRows(data)
@@ -76,6 +78,7 @@ test("sidebarRows renders the approved layout's header, stat block, and eviction
     { text: "Budget: 200k", tone: "normal" },
     { text: "Watermark: 100k", tone: "normal" },
     { text: "Over by: 23.5k", tone: "warning" },
+    { text: "Window: 123.5k", tone: "normal" },
     { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "success" },
     { text: `Evictions: ${TOTALS_EVICTIONS}, 3.1k tokens`, tone: "success" },
     { text: EXPECTED_DEDUPED_STAT, tone: "success" },
@@ -183,6 +186,7 @@ test("sidebarRows keeps the snapshot-fed session block under the warning group w
       { text: "Budget: 200k", tone: "normal" },
       { text: "Watermark: 100k", tone: "normal" },
       { text: "Over by: 23.5k", tone: "warning" },
+      { text: "Window: 123.5k", tone: "normal" },
       { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "success" },
       { text: `Evictions: ${TOTALS_EVICTIONS}, 3.1k tokens`, tone: "success" },
       { text: EXPECTED_DEDUPED_STAT, tone: "success" },
@@ -206,9 +210,10 @@ test("sidebarRows renders the log-fed fallback session in the spaced groups", as
     assert.deepEqual(sidebarRowsWithinWidth(data), [
       { text: "Context Manager", tone: "header" },
       { text: " ", tone: "normal" },
-      { text: `Budget: 600`, tone: "normal" },
+      { text: "Budget: 600", tone: "normal" },
       { text: "Watermark: 100k", tone: "normal" },
       { text: "Over by: 23.5k", tone: "warning" },
+      { text: "Window: 200k", tone: "normal" },
       { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "success" },
       { text: `Evictions: ${LOG_LINE_ONLY_EVICTIONS}, 3.1k tokens`, tone: "success" },
       { text: EXPECTED_DEDUPED_STAT, tone: "success" },
@@ -289,6 +294,7 @@ test("sidebarRows restyles a null budget and a missing watermark into the colon 
     { text: " ", tone: "normal" },
     { text: "Budget: inactive (no budget)", tone: "normal" },
     { text: "Watermark: none", tone: "normal" },
+    { text: "Window: 123.5k", tone: "normal" },
     { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "success" },
     { text: `Evictions: ${TOTALS_EVICTIONS}, 3.1k tokens`, tone: "success" },
     { text: EXPECTED_DEDUPED_STAT, tone: "success" },
@@ -311,6 +317,7 @@ test("sidebarRows shows Watermark none for a present budget when only the waterm
     { text: " ", tone: "normal" },
     { text: "Budget: 200k", tone: "normal" },
     { text: "Watermark: none", tone: "normal" },
+    { text: "Window: 123.5k", tone: "normal" },
     { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "success" },
     { text: `Evictions: ${TOTALS_EVICTIONS}, 3.1k tokens`, tone: "success" },
     { text: EXPECTED_DEDUPED_STAT, tone: "success" },
@@ -333,6 +340,7 @@ test("sidebarRows omits the over-by line when the deficit is zero or negative", 
     assert.deepEqual(rows.slice(2), [
       { text: `Budget: 200k`, tone: "normal" },
       { text: "Watermark: 100k", tone: "normal" },
+      { text: "Window: 123.5k", tone: "normal" },
       { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "success" },
       { text: `Evictions: ${TOTALS_EVICTIONS}, 3.1k tokens`, tone: "success" },
       { text: EXPECTED_DEDUPED_STAT, tone: "success" },
@@ -359,6 +367,54 @@ test("sidebarRows leads the stat rows with a zeroed Tokens processed row before 
   assert.notEqual(evictionsIndex, -1)
   assert.deepEqual(rows[tokensProcessedIndex], { text: "Tokens processed: 0 tokens", tone: "success" })
   assert.ok(tokensProcessedIndex < evictionsIndex, "the Tokens processed row must precede the Evictions row")
+})
+
+test("sidebarRows renders the Window row from the newest run's estimate between the watermark and the tokens row", () => {
+  const data = {
+    source: "/tmp/metrics.jsonl",
+    activeSession: SESSION_A,
+    current: sessionPanelData(
+      [
+        makeLine({ estimatedTokens: STALE_RUN_ESTIMATE, evictedThisRun: [] }),
+        makeLine({ estimatedTokens: NEWEST_RUN_ESTIMATE, watermarkTokens: null, deficitTokens: null, evictedThisRun: [] }),
+      ],
+      SESSION_A,
+    ),
+    global: globalTotals([]),
+    error: undefined,
+  }
+
+  const rows = sidebarRowsWithinWidth(data)
+
+  assert.deepEqual(rows.slice(2), [
+    { text: "Budget: 200k", tone: "normal" },
+    { text: "Watermark: none", tone: "normal" },
+    { text: "Window: 22.2k", tone: "normal" },
+    { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "success" },
+    { text: `Evictions: ${TOTALS_EVICTIONS}, 3.1k tokens`, tone: "success" },
+    { text: EXPECTED_DEDUPED_STAT, tone: "success" },
+    { text: EXPECTED_REASONING_STAT, tone: "success" },
+    { text: `Stash reads: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "success" },
+  ])
+})
+
+test("sidebarRows omits the Window row when the session has no run yet", () => {
+  const noRunData = {
+    source: "/tmp/metrics.jsonl",
+    activeSession: SESSION_B,
+    current: undefined,
+    global: globalTotals([]),
+    error: undefined,
+  }
+
+  const rows = sidebarRowsWithinWidth(noRunData)
+
+  assert.ok(!rows.some((row) => row.text.startsWith("Window:")), "a session without runs must render no Window row")
+  assert.deepEqual(rows, [
+    { text: "Context Manager", tone: "header" },
+    { text: " ", tone: "normal" },
+    { text: "no metrics recorded for this session yet", tone: "normal" },
+  ])
 })
 
 test("sidebarRows drops the budget source label while the panel keeps it", () => {

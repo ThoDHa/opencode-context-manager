@@ -14,13 +14,13 @@ Run `make test`, then confirm the runner-reported `tests` total matches the expe
 - `tests/context-manager.test.ts`: 418
 - `tests/panel-data.test.ts`: 67
 - `tests/panel-rows.test.ts`: 13
-- `tests/sidebar-rows.test.ts`: 16
-- `tests/sidebar-subagents.test.ts`: 34
+- `tests/sidebar-rows.test.ts`: 18
+- `tests/sidebar-subagents.test.ts`: 35
 - `tests/tui-harness.test.ts`: 5
 - `tests/tui-registration.test.ts`: 13
 - `tests/tui-panel.test.ts`: 9
 - `tests/tui-sidebar.test.ts`: 10
-- aggregate: 585
+- aggregate: 588
 
 These counts drift as tests are added; `make ci` recomputes and cross-checks them per run, so treat its numbers as current and this list as a sanity reference.
 

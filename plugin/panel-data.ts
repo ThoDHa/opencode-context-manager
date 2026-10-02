@@ -904,6 +904,7 @@ const truncateToWidth = (text: string, maxWidth: number): string =>
 const SIDEBAR_BUDGET_LABEL = "Budget"
 const SIDEBAR_WATERMARK_LABEL = "Watermark"
 const SIDEBAR_OVER_BY_LABEL = "Over by"
+const SIDEBAR_WINDOW_LABEL = "Window"
 const SIDEBAR_EVICTIONS_LABEL = "Evictions"
 const SIDEBAR_DEDUPED_LABEL = "Deduped"
 const SIDEBAR_REASONING_LABEL = "Reasoning expired"
@@ -932,6 +933,12 @@ const sidebarOverByRow = (current: SessionPanel): PanelRow | undefined => {
   if (current.lastRun.deficitTokens === null || current.lastRun.deficitTokens <= 0) return undefined
   return { text: `${SIDEBAR_OVER_BY_LABEL}: ${formatTokenCount(current.lastRun.deficitTokens)}`, tone: "warning" }
 }
+
+// Renders whenever the session block renders: a block exists only after a
+// run has completed (the snapshot writer and every log line both require
+// one), so "no run yet" is the empty state, which omits the whole block.
+const sidebarWindowText = (current: SessionPanel): string =>
+  `${SIDEBAR_WINDOW_LABEL}: ${formatTokenCount(current.lastRun.estimatedTokens)}`
 
 const savingsStatText = (label: string, count: number, tokensSaved: number): string =>
   `${label}: ${count}, ${formatTokenCount(tokensSaved)} ${SIDEBAR_TOKENS_UNIT}`
@@ -1093,6 +1100,7 @@ export const sidebarRows = (data: PanelData, subagentRows?: PanelRow[]): PanelRo
   ]
   const overByRow = sidebarOverByRow(current)
   if (overByRow !== undefined) statGroup.push(overByRow)
+  statGroup.push({ text: sidebarWindowText(current), tone: "normal" })
   statGroup.push(...sidebarCountersGroup(current))
   groups.push(statGroup)
   const newestEviction = current.recentEvictions[0]
