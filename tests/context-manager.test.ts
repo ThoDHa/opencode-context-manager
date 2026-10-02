@@ -659,14 +659,11 @@ const dedupTombstoneFor = (tool: string, msgIndex: number): string =>
 const fileDedupTombstoneFor = (label: string, msgIndex: number): string =>
   `${DEDUP_MARKER} ${label} ${DEDUP_FILE_SUPERSEDED_LEAD} ${msgIndex}`
 
-const recallTool = async (hooks: HookMap, subject: unknown, sessionID: string): Promise<unknown> =>
-  (hooks as Record<string, Record<string, RecallToolDefinition>>)[TOOL_MAP_KEY][RECALL_TOOL_NAME].execute(
-    { subject },
-    { sessionID },
-  )
-
 const recallToolArgs = async (hooks: HookMap, args: Record<string, unknown>, sessionID: string): Promise<unknown> =>
   (hooks as Record<string, Record<string, RecallToolDefinition>>)[TOOL_MAP_KEY][RECALL_TOOL_NAME].execute(args, { sessionID })
+
+const recallTool = async (hooks: HookMap, subject: unknown, sessionID: string): Promise<unknown> =>
+  recallToolArgs(hooks, { subject }, sessionID)
 
 const probeCountsLineFor = (
   subject: string,

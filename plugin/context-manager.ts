@@ -2733,9 +2733,10 @@ const compactionContextFor = (metricsEntry: SessionMetrics | undefined, pageStor
     }
     context.push(`${COMPACTION_BLOCK_MARKER} tombstoned outputs remain reloadable via the ${RECALL_TOOL_NAME} tool; newest subjects: ${newestSubjects.join(SUBJECT_SEPARATOR)}`)
   }
-  if (metricsEntry.lastOmissions !== undefined && (metricsEntry.lastOmissions.toolEvictions > 0 || metricsEntry.lastOmissions.reasoningParts > 0 || metricsEntry.lastOmissions.fenceBlocks > 0)) {
+  const omissions = metricsEntry.lastOmissions
+  if (omissions !== undefined && (omissions.toolEvictions > 0 || omissions.reasoningParts > 0 || omissions.fenceBlocks > 0)) {
     context.push(
-      `${COMPACTION_BLOCK_MARKER} ${OMISSIONS_LINE_LEAD}${metricsEntry.lastOmissions.toolEvictions} ${OMISSIONS_TOOL_OUTPUTS_LABEL}, ${metricsEntry.lastOmissions.reasoningParts} ${OMISSIONS_REASONING_BLOCKS_LABEL}, ${metricsEntry.lastOmissions.fenceBlocks} ${OMISSIONS_FENCED_BLOCKS_LABEL}${OMISSIONS_RELOAD_LEAD}${RECALL_TOOL_NAME}`,
+      `${COMPACTION_BLOCK_MARKER} ${OMISSIONS_LINE_LEAD}${omissions.toolEvictions} ${OMISSIONS_TOOL_OUTPUTS_LABEL}, ${omissions.reasoningParts} ${OMISSIONS_REASONING_BLOCKS_LABEL}, ${omissions.fenceBlocks} ${OMISSIONS_FENCED_BLOCKS_LABEL}${OMISSIONS_RELOAD_LEAD}${RECALL_TOOL_NAME}`,
     )
   }
   return context
