@@ -116,6 +116,15 @@ const DEFAULT_REMEMBERED_EVICTED_SUBJECTS = 100
 const TOUCH_SCAN_INITIAL_WATERMARK = -1
 const DEFAULT_REMEMBERED_REASONING_PARTS = 4096
 const DEFAULT_REMEMBERED_DEDUP_PAIRS = 4096
+// How many distinct faulted subjects one session's metrics entry remembers
+// (LRU, refreshed on every increment): between the evicted-subject cap and
+// the reasoning-part cap, sized so a session's reloaded outputs stay
+// fault-tracked for the entry's lifetime.
+const DEFAULT_REMEMBERED_FAULT_SUBJECTS = 256
+// How many messages of eviction deferral one recorded fault buys a subject
+// in the candidate sort: a reloaded output is demonstrably needed again, so
+// it re-evicts five messages later than its recency alone would place it.
+const FAULT_PENALTY_MESSAGES = 5
 const DEFAULT_METRICS_LOG_ENABLED = true
 // The default locations derive per resolution instead of once at module
 // load, so the migration below and the resolved options always agree on
@@ -357,6 +366,18 @@ type SessionMetrics = {
   // per-entry-lifetime, not per-process; identical content counts once.
   reasoningSeenKeys: string[]
   dedupedPairKeys: string[]
+  // Per-entry fault bookkeeping: the rendered primary subject of every
+  // reloaded (read_evicted hit) or re-touched (keyed post-eviction
+  // appearance) evicted output, mapped to its fault count. Like the
+  // seen-key lists it resets when the metrics store evicts and reseeds
+  // the entry, so fault memory is per-entry-lifetime and never persisted.
+  faultCounts: Map<string, number>
+  // The rendered primary subjects of remembered evicted entries, pushed
+  // beside evictedSubjects at the same points and trimmed at the same
+  // bound: the keyed fault credit matches appearances against these
+  // because the fault map's keys live in the rendered subject domain
+  // read_evicted matches on.
+  evictedRenderedSubjects: string[]
   stashReadsLoggedThrough: number
   // Per-process bookkeeping for the metrics line coalesce gate: the moment
   // of the session's last flushed line and the budget source it carried.
@@ -1335,6 +1356,14 @@ const rememberSessionValue = <T>(map: Map<string, T>, key: string, value: T, bou
   map.set(key, value)
 }
 
+// One fault on a subject: the increment refreshes its recency so a hot
+// subject survives at the map's bound, and the map is trimmed before the
+// write so a brand-new subject never overflows the bound.
+const rememberFaultForSubject = (faultCounts: Map<string, number>, subject: string, bound: number): void => {
+  const existing = faultCounts.get(subject)
+  rememberSessionValue(faultCounts, subject, (existing ?? 0) + 1, bound)
+}
+
 const stashForSession = (stashes: StashStore, sessionKey: string, sessionBound: number): SessionStash => {
   const touched = touchMapEntry(stashes, sessionKey)
   if (touched !== undefined) return touched
@@ -1456,6 +1485,7 @@ const executeReadEvicted = async (
   touchMapEntry(stashes, sessionKey)
   const sessionMetrics = await metricsForSession(metrics, hydrations, persistedTotalsForSession, sessionKey, metricsSessionBound)
   sessionMetrics.stashHits += 1
+  rememberFaultForSubject(sessionMetrics.faultCounts, subject, DEFAULT_REMEMBERED_FAULT_SUBJECTS)
   const newest = matches[matches.length - 1]
   const older = matches.slice(0, -1)
   const output = older.length === 0 ? newest.output : `${newest.output}\n${olderMatchesLineFor(subject, older)}`
@@ -1475,6 +1505,8 @@ const createSessionMetrics = (): SessionMetrics => ({
   touchScanThrough: TOUCH_SCAN_INITIAL_WATERMARK,
   reasoningSeenKeys: [],
   dedupedPairKeys: [],
+  faultCounts: new Map(),
+  evictedRenderedSubjects: [],
   stashReadsLoggedThrough: 0,
 })
 
@@ -1702,12 +1734,29 @@ const metricsForSession = async (
   }
 }
 
+// Keyed fault credit for one unseen appearance: every remembered rendered
+// subject the appearance touches (same path-equality and bash-substring
+// discipline as the aggregate scan, with the rendered string wrapped as a
+// path subject) gains one fault, credited once per appearance even when
+// several remembered entries share the subject.
+const creditKeyedFaults = (metrics: SessionMetrics, appearance: ToolAppearance, minSubstringChars: number): void => {
+  const credited = new Set<string>()
+  for (const rendered of metrics.evictedRenderedSubjects) {
+    if (credited.has(rendered)) continue
+    if (appearanceTouches([{ path: rendered }], appearance, minSubstringChars)) {
+      credited.add(rendered)
+      rememberFaultForSubject(metrics.faultCounts, rendered, DEFAULT_REMEMBERED_FAULT_SUBJECTS)
+    }
+  }
+}
+
 const countPostEvictionTouches = (metrics: SessionMetrics, appearances: ToolAppearance[], minSubstringChars: number): number => {
   let touches = 0
   let latestIndex = metrics.touchScanThrough
   for (const appearance of appearances) {
     if (appearance.msgIndex <= metrics.touchScanThrough) continue
     if (appearanceTouches(metrics.evictedSubjects, appearance, minSubstringChars)) touches += 1
+    creditKeyedFaults(metrics, appearance, minSubstringChars)
     latestIndex = appearance.msgIndex
   }
   metrics.touchScanThrough = latestIndex
@@ -1728,8 +1777,10 @@ const recordRunOutcome = (metrics: SessionMetrics, run: RunOutcome, rememberedSu
   for (const entry of eviction.evicted) {
     metrics.bytesReclaimed += entry.bytes + entry.attachmentBytes
     metrics.evictedSubjects.push(...entry.subjects)
+    metrics.evictedRenderedSubjects.push(entry.subject)
   }
   while (metrics.evictedSubjects.length > rememberedSubjectsBound) metrics.evictedSubjects.shift()
+  while (metrics.evictedRenderedSubjects.length > rememberedSubjectsBound) metrics.evictedRenderedSubjects.shift()
   metrics.deduped += dedupedThisRun
   metrics.dedupedBytes += dedupedBytesThisRun
   metrics.dedupedUnique += dedupedUniqueThisRun
@@ -2219,14 +2270,27 @@ const scanToolOutputs = (
 // list the evictor walks.
 type EvictionCandidates = { appearances: ToolAppearance[]; entries: EvictableEntry[]; evictable: EvictableEntry[]; estimatedTokens: number }
 
-const evictionCandidatesOf = (messages: MessageBundle[], options: ResolvedOptions): EvictionCandidates => {
+const primaryRenderedSubjectOf = (entry: EvictableEntry): string =>
+  entry.subjects.length > 0 ? renderSubject(entry.subjects[0]) : UNKNOWN_TARGET_LABEL
+
+// The sort key fault feedback adjusts: each recorded fault pushes the
+// entry's effective recency FAULT_PENALTY_MESSAGES newer, so faulted
+// subjects evict later under equal pressure while remaining evictable
+// (pressure still wins). Unfaulted entries keep their exact lastTouch, so
+// their ordering is byte-identical to the unadjusted sort.
+const faultAdjustedLastTouchOf = (entry: EvictableEntry, faultCounts: Map<string, number>): number =>
+  entry.lastTouch + (faultCounts.get(primaryRenderedSubjectOf(entry)) ?? 0) * FAULT_PENALTY_MESSAGES
+
+const evictionCandidatesOf = (messages: MessageBundle[], options: ResolvedOptions, faultCounts: Map<string, number>): EvictionCandidates => {
   const { appearances, entries } = scanToolOutputs(messages, options)
   const hotFromIndex = hotFromIndexOf(messages, options)
   const evictable = entries
     .filter((entry) => !isProtectedTool(entry.tool, options))
     .filter((entry) => entry.lastTouch < hotFromIndex)
     .filter((entry) => !isPatternProtected(entry.subjects, options))
-    .sort((a, b) => a.lastTouch - b.lastTouch || b.bytes - a.bytes)
+    .map((entry) => ({ entry, sortKey: faultAdjustedLastTouchOf(entry, faultCounts) }))
+    .sort((a, b) => a.sortKey - b.sortKey || b.entry.bytes - a.entry.bytes)
+    .map((decorated) => decorated.entry)
   return { appearances, entries, evictable, estimatedTokens: estimateTokens(messages, options.charsPerToken) }
 }
 
@@ -2312,7 +2376,7 @@ const measureDryRun = (
     if (!isEvictedByWalkPolicy(entry, messages.length, options, deficitTokens, reclaimedTokens)) continue
     reclaimedTokens += entry.bytes / options.charsPerToken
     wouldEvictBytes += entry.bytes
-    subjects.push(entry.subjects.length > 0 ? renderSubject(entry.subjects[0]) : UNKNOWN_TARGET_LABEL)
+    subjects.push(primaryRenderedSubjectOf(entry))
   }
   return { deficitTokens, wouldEvictCount: subjects.length, wouldEvictBytes, wouldEvictSubjects: subjects }
 }
@@ -2336,7 +2400,7 @@ const evictLeastRecentlyUsed = (
   // twice and the aged tier cannot double-count against the budget pass.
   for (const entry of evictable) {
     if (!isEvictedByWalkPolicy(entry, messages.length, options, deficitTokens, reclaimedTokens)) continue
-    const subject = entry.subjects.length > 0 ? renderSubject(entry.subjects[0]) : UNKNOWN_TARGET_LABEL
+    const subject = primaryRenderedSubjectOf(entry)
     const messagesAgo = messages.length - entry.lastTouch
     const droppedAttachments = nonEmptyAttachmentsOf(entry.stateRef)
     const digest = buildOutputDigest(entry.tool, subject, entry.stateRef.output)
@@ -2493,7 +2557,7 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
   // The aged read tier arms the evictor even without a budget, since its
   // evictions are budget-independent; with the tier unset the old
   // stand-down holds and an unknown budget still suspends eviction.
-  const candidates = evictionCandidatesOf(messages, options)
+  const candidates = evictionCandidatesOf(messages, options, sessionMetrics.faultCounts)
   const standDown = options.manualMode || (effectiveWatermarkTokens === null && options.agedReadEvictionMessages === undefined)
   const eviction = standDown
     ? measureWithoutEvicting(candidates, effectiveWatermarkTokens)

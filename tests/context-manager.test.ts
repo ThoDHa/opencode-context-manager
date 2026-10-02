@@ -170,6 +170,31 @@ const STASH_ISOLATION_SESSION_C = "ctx-harness-session-c"
 const DEDUP_MARKER = "[ctx-deduped]"
 const TOOL_ERROR_PREFIX = "[ctx-error] "
 const FAULT_SUBJECT = "/data/fault-subject.txt"
+const FAULT_ORDER_RELOADED_PATH = "/data/fault-order-reloaded.txt"
+const FAULT_ORDER_SIBLING_PATH = "/data/fault-order-sibling.txt"
+const FAULT_SCALE_DOUBLE_PATH = "/data/fault-scale-double.txt"
+const FAULT_SCALE_SINGLE_PATH = "/data/fault-scale-single.txt"
+const FAULT_WINDOW_RELOADED_PATH = "/data/fault-window-reloaded.txt"
+const FAULT_WINDOW_SIBLING_PATH = "/data/fault-window-sibling.txt"
+const FAULT_CREDIT_RELOADED_PATH = "/data/fault-credit-reloaded.txt"
+const FAULT_CREDIT_SIBLING_PATH = "/data/fault-credit-sibling.txt"
+const FAULT_CREDIT_UNFAULTED_PATH = "/data/fault-credit-unfaulted.txt"
+const FAULT_CREDIT_SINGLE_HIT_PATH = "/data/fault-credit-single-hit.txt"
+const FAULT_INVARIANCE_FIRST_PATH = "/data/fault-invariance-first.txt"
+const FAULT_INVARIANCE_SECOND_PATH = "/data/fault-invariance-second.txt"
+const FAULT_INVARIANCE_COMMAND_PREFIX = "cat "
+const FAULT_RESTART_RELOADED_PATH = "/data/fault-restart-reloaded.txt"
+const FAULT_RESTART_PEER_PATH = "/data/fault-restart-peer.txt"
+const FAULT_MAP_OVERFLOW_COUNT = 257
+const FAULT_MAP_CYCLE_SIZE = 50
+const FAULT_MAP_SUBJECT_PREFIX = "/data/fault-bound-"
+const FAULT_MAP_TRIMMED_INDEX = 0
+const FAULT_MAP_REFRESH_TRIMMED_INDEX = 1
+const FAULT_MAP_REFRESHED_INDEX = 250
+const FAULT_MAP_DEFERRED_INDEX = 255
+const FAULT_MAP_NEW_INDEX = 257
+const FAULT_DRY_RUN_RELOADED_PATH = "/data/fault-dry-run-reloaded.txt"
+const FAULT_DRY_RUN_WARM_PATH = "/data/fault-dry-run-warm.txt"
 const HINT_RENDERED_SUBJECT = "/data/hint-rendered.txt"
 const COMPACTION_BLOCK_MARKER = "[ctx]"
 const STASH_NOTE_SUBJECTS_LEAD = "newest subjects"
@@ -611,6 +636,50 @@ const readEvicted = async (hooks: HookMap, subject: unknown, sessionID: string):
     { sessionID },
   )
 
+const faultMapBoundSubject = (index: number): string => `${FAULT_MAP_SUBJECT_PREFIX}${index}.txt`
+
+const faultContestBundle = (paths: string[]): StrictBundle =>
+  buildBundle([paths.map((path) => pathToolPart(path, MIN_EVICTABLE_BYTES)), ...fillerMessages()])
+
+const runFaultContest = async (hooks: HookMap, paths: string[], deficitTokens: number): Promise<StrictBundle> => {
+  const contestChars = paths.length * MIN_EVICTABLE_BYTES + RECENT_WINDOW_FILLER_MESSAGES * FILLER_TEXT_CHARS
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(contestChars, deficitTokens))
+  const bundle = faultContestBundle(paths)
+  await runTransform(hooks, bundle)
+  return bundle
+}
+
+const evictAndReload = async (hooks: HookMap, path: string): Promise<void> => {
+  await runTransform(hooks, buildBundle([[pathToolPart(path, MIN_EVICTABLE_BYTES)], ...fillerMessages()]))
+  assert.equal(await readEvicted(hooks, path, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+}
+
+const evictAndReloadEach = async (hooks: HookMap, paths: string[]): Promise<void> => {
+  await runTransform(
+    hooks,
+    buildBundle([...paths.map((path) => [pathToolPart(path, MIN_EVICTABLE_BYTES)]), ...fillerMessages()]),
+  )
+  for (const path of paths) {
+    assert.equal(await readEvicted(hooks, path, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+  }
+}
+
+const assertEntryTombstoned = (bundle: StrictBundle, partIndex: number): void => {
+  assert.ok(toolPartAt(bundle.messages[0], partIndex).state.output.startsWith(TOMBSTONE_MARKER))
+}
+
+const assertEntryKept = (bundle: StrictBundle, partIndex: number): void => {
+  assert.equal(toolPartAt(bundle.messages[0], partIndex).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+}
+
+const runFaultBoundCycles = async (hooks: HookMap): Promise<void> => {
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+  const subjects = Array.from({ length: FAULT_MAP_OVERFLOW_COUNT }, (_, index) => faultMapBoundSubject(index))
+  for (let start = 0; start < subjects.length; start += FAULT_MAP_CYCLE_SIZE) {
+    await evictAndReloadEach(hooks, subjects.slice(start, start + FAULT_MAP_CYCLE_SIZE))
+  }
+}
+
 test("experimental.chat.messages.transform accepts a small synthetic bundle without error and leaves it untouched", async () => {
   const hooks = await loadPluginHooks()
   const transform = hooks[TRANSFORM_HOOK]
@@ -728,6 +797,68 @@ test("transform evicts the larger output first when entries share the same last 
 
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(COLD_OUTPUT_BYTES))
   assert.ok(toolPartAt(bundle.messages[0], 1).state.output.startsWith(TOMBSTONE_MARKER))
+})
+
+test("transform defers a reloaded subject past its unfaulted sibling when both candidates tie on recency", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+  await evictAndReload(hooks, FAULT_ORDER_RELOADED_PATH)
+
+  const bundle = await runFaultContest(
+    hooks,
+    [FAULT_ORDER_RELOADED_PATH, FAULT_ORDER_SIBLING_PATH],
+    OVER_BY_ONE_TOKENS,
+  )
+
+  assertEntryTombstoned(bundle, 1)
+  assertEntryKept(bundle, 0)
+})
+
+test("transform scales the eviction deferral with the fault count when differently faulted candidates tie on recency", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  await evictAndReload(hooks, FAULT_SCALE_DOUBLE_PATH)
+  await evictAndReload(hooks, FAULT_SCALE_DOUBLE_PATH)
+  await evictAndReload(hooks, FAULT_SCALE_SINGLE_PATH)
+
+  const bundle = await runFaultContest(
+    hooks,
+    [FAULT_SCALE_DOUBLE_PATH, FAULT_SCALE_SINGLE_PATH],
+    OVER_BY_ONE_TOKENS,
+  )
+
+  assertEntryTombstoned(bundle, 1)
+  assertEntryKept(bundle, 0)
+})
+
+test("transform keeps a faulted candidate evictable past the recent window while ordering it after its unfaulted sibling", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+  await evictAndReload(hooks, FAULT_WINDOW_RELOADED_PATH)
+
+  const shallow = await runFaultContest(
+    hooks,
+    [FAULT_WINDOW_RELOADED_PATH, FAULT_WINDOW_SIBLING_PATH],
+    OVER_BY_ONE_TOKENS,
+  )
+  assertEntryTombstoned(shallow, 1)
+  assertEntryKept(shallow, 0)
+
+  const contestChars = 2 * MIN_EVICTABLE_BYTES + (RECENT_WINDOW_FILLER_MESSAGES + 2) * FILLER_TEXT_CHARS
+  await setContextLimit(
+    hooks,
+    SESSION_ID,
+    contextForDeficit(contestChars, tokensForChars(MIN_EVICTABLE_BYTES) + OVER_BY_ONE_TOKENS),
+  )
+  const deepened = faultContestBundle([FAULT_WINDOW_RELOADED_PATH, FAULT_WINDOW_SIBLING_PATH])
+  deepened.messages.push(
+    syntheticMessageFor(SESSION_ID, [textPart(textOfChars(FILLER_TEXT_CHARS))]),
+    syntheticMessageFor(SESSION_ID, [textPart(textOfChars(FILLER_TEXT_CHARS))]),
+  )
+  await runTransform(hooks, deepened)
+  assertEntryTombstoned(deepened, 0)
+  assertEntryTombstoned(deepened, 1)
 })
 
 test("transform protects a path output refreshed by a later tool call on the same path", async () => {
@@ -3934,6 +4065,126 @@ test("context_stats forgets the oldest evicted subject past the hundred subject 
   await runTransform(hooks, bundle)
 
   assert.equal(countersOf(await readStats(hooks, SESSION_ID)).postEvictionTouches, 1)
+})
+
+test("transform credits a subject's fault from both a reload and a post eviction appearance and defers it past single source subjects", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const bundle = buildBundle([
+    [pathToolPart(FAULT_CREDIT_RELOADED_PATH, MIN_EVICTABLE_BYTES), pathToolPart(FAULT_CREDIT_SIBLING_PATH, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+  assert.equal(await readEvicted(hooks, FAULT_CREDIT_RELOADED_PATH, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+  await evictAndReload(hooks, FAULT_CREDIT_SINGLE_HIT_PATH)
+
+  bundle.messages.push(
+    syntheticMessageFor(SESSION_ID, [
+      pathToolPart(FAULT_CREDIT_RELOADED_PATH, APPEARANCE_ONLY_OUTPUT_BYTES),
+      pathToolPart(FAULT_CREDIT_SIBLING_PATH, APPEARANCE_ONLY_OUTPUT_BYTES),
+    ]),
+  )
+  await runTransform(hooks, bundle)
+  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).postEvictionTouches, 2)
+
+  const touchContest = await runFaultContest(
+    hooks,
+    [FAULT_CREDIT_SIBLING_PATH, FAULT_CREDIT_UNFAULTED_PATH],
+    OVER_BY_ONE_TOKENS,
+  )
+  assertEntryTombstoned(touchContest, 1)
+  assertEntryKept(touchContest, 0)
+
+  const accumulationContest = await runFaultContest(
+    hooks,
+    [FAULT_CREDIT_RELOADED_PATH, FAULT_CREDIT_SINGLE_HIT_PATH],
+    OVER_BY_ONE_TOKENS,
+  )
+  assertEntryTombstoned(accumulationContest, 1)
+  assertEntryKept(accumulationContest, 0)
+})
+
+test("context_stats counts one post eviction touch when a single bash appearance matches two evicted subjects", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const hooks = await loadPluginHooksWith({ metricsLog: true, metricsPath: metricsLogPathIn(metricsDir) })
+    await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+    const bundle = buildBundle([
+      [pathToolPart(FAULT_INVARIANCE_FIRST_PATH, MIN_EVICTABLE_BYTES), pathToolPart(FAULT_INVARIANCE_SECOND_PATH, MIN_EVICTABLE_BYTES)],
+      ...fillerMessages(),
+    ])
+    await runTransform(hooks, bundle)
+
+    bundle.messages.push(
+      syntheticMessageFor(SESSION_ID, [
+        bashToolPart(
+          `${FAULT_INVARIANCE_COMMAND_PREFIX}${FAULT_INVARIANCE_FIRST_PATH} ${FAULT_INVARIANCE_SECOND_PATH}`,
+          APPEARANCE_ONLY_OUTPUT_BYTES,
+        ),
+      ]),
+    )
+    await runTransform(hooks, bundle)
+
+    assert.equal(countersOf(await readStats(hooks, SESSION_ID)).postEvictionTouches, 1)
+    const lines = metricsLinesIn(metricsLogPathIn(metricsDir))
+    assert.equal(lines.length, 2)
+    assert.equal(lines[1].postEvictionTouchesThisRun, 1)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("the fault map forgets the least recently faulted subject past its bound and a fresh fault refreshes a subject's recency", async () => {
+  const hooks = await loadPluginHooks()
+  await runFaultBoundCycles(hooks)
+  // The 257th distinct fault trims subject 0; re-faulting subject 250
+  // refreshes its recency, so the 258th fault trims subject 1 instead.
+  assert.equal(
+    await readEvicted(hooks, faultMapBoundSubject(FAULT_MAP_REFRESHED_INDEX), SESSION_ID),
+    outputOfBytes(MIN_EVICTABLE_BYTES),
+  )
+  await evictAndReloadEach(hooks, [faultMapBoundSubject(FAULT_MAP_NEW_INDEX)])
+
+  const boundContest = await runFaultContest(
+    hooks,
+    [faultMapBoundSubject(FAULT_MAP_DEFERRED_INDEX), faultMapBoundSubject(FAULT_MAP_TRIMMED_INDEX)],
+    OVER_BY_ONE_TOKENS,
+  )
+  assertEntryTombstoned(boundContest, 1)
+  assertEntryKept(boundContest, 0)
+
+  const refreshContest = await runFaultContest(
+    hooks,
+    [faultMapBoundSubject(FAULT_MAP_REFRESHED_INDEX), faultMapBoundSubject(FAULT_MAP_REFRESH_TRIMMED_INDEX)],
+    OVER_BY_ONE_TOKENS,
+  )
+  assertEntryTombstoned(refreshContest, 1)
+  assertEntryKept(refreshContest, 0)
+})
+
+test("a refresh at the fault map bound preserves bystander subjects' faults so a once faulted subject defers an unfaulted peer", async () => {
+  const hooks = await loadPluginHooks()
+  await runFaultBoundCycles(hooks)
+  // The refresh is the setup's last faulting event on purpose: the next
+  // insertion would trim subject 1 (or refill a freed slot) and heal the
+  // observable state, so contesting subject 1 now isolates whether a
+  // refresh at the bound preserves its neighbors' counts. Subject 1 keeps
+  // one fault and defers count-0 subject 0; a refresh that drops bystander
+  // counts ties the contest at zero and evicts first-listed subject 1.
+  assert.equal(
+    await readEvicted(hooks, faultMapBoundSubject(FAULT_MAP_REFRESHED_INDEX), SESSION_ID),
+    outputOfBytes(MIN_EVICTABLE_BYTES),
+  )
+
+  const bystanderContest = await runFaultContest(
+    hooks,
+    [faultMapBoundSubject(FAULT_MAP_REFRESH_TRIMMED_INDEX), faultMapBoundSubject(FAULT_MAP_TRIMMED_INDEX)],
+    OVER_BY_ONE_TOKENS,
+  )
+  assertEntryKept(bystanderContest, 0)
+  assertEntryTombstoned(bystanderContest, 1)
 })
 
 test("context_stats counts dedup tombstones without counting evictions and stays incremental across repeated transforms", async () => {
@@ -7215,6 +7466,35 @@ test("manual mode with watermarkTokens and no captured budget still reports the 
   assert.equal(dryRun.wouldEvictBytes, DRY_RUN_EXPECTED_BYTES)
 })
 
+test("manual mode previews the fault adjusted candidate order in the dry run when the colder candidate was reloaded", async () => {
+  const hooks = await loadPluginHooksWith({
+    manualMode: true,
+    watermarkTokens: DRY_RUN_WATERMARK_TOKENS,
+    userFenceEviction: { enabled: true, minBlockLines: FENCE_TEST_THRESHOLD },
+  })
+  const faultFenceBlock = fenceBlockText(FENCE_NO_LANGUAGE, [
+    FAULT_DRY_RUN_RELOADED_PATH,
+    ...fenceContentLines(FENCE_TEST_THRESHOLD, "faultfence"),
+  ])
+  await runTransform(hooks, userFenceBundle(`${FENCE_PROSE_BEFORE}\n${faultFenceBlock}\n${FENCE_PROSE_AFTER}`))
+  assert.equal(await readEvicted(hooks, FAULT_DRY_RUN_RELOADED_PATH, SESSION_ID), `${faultFenceBlock}\n`)
+
+  const bundle = buildBundle([
+    [pathToolPart(FAULT_DRY_RUN_RELOADED_PATH, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(2),
+    [pathToolPart(FAULT_DRY_RUN_WARM_PATH, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  const dryRun = (await readStats(hooks, SESSION_ID)).dryRun as Record<string, unknown>
+  assert.ok(dryRun !== undefined)
+  assert.equal(dryRun.wouldEvictCount, 1)
+  assert.deepEqual(dryRun.wouldEvictSubjects, [FAULT_DRY_RUN_WARM_PATH])
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(toolPartAt(bundle.messages[3], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+})
+
 test("the same dry-run session evicts for real once manual mode is off", async () => {
   const hooks = await loadPluginHooksWith({ watermarkTokens: DRY_RUN_WATERMARK_TOKENS })
   await setContextLimit(hooks, SESSION_ID, LARGE_DEFAULT_CONTEXT_TOKENS)
@@ -7888,6 +8168,32 @@ test("resumed session continues its lifetime counters across a restart in the me
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)
+  }
+})
+
+test("a restart drops fault feedback so a previously reloaded subject loses its eviction deferral", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const first = await loadPluginHooksWith({ metricsLog: true, metricsPath })
+    await setContextLimit(first, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+    await evictAndReload(first, FAULT_RESTART_RELOADED_PATH)
+    // The next transform flushes the reload into the persisted totals, so
+    // the restarted instance's stashHits figure proves rehydration happened
+    // and the deferral loss is fault-specific, not a missing record.
+    await runTransform(first, buildBundle(fillerMessages()))
+
+    const restarted = await loadPluginHooksWith({ metricsLog: true, metricsPath })
+    const contest = await runFaultContest(
+      restarted,
+      [FAULT_RESTART_RELOADED_PATH, FAULT_RESTART_PEER_PATH],
+      OVER_BY_ONE_TOKENS,
+    )
+    assertEntryTombstoned(contest, 0)
+    assertEntryKept(contest, 1)
+    assert.equal(countersOf(await readStats(restarted, SESSION_ID)).stashHits, 1)
+  } finally {
+    cleanupMetricsDir(metricsDir)
   }
 })
 
