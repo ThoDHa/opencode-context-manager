@@ -69,23 +69,23 @@ const DEFAULT_HINT_SESSIONS = 8
 const RECALL_TOOL_NAME = "recall"
 const RECALL_ARG_NAME = "subject"
 const RECALL_TOOL_DESCRIPTION =
-  "Return the full original content of anything the Context Manager evicted and stashed: a tool call output or a fenced code block from an old user message. Pass the subject exactly as it appears in the eviction notice."
+  "Return the full original content of anything the Context Manager evicted and stored in the page store: a tool call output or a fenced code block from an old user message. Pass the subject exactly as it appears in the eviction notice."
 const RECALL_ARG_DESCRIPTION = "The subject exactly as named in the eviction notice"
 const RECALL_ARG_SCHEMA_TYPE = "string"
 const RECALL_ARG_SCHEMA: Record<string, string> = {
   type: RECALL_ARG_SCHEMA_TYPE,
   description: RECALL_ARG_DESCRIPTION,
 }
-const RECALL_POINTER_LEAD = " Evicted output stashed; reload it with"
+const RECALL_POINTER_LEAD = " Evicted output stored in the page store; recall it with"
 const DIGEST_POINTER_LEAD = " Output digest: "
 const DIGEST_POINTER_TAIL = "."
 const STASH_MARKER = "[ctx-stash]"
-const STASH_OLDER_LEAD = "older matches for subject"
+const STASH_OLDER_LEAD = "older pages in this session for subject"
 const STASH_MESSAGE_LABEL = "at message"
 const STASH_MATCH_SEPARATOR = "; "
-const STASH_MISS_LEAD = "no stashed output for subject"
-const STASH_MISS_HINT = "only outputs evicted during this session are stashed"
-const STASH_OCCUPANCY_LEAD = "stash holds"
+const STASH_MISS_LEAD = "no page in this session for subject"
+const STASH_MISS_HINT = "only pages evicted during this session are stored"
+const STASH_OCCUPANCY_LEAD = "session page store holds"
 const STASH_OCCUPANCY_EMPTY_TAIL = "nothing from this session"
 const STASH_OCCUPANCY_ENTRY_LABEL = "entry"
 const STASH_OCCUPANCY_ENTRIES_LABEL = "entries"

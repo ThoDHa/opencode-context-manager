@@ -122,14 +122,14 @@ const SYSTEM_GUARD_HINT_PATH = "/data/system-guard.txt"
 const SYSTEM_GUARD_NON_ARRAY_VALUE = "not a block array"
 const RECALL_TOOL_NAME = "recall"
 const TOOL_MAP_KEY = "tool"
-const RECALL_POINTER_LEAD = " Evicted output stashed; reload it with"
+const RECALL_POINTER_LEAD = " Evicted output stored in the page store; recall it with"
 const STASH_MARKER = "[ctx-stash]"
-const STASH_OLDER_LEAD = "older matches for subject"
+const STASH_OLDER_LEAD = "older pages in this session for subject"
 const STASH_MESSAGE_LABEL = "at message"
 const STASH_MATCH_SEPARATOR = "; "
-const STASH_MISS_LEAD = "no stashed output for subject"
-const STASH_MISS_HINT = "only outputs evicted during this session are stashed"
-const STASH_OCCUPANCY_LEAD = "stash holds"
+const STASH_MISS_LEAD = "no page in this session for subject"
+const STASH_MISS_HINT = "only pages evicted during this session are stored"
+const STASH_OCCUPANCY_LEAD = "session page store holds"
 const STASH_OCCUPANCY_EMPTY_TAIL = "nothing from this session"
 const STASH_OCCUPANCY_ENTRY_LABEL = "entry"
 const STASH_OCCUPANCY_ENTRIES_LABEL = "entries"
@@ -2117,7 +2117,7 @@ test("recall appends a populated occupancy line with alphabetical categories and
     await recallTool(hooks, OCCUPANCY_MISS_SUBJECT, SESSION_ID),
     stashMissFor(
       OCCUPANCY_MISS_SUBJECT,
-      "[ctx-stash] stash holds 6 entries across 6 subjects: bash 2, glob 1, grep 1, read 2; oldest at message 0, newest at message 5.",
+      "[ctx-stash] session page store holds 6 entries across 6 subjects: bash 2, glob 1, grep 1, read 2; oldest at message 0, newest at message 5.",
     ),
   )
 })
@@ -2136,7 +2136,7 @@ test("recall reports the single message bound on a miss whose stashed entries al
     await recallTool(hooks, OCCUPANCY_MISS_SUBJECT, SESSION_ID),
     stashMissFor(
       OCCUPANCY_MISS_SUBJECT,
-      "[ctx-stash] stash holds 1 entry across 1 subject: read 1; at message 0.",
+      "[ctx-stash] session page store holds 1 entry across 1 subject: read 1; at message 0.",
     ),
   )
 })
@@ -2157,7 +2157,7 @@ test("recall states the stash holds nothing when the session stash exists but is
 
   assert.equal(
     await recallTool(hooks, OCCUPANCY_MISS_SUBJECT, SESSION_ID),
-    stashMissFor(OCCUPANCY_MISS_SUBJECT, "[ctx-stash] stash holds nothing from this session."),
+    stashMissFor(OCCUPANCY_MISS_SUBJECT, "[ctx-stash] session page store holds nothing from this session."),
   )
 })
 
@@ -2197,7 +2197,7 @@ test("recall caps the occupancy category list at five categories with an overflo
     await recallTool(hooks, OCCUPANCY_MISS_SUBJECT, SESSION_ID),
     stashMissFor(
       OCCUPANCY_MISS_SUBJECT,
-      "[ctx-stash] stash holds 17 entries across 17 subjects: bash 3, fence 2, glob 3, grep 3, read 3, +1 more; oldest at message 0, newest at message 14.",
+      "[ctx-stash] session page store holds 17 entries across 17 subjects: bash 3, fence 2, glob 3, grep 3, read 3, +1 more; oldest at message 0, newest at message 14.",
     ),
   )
 })
@@ -2219,7 +2219,7 @@ test("recall categorizes fence stashed entries under the fence label alongside t
     await recallTool(hooks, OCCUPANCY_MISS_SUBJECT, SESSION_ID),
     stashMissFor(
       OCCUPANCY_MISS_SUBJECT,
-      "[ctx-stash] stash holds 3 entries across 3 subjects: fence 1, read 2; oldest at message 0, newest at message 1.",
+      "[ctx-stash] session page store holds 3 entries across 3 subjects: fence 1, read 2; oldest at message 0, newest at message 1.",
     ),
   )
 })
@@ -3967,8 +3967,8 @@ test("describe counts the eviction reclaimed bytes stash entry and last run defi
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
-    processedContextBytes: 476,
-    processedContextTokens: tokensForChars(476),
+    processedContextBytes: 493,
+    processedContextTokens: tokensForChars(493),
   })
   assert.deepEqual(stats.stash, { entries: 1, capacity: STASH_LIMIT })
   assert.deepEqual(stats.lastRun, {
@@ -3990,8 +3990,8 @@ test("describe derives the eviction token-savings estimate from the reclaimed by
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
-    processedContextBytes: 476,
-    processedContextTokens: tokensForChars(476),
+    processedContextBytes: 493,
+    processedContextTokens: tokensForChars(493),
   })
 })
 
@@ -4032,8 +4032,8 @@ test("describe counts stash hits and misses from recall and leaves invalid subje
     bytesReclaimed: MIN_EVICTABLE_BYTES,
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
     stashMisses: 1,
-    processedContextBytes: 474,
-    processedContextTokens: tokensForChars(474),
+    processedContextBytes: 491,
+    processedContextTokens: tokensForChars(491),
   })
 
   assert.equal(await recallTool(hooks, INVALID_SUBJECT_VALUE, SESSION_ID), invalidSubjectMissFor("number"))
@@ -4051,8 +4051,8 @@ test("describe counts stash hits and misses from recall and leaves invalid subje
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
     stashHits: 1,
     stashMisses: 1,
-    processedContextBytes: 474,
-    processedContextTokens: tokensForChars(474),
+    processedContextBytes: 491,
+    processedContextTokens: tokensForChars(491),
   })
 })
 
@@ -4407,8 +4407,8 @@ test("metrics log appends one eventful jsonl line with expected fields and nothi
       evictions: 1,
       bytesReclaimed: MIN_EVICTABLE_BYTES,
       evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
-      processedContextBytes: 468,
-      processedContextTokens: tokensForChars(468),
+      processedContextBytes: 485,
+      processedContextTokens: tokensForChars(485),
     })
 
     await runTransform(hooks, bundle)
@@ -4522,8 +4522,8 @@ test("metrics log records stash reads since the last line on the next transform 
       bytesReclaimed: MIN_EVICTABLE_BYTES,
       evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
       stashHits: 1,
-      processedContextBytes: 964,
-      processedContextTokens: tokensForChars(964),
+      processedContextBytes: 998,
+      processedContextTokens: tokensForChars(998),
     })
 
     await runTransform(hooks, bundle)
@@ -4590,8 +4590,8 @@ test("describe keeps metrics isolated between two sessions", async () => {
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
-    processedContextBytes: 476,
-    processedContextTokens: tokensForChars(476),
+    processedContextBytes: 493,
+    processedContextTokens: tokensForChars(493),
   })
   const statsB = await readStats(hooks, SESSION_ID_B)
   assert.equal(statsB.session, SESSION_ID_B)
@@ -4600,8 +4600,8 @@ test("describe keeps metrics isolated between two sessions", async () => {
     evictions: STATS_ISOLATION_B_EVICTED_COUNT,
     bytesReclaimed: STATS_ISOLATION_B_EVICTED_COUNT * THREE_ENTRY_OUTPUT_BYTES,
     evictionTokensSaved: tokensForChars(STATS_ISOLATION_B_EVICTED_COUNT * THREE_ENTRY_OUTPUT_BYTES),
-    processedContextBytes: 3916,
-    processedContextTokens: tokensForChars(3916),
+    processedContextBytes: 3950,
+    processedContextTokens: tokensForChars(3950),
   })
 })
 
@@ -4780,8 +4780,8 @@ test("metrics log stays byte identical at exactly the rotation cap and rotates w
       bytesReclaimed: MIN_EVICTABLE_BYTES,
       evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
       stashHits: 1,
-      processedContextBytes: 980,
-      processedContextTokens: tokensForChars(980),
+      processedContextBytes: 1014,
+      processedContextTokens: tokensForChars(1014),
     })
   } finally {
     cleanupMetricsDir(metricsDir)
@@ -5055,8 +5055,8 @@ test("live state snapshot records eviction totals stash occupancy and an empty h
       evictions: 1,
       bytesReclaimed: MIN_EVICTABLE_BYTES,
       evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
-      processedContextBytes: 478,
-      processedContextTokens: tokensForChars(478),
+      processedContextBytes: 495,
+      processedContextTokens: tokensForChars(495),
     })
     assert.deepEqual(snapshot.stash, { entries: 1, capacity: STASH_LIMIT })
     assert.deepEqual(snapshot.hotSubjects, [])
@@ -5426,8 +5426,8 @@ test("describe leaves reasoning counters at zero when a pressured session has no
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
-    processedContextBytes: 480,
-    processedContextTokens: tokensForChars(480),
+    processedContextBytes: 497,
+    processedContextTokens: tokensForChars(497),
   })
 })
 
@@ -5839,8 +5839,8 @@ test("transform ignores a non array attachments field when evicting and leaves t
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
-    processedContextBytes: 498,
-    processedContextTokens: tokensForChars(498),
+    processedContextBytes: 515,
+    processedContextTokens: tokensForChars(515),
   })
   assert.equal(await recallTool(hooks, NON_ARRAY_ATTACHMENTS_PATH, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
 })
@@ -5960,8 +5960,8 @@ test("describe counts attachment payload characters in bytesReclaimed for an att
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS,
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS),
-    processedContextBytes: 493,
-    processedContextTokens: tokensForChars(493),
+    processedContextBytes: 510,
+    processedContextTokens: tokensForChars(510),
   })
 })
 
@@ -5990,8 +5990,8 @@ test("metrics log records attachmentBytes on each evicted entry and adds the pay
       evictions: 1,
       bytesReclaimed: MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS,
       evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS),
-      processedContextBytes: 493,
-      processedContextTokens: tokensForChars(493),
+      processedContextBytes: 510,
+      processedContextTokens: tokensForChars(510),
     })
   } finally {
     cleanupMetricsDir(metricsDir)
@@ -6303,8 +6303,8 @@ test("describe counts fence evictions in a distinct fenceEvicted counter without
     fenceEvicted: 1,
     bytesReclaimed: block.length + FENCE_TRAILING_NEWLINE_CHARS,
     evictionTokensSaved: tokensForChars(block.length + FENCE_TRAILING_NEWLINE_CHARS),
-    processedContextBytes: 269,
-    processedContextTokens: tokensForChars(269),
+    processedContextBytes: 286,
+    processedContextTokens: tokensForChars(286),
   })
   assert.deepEqual(stats.options.userFenceEviction, { enabled: true, minBlockLines: FENCE_DEFAULT_MIN_BLOCK_LINES })
   assert.deepEqual(stats.stash, { entries: 1, capacity: STASH_LIMIT })
@@ -6329,8 +6329,8 @@ test("metrics log records a fence only run as eventful with the fenceEvictedThis
       fenceEvicted: 1,
       bytesReclaimed: block.length + FENCE_TRAILING_NEWLINE_CHARS,
       evictionTokensSaved: tokensForChars(block.length + FENCE_TRAILING_NEWLINE_CHARS),
-      processedContextBytes: 269,
-      processedContextTokens: tokensForChars(269),
+      processedContextBytes: 286,
+      processedContextTokens: tokensForChars(286),
     })
   } finally {
     cleanupMetricsDir(metricsDir)
@@ -8140,7 +8140,7 @@ const withCounterDeltas = (baseline: Record<string, number>, deltas: Record<stri
 // The second sitting reruns the first sitting's five transforms with
 // same-shaped bundles, so its processed-context accumulation repeats the
 // first sitting's figure; withCounterDeltas derives the token total.
-const REHYDRA_SITTING_PROCESSED_CHARS = 4024
+const REHYDRA_SITTING_PROCESSED_CHARS = 4058
 
 const SECOND_SITTING_COUNTER_DELTAS = {
   evictions: 1,
@@ -8277,7 +8277,7 @@ test("resumed session falls back to the metrics log tail when its snapshot is mi
     const secondSittingHooks = await loadPluginHooksWithLiveState(emptyStateDir, { metricsLog: true, metricsPath })
     await runEvictionTransform(secondSittingHooks, SESSION_ID, REHYDRA_EVICTION_SUBJECT_B)
 
-    const expected = withCounterDeltas(baseline, { evictions: 1, bytesReclaimed: MIN_EVICTABLE_BYTES, processedContextBytes: 496 })
+    const expected = withCounterDeltas(baseline, { evictions: 1, bytesReclaimed: MIN_EVICTABLE_BYTES, processedContextBytes: 513 })
     const lines = metricsLinesForSession(metricsPath, SESSION_ID)
     assert.deepEqual(lines[lines.length - 1].totals, expected)
     assert.deepEqual(snapshotBodyOf(emptyStateDir, SESSION_ID).snapshot.totals, expected)
@@ -8301,8 +8301,8 @@ test("resumed session with neither snapshot nor metrics log seeds zeroed counter
       evictions: 1,
       bytesReclaimed: MIN_EVICTABLE_BYTES,
       evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
-      processedContextBytes: 496,
-      processedContextTokens: tokensForChars(496),
+      processedContextBytes: 513,
+      processedContextTokens: tokensForChars(513),
     })
   } finally {
     cleanupMetricsDir(metricsDir)
