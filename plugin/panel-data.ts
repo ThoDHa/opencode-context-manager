@@ -262,8 +262,8 @@ export type PanelSnapshot = {
 export type SessionPanel = {
   session: string
   runs: number
-  budgetTokens: number | null
-  budgetSource: string
+  contextLimitTokens: number | null
+  contextLimitSource: string
   lastRun: { estimatedTokens: number; watermarkTokens: number | null; deficitTokens: number | null }
   totals: PanelTotals
   stashReads: number
@@ -662,8 +662,8 @@ export const snapshotSessionPanel = (
   return {
     session: sessionID,
     runs: history?.runs ?? 0,
-    budgetTokens: logNewer !== undefined ? logNewer.budgetTokens : snapshot.modelContextTokens,
-    budgetSource: logNewer !== undefined ? logNewer.budgetSource : snapshot.modelContextTokensSource,
+    contextLimitTokens: logNewer !== undefined ? logNewer.contextLimitTokens : snapshot.modelContextTokens,
+    contextLimitSource: logNewer !== undefined ? logNewer.contextLimitSource : snapshot.modelContextTokensSource,
     lastRun: logNewer !== undefined ? logNewer.lastRun : snapshot.lastRun,
     totals,
     stashReads: totals.stashHits + totals.stashMisses,
@@ -698,8 +698,8 @@ export const sessionPanelData = (
   return {
     session: sessionID,
     runs: sessionLines.length,
-    budgetTokens: last.modelContextTokens,
-    budgetSource: last.modelContextTokensSource,
+    contextLimitTokens: last.modelContextTokens,
+    contextLimitSource: last.modelContextTokensSource,
     lastRun: {
       estimatedTokens: last.estimatedTokens,
       watermarkTokens: last.watermarkTokens,
@@ -841,10 +841,10 @@ const capitalizeLabel = (label: string): string =>
   label.length === 0 ? label : `${label[0].toUpperCase()}${label.slice(1)}`
 
 const budgetText = (current: SessionPanel): string => {
-  const label = budgetSourceLabel(current.budgetSource)
-  return current.budgetTokens === null
+  const label = budgetSourceLabel(current.contextLimitSource)
+  return current.contextLimitTokens === null
     ? `budget: ${label}`
-    : `budget: ${formatTokenCount(current.budgetTokens)} tokens (${label})`
+    : `budget: ${formatTokenCount(current.contextLimitTokens)} tokens (${label})`
 }
 
 const lastRunText = (current: SessionPanel): string => {
@@ -922,7 +922,7 @@ const SUBAGENT_AGENTS_UNIT = "agents"
 const SUBAGENT_NO_DATA_TEXT = "no data yet"
 
 const sidebarBudgetText = (current: SessionPanel): string =>
-  current.budgetTokens === null ? SIDEBAR_BUDGET_INACTIVE_TEXT : `${SIDEBAR_BUDGET_LABEL}: ${formatTokenCount(current.budgetTokens)}`
+  current.contextLimitTokens === null ? SIDEBAR_BUDGET_INACTIVE_TEXT : `${SIDEBAR_BUDGET_LABEL}: ${formatTokenCount(current.contextLimitTokens)}`
 
 const sidebarWatermarkText = (current: SessionPanel): string => {
   if (current.lastRun.watermarkTokens === null || current.lastRun.deficitTokens === null) return SIDEBAR_WATERMARK_MISSING_TEXT

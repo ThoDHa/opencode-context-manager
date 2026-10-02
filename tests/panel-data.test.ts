@@ -652,8 +652,8 @@ test("sessionPanelData reports the budget, source, and last run from the session
   const panel = sessionPanelData(lines, SESSION_A)
 
   assert.ok(panel !== undefined)
-  assert.equal(panel.budgetTokens, BUDGET_TOKENS_MODEL)
-  assert.equal(panel.budgetSource, DEFAULT_BUDGET_SOURCE)
+  assert.equal(panel.contextLimitTokens, BUDGET_TOKENS_MODEL)
+  assert.equal(panel.contextLimitSource, DEFAULT_BUDGET_SOURCE)
   assert.equal(panel.runs, PARSED_LINE_COUNT)
   assert.equal(panel.lastRun.estimatedTokens, ESTIMATED_TOKENS)
   assert.equal(panel.lastRun.deficitTokens, DEFICIT_TOKENS)
@@ -871,8 +871,8 @@ test("loadPanelData prefers the live snapshot for the session block and keeps lo
     assert.equal(data.activeSession, SESSION_A)
     assert.ok(data.current !== undefined)
     assert.equal(data.current.session, SESSION_A)
-    assert.equal(data.current.budgetTokens, BUDGET_TOKENS_MODEL)
-    assert.equal(data.current.budgetSource, MODEL_BUDGET_SOURCE)
+    assert.equal(data.current.contextLimitTokens, BUDGET_TOKENS_MODEL)
+    assert.equal(data.current.contextLimitSource, MODEL_BUDGET_SOURCE)
     assert.equal(data.current.manualMode, true)
     assert.deepEqual(data.current.lastRun, {
       estimatedTokens: ESTIMATED_TOKENS,
@@ -914,7 +914,7 @@ test("loadPanelData lets the session's newer log line win the fields it carries 
 
     assert.equal(data.error, undefined)
     assert.ok(data.current !== undefined)
-    assert.equal(data.current.budgetTokens, BUDGET_TOKENS_SMALL)
+    assert.equal(data.current.contextLimitTokens, BUDGET_TOKENS_SMALL)
     assert.equal(data.current.lastRun.estimatedTokens, SECOND_LINE_ESTIMATED)
     assert.deepEqual(data.current.totals, logLineNewerThanSnapshot().totals)
     assert.equal(data.current.manualMode, true)
@@ -938,7 +938,7 @@ test("loadPanelData keeps the snapshot's fields when the newest log line shares 
 
     assert.equal(data.error, undefined)
     assert.ok(data.current !== undefined)
-    assert.equal(data.current.budgetTokens, BUDGET_TOKENS_MODEL)
+    assert.equal(data.current.contextLimitTokens, BUDGET_TOKENS_MODEL)
     assert.equal(data.current.lastRun.estimatedTokens, ESTIMATED_TOKENS)
     assert.deepEqual(data.current.totals, makeTotals())
     assert.equal(data.current.manualMode, true)
@@ -972,7 +972,7 @@ test("loadPanelData renders the snapshot block with empty history when no metric
     assert.equal(data.error, undefined)
     assert.ok(data.current !== undefined)
     assert.equal(data.current.session, SESSION_A)
-    assert.equal(data.current.budgetTokens, BUDGET_TOKENS_MODEL)
+    assert.equal(data.current.contextLimitTokens, BUDGET_TOKENS_MODEL)
     assert.equal(data.current.manualMode, false)
     assert.deepEqual(data.current.totals, makeTotals())
     assert.deepEqual(data.current.stash, { entries: SNAPSHOT_STASH_ENTRIES, capacity: SNAPSHOT_STASH_CAPACITY })
@@ -993,7 +993,7 @@ test("loadPanelData falls back to the metrics log when no snapshot exists for th
 
     assert.equal(data.error, undefined)
     assert.ok(data.current !== undefined)
-    assert.equal(data.current.budgetTokens, BUDGET_TOKENS_SMALL)
+    assert.equal(data.current.contextLimitTokens, BUDGET_TOKENS_SMALL)
     assert.equal(data.current.manualMode, undefined)
     assert.equal(data.current.stash, undefined)
     assert.equal(data.current.hotSubjects, undefined)
@@ -1026,7 +1026,7 @@ test("loadPanelData degrades to the metrics log when the snapshot is malformed",
 
     assert.equal(data.error, undefined)
     assert.ok(data.current !== undefined)
-    assert.equal(data.current.budgetTokens, BUDGET_TOKENS_SMALL)
+    assert.equal(data.current.contextLimitTokens, BUDGET_TOKENS_SMALL)
     assert.equal(data.current.manualMode, undefined)
     assert.equal(data.current.stash, undefined)
   })
@@ -1044,7 +1044,7 @@ test("loadPanelData falls back to the metrics log when the snapshot file cannot 
 
     assert.equal(data.error, undefined)
     assert.ok(data.current !== undefined)
-    assert.equal(data.current.budgetTokens, BUDGET_TOKENS_SMALL)
+    assert.equal(data.current.contextLimitTokens, BUDGET_TOKENS_SMALL)
     assert.equal(data.current.manualMode, undefined)
     assert.equal(data.current.stash, undefined)
   })
@@ -1062,7 +1062,7 @@ test("loadPanelData serves the snapshot block alongside the log warning when the
 
     assert.ok(data.error !== undefined)
     assert.ok(data.current !== undefined)
-    assert.equal(data.current.budgetTokens, BUDGET_TOKENS_MODEL)
+    assert.equal(data.current.contextLimitTokens, BUDGET_TOKENS_MODEL)
     assert.equal(data.current.manualMode, true)
     assert.deepEqual(data.current.totals, makeTotals())
     assert.deepEqual(data.current.stash, { entries: SNAPSHOT_STASH_ENTRIES, capacity: SNAPSHOT_STASH_CAPACITY })
@@ -1089,7 +1089,7 @@ test("loadPanelData ignores a snapshot file whose recorded session does not matc
 
     assert.equal(data.error, undefined)
     assert.ok(data.current !== undefined)
-    assert.equal(data.current.budgetTokens, BUDGET_TOKENS_SMALL)
+    assert.equal(data.current.contextLimitTokens, BUDGET_TOKENS_SMALL)
     assert.equal(data.current.manualMode, undefined)
   })
 })
