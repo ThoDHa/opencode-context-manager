@@ -236,8 +236,8 @@ export type PanelTotals = { [K in TotalsKey]: number }
 export type PanelMetricsLine = {
   session: string
   ts: string
-  modelContextTokens: number | null
-  modelContextTokensSource: string
+  contextLimit: number | null
+  contextLimitSource: string
   estimatedTokens: number
   watermarkTokens: number | null
   deficitTokens: number | null
@@ -245,17 +245,17 @@ export type PanelMetricsLine = {
   totals: PanelTotals
 }
 
-export type PanelCheckpointStash = { entries: number; capacity: number }
+export type PanelCheckpointPageStore = { entries: number; capacity: number }
 
 export type PanelCheckpoint = {
   ts: string
   session: string
   manualMode: boolean
-  modelContextTokens: number | null
-  modelContextTokensSource: string
+  contextLimit: number | null
+  contextLimitSource: string
   lastRun: { estimatedTokens: number; watermarkTokens: number | null; deficitTokens: number | null }
   totals: PanelTotals
-  stash: PanelCheckpointStash
+  pageStore: PanelCheckpointPageStore
   hotSubjects: string[]
 }
 
@@ -266,10 +266,10 @@ export type SessionPanel = {
   contextLimitSource: string
   lastRun: { estimatedTokens: number; watermarkTokens: number | null; deficitTokens: number | null }
   totals: PanelTotals
-  stashReads: number
+  recalls: number
   recentEvictions: PanelEvictedEntry[]
   manualMode?: boolean
-  stash?: PanelCheckpointStash
+  pageStore?: PanelCheckpointPageStore
   hotSubjects?: string[]
 }
 
@@ -279,8 +279,8 @@ export type GlobalTotals = {
   evictions: number
   bytesReclaimed: number
   deduped: number
-  postEvictionTouches: number
-  stashReads: number
+  faults: number
+  recalls: number
 }
 
 export type SubagentPanelEntry = { id: string; panel: SessionPanel | undefined }
@@ -340,19 +340,18 @@ const parseEvictedEntries = (value: unknown): PanelEvictedEntry[] | undefined =>
 }
 
 // Every totals key is required and must be a finite number, with a
-// transitional exception: `dedupedBytes` postdates the other raw counters,
-// and rotation now holds weeks of records written before it existed, so an
-// absent `dedupedBytes` defaults to 0 while a present non-finite value
-// still rejects the record. `processedContextBytes` and
-// `processedContextTokens` join the same list: a brand-new from-zero
-// counter carries no legacy meaning to distrust, so pre-upgrade records
-// keep parsing with truthful zeros and the totals begin accumulating from
-// the upgrade forward.
-const TRANSITIONAL_ABSENT_ZERO_KEYS: readonly TotalsKey[] = [
-  "dedupedBytes",
-  "processedContextBytes",
-  "processedContextTokens",
-]
+// transitional exception: `processedContextBytes` and
+// `processedContextTokens` postdate the other raw counters, and rotation
+// holds weeks of records written before they existed, so absent
+// processed-context keys default to 0 while a present non-finite value
+// still rejects the record: a brand-new from-zero counter carries no
+// legacy meaning to distrust, so pre-upgrade records keep parsing with
+// truthful zeros and the totals begin accumulating from the upgrade
+// forward. The 2026-10-02 renamed keys (recallHits, recallMisses,
+// pagesDropped, faults, dedupedBytesUnique) do NOT join this list: their
+// absence marks the reset boundary, so records predating it are rejected
+// wholesale and such sessions go dark until their next eventful run.
+const TRANSITIONAL_ABSENT_ZERO_KEYS: readonly TotalsKey[] = ["processedContextBytes", "processedContextTokens"]
 
 const parseTotals = (value: unknown): PanelTotals | undefined => {
   if (!isRecord(value)) return undefined
@@ -379,8 +378,8 @@ export const parseMetricsLine = (raw: string): PanelMetricsLine | undefined => {
   if (!isRecord(parsed)) return undefined
   if (typeof parsed["session"] !== "string") return undefined
   if (typeof parsed["ts"] !== "string") return undefined
-  if (!isOptionalFiniteNumber(parsed["modelContextTokens"])) return undefined
-  if (typeof parsed["modelContextTokensSource"] !== "string") return undefined
+  if (!isOptionalFiniteNumber(parsed["contextLimit"])) return undefined
+  if (typeof parsed["contextLimitSource"] !== "string") return undefined
   if (!isFiniteNumber(parsed["estimatedTokens"])) return undefined
   if (!isOptionalFiniteNumber(parsed["watermarkTokens"])) return undefined
   if (!isOptionalFiniteNumber(parsed["deficitTokens"])) return undefined
@@ -391,8 +390,8 @@ export const parseMetricsLine = (raw: string): PanelMetricsLine | undefined => {
   return {
     session: parsed["session"],
     ts: parsed["ts"],
-    modelContextTokens: parsed["modelContextTokens"],
-    modelContextTokensSource: parsed["modelContextTokensSource"],
+    contextLimit: parsed["contextLimit"],
+    contextLimitSource: parsed["contextLimitSource"],
     estimatedTokens: parsed["estimatedTokens"],
     watermarkTokens: parsed["watermarkTokens"],
     deficitTokens: parsed["deficitTokens"],
@@ -554,7 +553,7 @@ export const createMetricsLogReader = (path: string): MetricsLogReader => {
   }
 }
 
-const parseSnapshotStash = (value: unknown): PanelCheckpointStash | undefined => {
+const parseCheckpointPageStore = (value: unknown): PanelCheckpointPageStore | undefined => {
   if (!isRecord(value)) return undefined
   if (!isFiniteNumber(value["entries"])) return undefined
   if (!isFiniteNumber(value["capacity"])) return undefined
@@ -594,25 +593,25 @@ export const parseCheckpoint = (raw: string): PanelCheckpoint | undefined => {
   if (typeof parsed["ts"] !== "string") return undefined
   if (typeof parsed["session"] !== "string") return undefined
   if (typeof parsed["manualMode"] !== "boolean") return undefined
-  if (!isOptionalFiniteNumber(parsed["modelContextTokens"])) return undefined
-  if (typeof parsed["modelContextTokensSource"] !== "string") return undefined
+  if (!isOptionalFiniteNumber(parsed["contextLimit"])) return undefined
+  if (typeof parsed["contextLimitSource"] !== "string") return undefined
   const lastRun = parseSnapshotLastRun(parsed["lastRun"])
   if (lastRun === undefined) return undefined
   const totals = parseTotals(parsed["totals"])
   if (totals === undefined) return undefined
-  const stash = parseSnapshotStash(parsed["stash"])
-  if (stash === undefined) return undefined
+  const pageStore = parseCheckpointPageStore(parsed["pageStore"])
+  if (pageStore === undefined) return undefined
   const hotSubjects = parseSnapshotHotSubjects(parsed["hotSubjects"])
   if (hotSubjects === undefined) return undefined
   return {
     ts: parsed["ts"],
     session: parsed["session"],
     manualMode: parsed["manualMode"],
-    modelContextTokens: parsed["modelContextTokens"],
-    modelContextTokensSource: parsed["modelContextTokensSource"],
+    contextLimit: parsed["contextLimit"],
+    contextLimitSource: parsed["contextLimitSource"],
     lastRun,
     totals,
-    stash,
+    pageStore,
     hotSubjects,
   }
 }
@@ -662,14 +661,14 @@ export const snapshotSessionPanel = (
   return {
     session: sessionID,
     runs: history?.runs ?? 0,
-    contextLimitTokens: logNewer !== undefined ? logNewer.contextLimitTokens : snapshot.modelContextTokens,
-    contextLimitSource: logNewer !== undefined ? logNewer.contextLimitSource : snapshot.modelContextTokensSource,
+    contextLimitTokens: logNewer !== undefined ? logNewer.contextLimitTokens : snapshot.contextLimit,
+    contextLimitSource: logNewer !== undefined ? logNewer.contextLimitSource : snapshot.contextLimitSource,
     lastRun: logNewer !== undefined ? logNewer.lastRun : snapshot.lastRun,
     totals,
-    stashReads: totals.stashHits + totals.stashMisses,
+    recalls: totals.recallHits + totals.recallMisses,
     recentEvictions: history?.recentEvictions ?? [],
     manualMode: snapshot.manualMode,
-    stash: snapshot.stash,
+    pageStore: snapshot.pageStore,
     hotSubjects: snapshot.hotSubjects,
   }
 }
@@ -698,15 +697,15 @@ export const sessionPanelData = (
   return {
     session: sessionID,
     runs: sessionLines.length,
-    contextLimitTokens: last.modelContextTokens,
-    contextLimitSource: last.modelContextTokensSource,
+    contextLimitTokens: last.contextLimit,
+    contextLimitSource: last.contextLimitSource,
     lastRun: {
       estimatedTokens: last.estimatedTokens,
       watermarkTokens: last.watermarkTokens,
       deficitTokens: last.deficitTokens,
     },
     totals: last.totals,
-    stashReads: last.totals.stashHits + last.totals.stashMisses,
+    recalls: last.totals.recallHits + last.totals.recallMisses,
     recentEvictions,
   }
 }
@@ -720,15 +719,15 @@ export const globalTotals = (lines: PanelMetricsLine[]): GlobalTotals => {
     evictions: 0,
     bytesReclaimed: 0,
     deduped: 0,
-    postEvictionTouches: 0,
-    stashReads: 0,
+    faults: 0,
+    recalls: 0,
   }
   for (const line of lastLineBySession.values()) {
     totals.evictions += line.totals.evictions
     totals.bytesReclaimed += line.totals.bytesReclaimed
     totals.deduped += line.totals.deduped
-    totals.postEvictionTouches += line.totals.postEvictionTouches
-    totals.stashReads += line.totals.stashHits + line.totals.stashMisses
+    totals.faults += line.totals.faults
+    totals.recalls += line.totals.recallHits + line.totals.recallMisses
   }
   return totals
 }
@@ -858,7 +857,7 @@ const lastRunText = (current: SessionPanel): string => {
 }
 
 const countersText = (current: SessionPanel): string =>
-  `${COUNTERS_ROW_LABEL} ${current.totals.evictions} evictions (${formatBytes(current.totals.bytesReclaimed)} reclaimed, ${formatTokenCount(current.totals.evictionTokensSaved)} tokens saved), ${current.totals.dedupedUnique} dedup (${formatTokenCount(current.totals.dedupTokensSaved)} tokens saved), ${current.stashReads} recalls (${current.totals.stashHits} hits)`
+  `${COUNTERS_ROW_LABEL} ${current.totals.evictions} evictions (${formatBytes(current.totals.bytesReclaimed)} reclaimed, ${formatTokenCount(current.totals.evictionTokensSaved)} tokens saved), ${current.totals.dedupedUnique} dedup (${formatTokenCount(current.totals.dedupTokensSaved)} tokens saved), ${current.recalls} recalls (${current.totals.recallHits} hits)`
 
 const evictionText = (entry: PanelEvictedEntry): string =>
   `${entry.tool} ${entry.subject} (${formatBytes(entry.bytes)}, ${entry.messagesAgo} msgs ago)`
@@ -908,7 +907,7 @@ const SIDEBAR_WINDOW_LABEL = "Window"
 const SIDEBAR_EVICTIONS_LABEL = "Evictions"
 const SIDEBAR_DEDUPED_LABEL = "Deduped"
 const SIDEBAR_REASONING_LABEL = "Reasoning expired"
-const SIDEBAR_STASH_READS_LABEL = "Recalls"
+const SIDEBAR_RECALLS_LABEL = "Recalls"
 const SIDEBAR_TOKENS_PROCESSED_LABEL = "Tokens processed"
 const SIDEBAR_TOKENS_UNIT = "tokens"
 const SIDEBAR_HITS_UNIT = "hits"
@@ -946,8 +945,8 @@ const savingsStatText = (label: string, count: number, tokensSaved: number): str
 const tokensStatText = (tokens: number): string =>
   `${SIDEBAR_TOKENS_PROCESSED_LABEL}: ${formatTokenCount(tokens)} ${SIDEBAR_TOKENS_UNIT}`
 
-const stashReadsStatText = (stashReads: number, stashHits: number): string =>
-  `${SIDEBAR_STASH_READS_LABEL}: ${stashReads}, ${stashHits} ${SIDEBAR_HITS_UNIT}`
+const recallsStatText = (recalls: number, recallHits: number): string =>
+  `${SIDEBAR_RECALLS_LABEL}: ${recalls}, ${recallHits} ${SIDEBAR_HITS_UNIT}`
 
 // The deduped and reasoning-expired counts are unique-event lifetime
 // figures (first tombstone per pair, first crossing per reasoning part,
@@ -959,7 +958,7 @@ const sidebarCountersGroup = (current: SessionPanel): PanelRow[] => [
   { text: savingsStatText(SIDEBAR_EVICTIONS_LABEL, current.totals.evictions, current.totals.evictionTokensSaved), tone: "success" },
   { text: savingsStatText(SIDEBAR_DEDUPED_LABEL, current.totals.dedupedUnique, current.totals.dedupTokensSaved), tone: "success" },
   { text: savingsStatText(SIDEBAR_REASONING_LABEL, current.totals.reasoningExpiredUnique, current.totals.reasoningTokensSaved), tone: "success" },
-  { text: stashReadsStatText(current.stashReads, current.totals.stashHits), tone: "success" },
+  { text: recallsStatText(current.recalls, current.totals.recallHits), tone: "success" },
 ]
 
 const sidebarEvictionGroup = (entry: PanelEvictedEntry): PanelRow[] => [
@@ -990,8 +989,8 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
     dedupTokensSaved: number
     reasoningExpiredUnique: number
     reasoningTokensSaved: number
-    stashReads: number
-    stashHits: number
+    recalls: number
+    recallHits: number
     processedContextTokens: number
     hasPanel: boolean
     newestUpdatedAtMs: number
@@ -1004,8 +1003,8 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
     dedupTokensSaved: 0,
     reasoningExpiredUnique: 0,
     reasoningTokensSaved: 0,
-    stashReads: 0,
-    stashHits: 0,
+    recalls: 0,
+    recallHits: 0,
     processedContextTokens: 0,
     hasPanel: false,
     newestUpdatedAtMs: 0,
@@ -1018,8 +1017,8 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
     aggregate.dedupTokensSaved += panel.totals.dedupTokensSaved
     aggregate.reasoningExpiredUnique += panel.totals.reasoningExpiredUnique
     aggregate.reasoningTokensSaved += panel.totals.reasoningTokensSaved
-    aggregate.stashReads += panel.stashReads
-    aggregate.stashHits += panel.totals.stashHits
+    aggregate.recalls += panel.recalls
+    aggregate.recallHits += panel.totals.recallHits
     aggregate.processedContextTokens += panel.totals.processedContextTokens
   }
   const aggregates = new Map<string, SubagentTypeAggregate>()
@@ -1060,7 +1059,7 @@ export const sidebarSubagentsGroup = (children: readonly SubagentChild[], data: 
     statRow(savingsStatText(SIDEBAR_EVICTIONS_LABEL, aggregate.evictions, aggregate.evictionTokensSaved)),
     statRow(savingsStatText(SIDEBAR_DEDUPED_LABEL, aggregate.dedupedUnique, aggregate.dedupTokensSaved)),
     statRow(savingsStatText(SIDEBAR_REASONING_LABEL, aggregate.reasoningExpiredUnique, aggregate.reasoningTokensSaved)),
-    statRow(stashReadsStatText(aggregate.stashReads, aggregate.stashHits)),
+    statRow(recallsStatText(aggregate.recalls, aggregate.recallHits)),
   ]
   const typeBlocks: PanelRow[][] = sortedTypes.map(([type, aggregate]) => {
     const agentsText = `${aggregate.count} ${aggregate.count === 1 ? SUBAGENT_AGENT_SINGULAR : SUBAGENT_AGENTS_UNIT}`

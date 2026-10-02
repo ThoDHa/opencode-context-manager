@@ -314,7 +314,7 @@ type EvictionResult = {
   watermarkTokens: number | null
   deficitTokens: number | null
   evicted: EvictedEntryInfo[]
-  stashDropped: number
+  pagesDropped: number
 }
 
 type EvictedEntryInfo = {
@@ -331,7 +331,7 @@ type LastRunMetrics = { estimatedTokens: number; watermarkTokens: number | null;
 type RunOutcome = {
   eviction: EvictionResult
   deduped: number
-  dedupedBytes: number
+  dedupedBytesUnique: number
   dedupedUnique: number
   collapsedWindows: number
   collapsedWindowBytes: number
@@ -361,17 +361,17 @@ type ChatParamsModel = { providerID?: string; modelID?: string; limit?: { contex
 type SessionMetrics = {
   evictions: number
   bytesReclaimed: number
-  stashHits: number
-  stashMisses: number
-  stashDropped: number
+  recallHits: number
+  recallMisses: number
+  pagesDropped: number
   deduped: number
-  dedupedBytes: number
+  dedupedBytesUnique: number
   dedupedUnique: number
   collapsedWindows: number
   collapsedWindowBytes: number
   reasoningExpiredUnique: number
   reasoningBytesExpiredUnique: number
-  postEvictionTouches: number
+  faults: number
   fenceEvicted: number
   processedContextBytes: number
   evictedSubjects: Subject[]
@@ -464,11 +464,12 @@ type SessionCheckpoint = {
   ts: string
   session: string
   manualMode: boolean
-  modelContextTokens: number | null
-  modelContextTokensSource: ContextTokensSource
+  contextLimit: number | null
+  contextLimitSource: ContextTokensSource
+  contextLimitModelKey: number | null | string
   lastRun: LastRunMetrics
   totals: CumulativeCounters
-  stash: { entries: number; capacity: number }
+  pageStore: { entries: number; capacity: number }
   hotSubjects: string[]
 }
 
@@ -1188,7 +1189,7 @@ type FenceSpan = { startLine: number; endLine: number; language: string | undefi
 
 type FenceReplacement = { startOffset: number; endOffset: number; replacement: string; bytes: number }
 
-type FenceEviction = { blocks: number; bytes: number; stashDropped: number }
+type FenceEviction = { blocks: number; bytes: number; pagesDropped: number }
 
 const leadingBackticksOf = (line: string): number => {
   let ticks = 0
@@ -1265,12 +1266,12 @@ const fenceFirstNonEmptyLineOf = (lines: string[], startLine: number, endLine: n
 }
 
 const evictLargeUserFences = (messages: MessageBundle[], options: ResolvedOptions, pageStore: SessionPageStore, pageStoreEntries: PageEntry[]): FenceEviction => {
-  if (options.userFenceEviction.enabled === false) return { blocks: 0, bytes: 0, stashDropped: 0 }
+  if (options.userFenceEviction.enabled === false) return { blocks: 0, bytes: 0, pagesDropped: 0 }
   const hotFromIndex = hotFromIndexOf(messages, options)
   const { minBlockLines } = options.userFenceEviction
   let blocks = 0
   let bytes = 0
-  let stashDropped = 0
+  let pagesDropped = 0
   for (let msgIndex = 0; msgIndex < hotFromIndex; msgIndex += 1) {
     const message = messages[msgIndex]
     if (message.info.role !== USER_MESSAGE_ROLE) continue
@@ -1301,7 +1302,7 @@ const evictLargeUserFences = (messages: MessageBundle[], options: ResolvedOption
           partIndex,
           stashSlot: span.startLine,
         }
-        stashDropped += storeEvictedPage(pageStore, stored, options.stashLimit)
+        pagesDropped += storeEvictedPage(pageStore, stored, options.stashLimit)
         pageStoreEntries.push(stored)
         plans.push({
           startOffset,
@@ -1321,7 +1322,7 @@ const evictLargeUserFences = (messages: MessageBundle[], options: ResolvedOption
       part["text"] = updated
     }
   }
-  return { blocks, bytes, stashDropped }
+  return { blocks, bytes, pagesDropped }
 }
 
 const boundedDigestOf = (text: string): string =>
@@ -1564,13 +1565,13 @@ const executeReadEvicted = async (
       const inFlight = hydrations.get(sessionKey)
       if (inFlight !== undefined) await inFlight.promise
       const existing = metrics.get(sessionKey)
-      if (existing !== undefined) existing.stashMisses += 1
+      if (existing !== undefined) existing.recallMisses += 1
       return `${pageMissTextFor(subject)}\n${pageStoreOccupancyLineFor(pageStore ?? new Map())}\n${pageStoreMissLineFor(subject)}`
     }
     // A page-store hit counts and fault-protects exactly like an in-session
     // hit: the reload is the same event to the eviction policy.
     const sessionMetrics = await metricsForSession(metrics, hydrations, persistedTotalsForSession, sessionKey, metricsSessionBound)
-    sessionMetrics.stashHits += 1
+    sessionMetrics.recallHits += 1
     rememberFaultForSubject(sessionMetrics.faultCounts, subject, DEFAULT_REMEMBERED_FAULT_SUBJECTS)
     const newest = pages[pages.length - 1]
     const olderCount = pages.length - 1
@@ -1582,7 +1583,7 @@ const executeReadEvicted = async (
   // the hydration read evicts this session's stash entry.
   touchMapEntry(pageStores, sessionKey)
   const sessionMetrics = await metricsForSession(metrics, hydrations, persistedTotalsForSession, sessionKey, metricsSessionBound)
-  sessionMetrics.stashHits += 1
+  sessionMetrics.recallHits += 1
   rememberFaultForSubject(sessionMetrics.faultCounts, subject, DEFAULT_REMEMBERED_FAULT_SUBJECTS)
   const newest = matches[matches.length - 1]
   const older = matches.slice(0, -1)
@@ -1636,14 +1637,23 @@ const persistedMsOf = (value: unknown): number | undefined => {
 // Absent keys default to 0 (records written before a counter existed),
 // while a present-but-non-finite value rejects the whole record: a corrupt
 // raw counter means the record cannot be trusted, so the seeder refuses it
-// and falls through to the next-newest record. One absence marks the
-// upgrade boundary instead: a totals block missing the first-crossing
-// reasoning-bytes key predates it, so its reasoning totals were
-// accumulated under the retired per-request-recounted semantics and its
-// byte history exists in no persisted record; the seeder rejects the
-// record and the session restarts at zero rather than rehydrating figures
-// the new schema cannot mean.
-const UPGRADE_REQUIRED_COUNTER_KEYS: readonly RawCounterKey[] = ["reasoningBytesExpiredUnique"]
+// and falls through to the next-newest record. Absence marks the upgrade
+// boundaries instead: a totals block missing the first-crossing
+// reasoning-bytes key predates the 2026-09 reasoning reset, and a block
+// missing any of the 2026-10-02 renamed keys (recallHits, recallMisses,
+// pagesDropped, faults, dedupedBytesUnique) predates that reset, so its
+// totals were accumulated under spellings and semantics the current schema
+// cannot mean; the seeder rejects such records wholesale and the session
+// restarts at zero rather than rehydrating figures the new schema cannot
+// mean.
+const UPGRADE_REQUIRED_COUNTER_KEYS: readonly RawCounterKey[] = [
+  "reasoningBytesExpiredUnique",
+  "recallHits",
+  "recallMisses",
+  "pagesDropped",
+  "faults",
+  "dedupedBytesUnique",
+]
 
 const persistedCounterOf = (totals: Record<string, unknown>, key: RawCounterKey): number | undefined => {
   const value = totals[key]
@@ -1678,13 +1688,13 @@ const isContextTokensSource = (value: unknown): value is ContextTokensSource =>
 // rehydrates to no model identity (an untracked or option-sourced
 // budget), while a blank or non-string value rejects the record. Undefined return
 // rejects the seed; a defined one carries the budget or unknown.
-const persistedBudgetSeedOf = (parsed: Record<string, unknown>): PersistedContextLimitSeed | undefined => {
-  const tokens = parsed["modelContextTokens"]
+const persistedContextLimitSeedOf = (parsed: Record<string, unknown>): PersistedContextLimitSeed | undefined => {
+  const tokens = parsed["contextLimit"]
   if (tokens === undefined || tokens === null) return { budget: undefined }
   if (typeof tokens !== "number" || Number.isFinite(tokens) === false || tokens <= 0) return undefined
-  const source = parsed["modelContextTokensSource"]
+  const source = parsed["contextLimitSource"]
   if (isContextTokensSource(source) === false) return undefined
-  const rawModelKey = parsed["modelContextTokensModelKey"]
+  const rawModelKey = parsed["contextLimitModelKey"]
   if (rawModelKey !== undefined && rawModelKey !== null && (typeof rawModelKey !== "string" || rawModelKey.length === 0)) return undefined
   return { budget: { tokens, source, modelKey: typeof rawModelKey === "string" ? rawModelKey : undefined } }
 }
@@ -1718,7 +1728,7 @@ const checkpointTotalsSeedOf = async (options: ResolvedOptions, sessionKey: stri
   if (!isRecord(parsed) || parsed["session"] !== sessionKey) return undefined
   const tsMs = persistedMsOf(parsed["ts"])
   const counters = persistedCountersOf(parsed["totals"])
-  const budgetSeed = persistedBudgetSeedOf(parsed)
+  const budgetSeed = persistedContextLimitSeedOf(parsed)
   if (tsMs === undefined || counters === undefined || budgetSeed === undefined) return undefined
   return { tsMs, counters, budget: budgetSeed.budget }
 }
@@ -1746,7 +1756,7 @@ const logTotalsSeedOf = async (options: ResolvedOptions, sessionKey: string): Pr
     if (!isRecord(parsed) || parsed["session"] !== sessionKey) continue
     const tsMs = persistedMsOf(parsed["ts"])
     const counters = persistedCountersOf(parsed["totals"])
-    const budgetSeed = persistedBudgetSeedOf(parsed)
+    const budgetSeed = persistedContextLimitSeedOf(parsed)
     if (tsMs === undefined || counters === undefined || budgetSeed === undefined) continue
     return { tsMs, counters, budget: budgetSeed.budget }
   }
@@ -1769,7 +1779,7 @@ const seedSessionCounters = (metrics: SessionMetrics, persisted: PersistedTotals
   // Raised with the seeded reads: without it the first post-restart run
   // would count every pre-restart stash read as read-since-last-line and
   // write a spurious eventful line.
-  metrics.recallsLoggedThrough = persisted.counters.stashHits + persisted.counters.stashMisses
+  metrics.recallsLoggedThrough = persisted.counters.recallHits + persisted.counters.recallMisses
 }
 
 type MetricsHydrationEntry = { promise: Promise<void>; settled: boolean }
@@ -1868,10 +1878,10 @@ const lastRunMetricsOf = (eviction: EvictionResult): LastRunMetrics => ({
 })
 
 const recordRunOutcome = (metrics: SessionMetrics, run: RunOutcome, rememberedSubjectsBound: number): void => {
-  const { eviction, deduped: dedupedThisRun, dedupedBytes: dedupedBytesThisRun, dedupedUnique: dedupedUniqueThisRun, collapsedWindows: collapsedWindowsThisRun, collapsedWindowBytes: collapsedWindowBytesThisRun, faults: faultsThisRun, reasoningExpired: reasoningExpiredThisRun, fenceEvicted: fenceEvictedThisRun } = run
+  const { eviction, deduped: dedupedThisRun, dedupedBytesUnique: dedupedBytesThisRun, dedupedUnique: dedupedUniqueThisRun, collapsedWindows: collapsedWindowsThisRun, collapsedWindowBytes: collapsedWindowBytesThisRun, faults: faultsThisRun, reasoningExpired: reasoningExpiredThisRun, fenceEvicted: fenceEvictedThisRun } = run
   metrics.lastRun = lastRunMetricsOf(eviction)
   metrics.evictions += eviction.evicted.length
-  metrics.stashDropped += eviction.stashDropped
+  metrics.pagesDropped += eviction.pagesDropped
   for (const entry of eviction.evicted) {
     metrics.bytesReclaimed += entry.bytes + entry.attachmentBytes
     metrics.evictedSubjects.push(...entry.subjects)
@@ -1880,7 +1890,7 @@ const recordRunOutcome = (metrics: SessionMetrics, run: RunOutcome, rememberedSu
   while (metrics.evictedSubjects.length > rememberedSubjectsBound) metrics.evictedSubjects.shift()
   while (metrics.evictedRenderedSubjects.length > rememberedSubjectsBound) metrics.evictedRenderedSubjects.shift()
   metrics.deduped += dedupedThisRun
-  metrics.dedupedBytes += dedupedBytesThisRun
+  metrics.dedupedBytesUnique += dedupedBytesThisRun
   metrics.dedupedUnique += dedupedUniqueThisRun
   metrics.collapsedWindows += collapsedWindowsThisRun
   metrics.collapsedWindowBytes += collapsedWindowBytesThisRun
@@ -1891,10 +1901,10 @@ const recordRunOutcome = (metrics: SessionMetrics, run: RunOutcome, rememberedSu
   // expireAgedReasoning's return value.
   metrics.reasoningExpiredUnique += reasoningExpiredThisRun.unique
   metrics.reasoningBytesExpiredUnique += reasoningExpiredThisRun.uniqueBytes
-  metrics.postEvictionTouches += faultsThisRun
+  metrics.faults += faultsThisRun
   metrics.fenceEvicted += fenceEvictedThisRun.blocks
   metrics.bytesReclaimed += fenceEvictedThisRun.bytes
-  metrics.stashDropped += fenceEvictedThisRun.stashDropped
+  metrics.pagesDropped += fenceEvictedThisRun.pagesDropped
   // The processed-context total rides the post-transform composition: the
   // request the provider bills carries this list, so the running byte sum
   // is what the derived token total divides (sum-of-chars, one ceil at
@@ -2003,7 +2013,7 @@ const recordMetricsLine = async (
   run: RunOutcome,
 ): Promise<void> => {
   const { eviction, deduped: dedupedThisRun, faults: faultsThisRun, reasoningExpired: reasoningExpiredThisRun, fenceEvicted: fenceEvictedThisRun } = run
-  const stashReadsSinceLastLine = metrics.stashHits + metrics.stashMisses - metrics.recallsLoggedThrough
+  const recallsSinceLastLine = metrics.recallHits + metrics.recallMisses - metrics.recallsLoggedThrough
   const nowMs = options.now()
   // The five recorded-event disjuncts feed both gates so the lists cannot
   // drift. Eventful runs are the candidates for a line: an eviction, dedup
@@ -2022,7 +2032,7 @@ const recordMetricsLine = async (
     dedupedThisRun > 0 ||
     faultsThisRun > 0 ||
     fenceEvictedThisRun.blocks > 0 ||
-    stashReadsSinceLastLine > 0
+    recallsSinceLastLine > 0
   const isEventful = hasRecordedEvent || reasoningExpiredThisRun.parts > 0
   if (options.metricsLog === false || isEventful === false) return
   const hasSignificantEvent = hasRecordedEvent || contextLimit.source !== metrics.lastLineContextLimitSource
@@ -2031,9 +2041,9 @@ const recordMetricsLine = async (
   const line = {
     ts: new Date(nowMs).toISOString(),
     session: sessionKey,
-    modelContextTokens: contextLimit.tokens,
-    modelContextTokensSource: contextLimit.source,
-    modelContextTokensModelKey: contextLimit.modelKey ?? null,
+    contextLimit: contextLimit.tokens,
+    contextLimitSource: contextLimit.source,
+    contextLimitModelKey: contextLimit.modelKey ?? null,
     estimatedTokens: eviction.estimatedTokens,
     toolPoolBytes: run.composition.toolPoolBytes,
     textChars: run.composition.textChars,
@@ -2059,15 +2069,15 @@ const recordMetricsLine = async (
           wouldEvictBytesThisRun: run.dryRun.wouldEvictBytes,
         }),
     fenceEvictedThisRun: fenceEvictedThisRun.blocks,
-    postEvictionTouchesThisRun: faultsThisRun,
-    stashReadsSinceLastLine,
+    faultsThisRun,
+    recallsSinceLastLine,
     totals: totalsOf(metrics, options.charsPerToken),
   }
   try {
     const metricsJsonLine = `${JSON.stringify(line)}\n`
     await rotateMetricsLogPastCap(options.metricsPath, Buffer.byteLength(metricsJsonLine), options.metricsRotationMaxBytes)
     await appendFile(options.metricsPath, metricsJsonLine)
-    metrics.recallsLoggedThrough = metrics.stashHits + metrics.stashMisses
+    metrics.recallsLoggedThrough = metrics.recallHits + metrics.recallMisses
     metrics.lastLineAtMs = nowMs
     metrics.lastLineContextLimitSource = contextLimit.source
     delete metrics.logWriteError
@@ -2082,7 +2092,7 @@ const recordMetricsLine = async (
 // schema's derived-counter list, so a new estimate lands here once.
 const DERIVED_TOTAL_SOURCES: { [K in TotalsDerivedKey]: RawCounterKey } = {
   evictionTokensSaved: "bytesReclaimed",
-  dedupTokensSaved: "dedupedBytes",
+  dedupTokensSaved: "dedupedBytesUnique",
   collapsedWindowTokensSaved: "collapsedWindowBytes",
   reasoningTokensSaved: "reasoningBytesExpiredUnique",
   processedContextTokens: "processedContextBytes",
@@ -2110,12 +2120,12 @@ const sessionCheckpointOf = (
   ts: new Date(options.now()).toISOString(),
   session: sessionKey,
   manualMode: options.manualMode,
-  modelContextTokens: contextLimit.tokens,
-  modelContextTokensSource: contextLimit.source,
-  modelContextTokensModelKey: contextLimit.modelKey ?? null,
+  contextLimit: contextLimit.tokens,
+  contextLimitSource: contextLimit.source,
+  contextLimitModelKey: contextLimit.modelKey ?? null,
   lastRun,
   totals: totalsOf(metrics, options.charsPerToken),
-  stash: { entries: pageStore.size, capacity: options.stashLimit },
+  pageStore: { entries: pageStore.size, capacity: options.stashLimit },
   hotSubjects: orderedRenderedSubjectsOf(hotSubjects, options.hintSubjects),
 })
 
@@ -2323,10 +2333,10 @@ const executeStatsTool = (source: StatsSource, toolContext: unknown): string => 
       protectedTools: source.options.protectedTools,
       protectedPatterns: source.options.protectedPatternSources,
     },
-    modelContextTokens: contextLimit.tokens,
-    modelContextTokensSource: contextLimit.source,
+    contextLimit: contextLimit.tokens,
+    contextLimitSource: contextLimit.source,
     headroomTokens: contextLimit.tokens !== null && metrics.lastRun !== undefined ? contextLimit.tokens - metrics.lastRun.estimatedTokens : null,
-    stash: { entries: pageStore === undefined ? 0 : pageStore.size, capacity: source.options.stashLimit },
+    pageStore: { entries: pageStore === undefined ? 0 : pageStore.size, capacity: source.options.stashLimit },
     counters: totalsOf(metrics, source.options.charsPerToken),
     lastRun: metrics.lastRun ?? null,
     ...(metrics.lastDryRun === undefined
@@ -2502,7 +2512,7 @@ const measureWithoutEvicting = (candidates: EvictionCandidates, watermarkTokens:
     watermarkTokens,
     deficitTokens: deficitTokensOf(candidates.estimatedTokens, watermarkTokens),
     evicted: [],
-    stashDropped: 0,
+    pagesDropped: 0,
   }
 }
 
@@ -2545,7 +2555,7 @@ const evictLeastRecentlyUsed = (
 
   const deficitTokens = deficitTokensOf(candidates.estimatedTokens, watermarkTokens)
   const evicted: EvictedEntryInfo[] = []
-  let stashDropped = 0
+  let pagesDropped = 0
   let reclaimedTokens = 0
   // One walk, one disposition per candidate: the aged read tier evicts
   // its entries whatever the budget says, and the watermark tier evicts
@@ -2566,7 +2576,7 @@ const evictLeastRecentlyUsed = (
       partIndex: entry.partIndex,
     }
     if (droppedAttachments !== undefined) stored.attachments = droppedAttachments
-    stashDropped += storeEvictedPage(pageStore, stored, options.stashLimit)
+    pagesDropped += storeEvictedPage(pageStore, stored, options.stashLimit)
     pageStoreEntries.push(stored)
     stripStateAttachments(entry.stateRef)
     entry.stateRef.output = `${tombstone}${buildReloadPointer(subject)}`
@@ -2587,7 +2597,7 @@ const evictLeastRecentlyUsed = (
     watermarkTokens,
     deficitTokens,
     evicted,
-    stashDropped,
+    pagesDropped,
   }
 }
 
@@ -2735,7 +2745,7 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
   const runOutcome: RunOutcome = {
     eviction,
     deduped: dedupedThisRun,
-    dedupedBytes: toolDedup.supersededBytes,
+    dedupedBytesUnique: toolDedup.supersededBytes,
     dedupedUnique: dedupedUniqueThisRun,
     collapsedWindows: rangeCollapse.collapsed,
     collapsedWindowBytes: rangeCollapse.collapsedBytes,

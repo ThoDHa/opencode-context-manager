@@ -276,8 +276,8 @@ test("sidebarRows restyles a null budget and a missing watermark into the colon 
     current: sessionPanelData(
       [
         makeLine({
-          modelContextTokens: null,
-          modelContextTokensSource: UNKNOWN_CONTEXT_LIMIT_SOURCE,
+          contextLimit: null,
+          contextLimitSource: UNKNOWN_CONTEXT_LIMIT_SOURCE,
           watermarkTokens: null,
           deficitTokens: null,
           evictedThisRun: [],
@@ -421,7 +421,7 @@ test("sidebarRows drops the budget source label while the panel keeps it", () =>
   const data = {
     source: "/tmp/metrics.jsonl",
     activeSession: SESSION_A,
-    current: sessionPanelData([makeLine({ modelContextTokensSource: OVERRIDE_CONTEXT_LIMIT_SOURCE, evictedThisRun: [] })], SESSION_A),
+    current: sessionPanelData([makeLine({ contextLimitSource: OVERRIDE_CONTEXT_LIMIT_SOURCE, evictedThisRun: [] })], SESSION_A),
     global: globalTotals([]),
     error: undefined,
   }

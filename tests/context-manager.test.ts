@@ -1287,8 +1287,8 @@ test("transform keeps the captured limit in charge when an explicit defaultConte
 
   const stats = await readStats(hooks, SESSION_ID)
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
-  assert.equal(stats.modelContextTokens, SMALL_CONTEXT_LIMIT)
-  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+  assert.equal(stats.contextLimit, SMALL_CONTEXT_LIMIT)
+  assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_MODEL)
 })
 
 test("transform lets the per model override beat the model reported limit and labels the budget source override", async () => {
@@ -1300,8 +1300,8 @@ test("transform lets the per model override beat the model reported limit and la
 
   const stats = await readStats(hooks, SESSION_ID)
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
-  assert.equal(stats.modelContextTokens, SMALL_CONTEXT_LIMIT)
-  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_OVERRIDE)
+  assert.equal(stats.contextLimit, SMALL_CONTEXT_LIMIT)
+  assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_OVERRIDE)
 })
 
 test("transform lets the per model override beat the explicit defaultContextTokens option when no limit was reported", async () => {
@@ -1316,8 +1316,8 @@ test("transform lets the per model override beat the explicit defaultContextToke
 
   const stats = await readStats(hooks, SESSION_ID)
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
-  assert.equal(stats.modelContextTokens, SMALL_CONTEXT_LIMIT)
-  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_OVERRIDE)
+  assert.equal(stats.contextLimit, SMALL_CONTEXT_LIMIT)
+  assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_OVERRIDE)
 })
 
 test("transform applies the per model override when chat params carry no reported context limit", async () => {
@@ -1329,8 +1329,8 @@ test("transform applies the per model override when chat params carry no reporte
 
   const stats = await readStats(hooks, SESSION_ID)
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
-  assert.equal(stats.modelContextTokens, SMALL_CONTEXT_LIMIT)
-  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_OVERRIDE)
+  assert.equal(stats.contextLimit, SMALL_CONTEXT_LIMIT)
+  assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_OVERRIDE)
 })
 
 test("transform ignores per model map entries for unknown model ids and keeps the reported limit in charge", async () => {
@@ -1342,8 +1342,8 @@ test("transform ignores per model map entries for unknown model ids and keeps th
 
   const stats = await readStats(hooks, SESSION_ID)
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
-  assert.equal(stats.modelContextTokens, WATERMARK_PROBE_CONTEXT_LIMIT)
-  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+  assert.equal(stats.contextLimit, WATERMARK_PROBE_CONTEXT_LIMIT)
+  assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_MODEL)
 })
 
 test("transform ignores non numeric override entries and falls through to the explicit default", async () => {
@@ -1358,8 +1358,8 @@ test("transform ignores non numeric override entries and falls through to the ex
 
   const stats = await readStats(hooks, SESSION_ID)
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
-  assert.equal(stats.modelContextTokens, EXPLICIT_DEFAULT_CONTEXT_TOKENS)
-  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_DEFAULT)
+  assert.equal(stats.contextLimit, EXPLICIT_DEFAULT_CONTEXT_TOKENS)
+  assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_DEFAULT)
 })
 
 test("transform ignores infinite override entries and an infinite defaultContextTokens option and falls through to the unknown budget", async () => {
@@ -1376,8 +1376,8 @@ test("transform ignores infinite override entries and an infinite defaultContext
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
   assert.deepEqual(stats.options.modelContextTokens, {})
   assert.equal(stats.options.defaultContextTokens, null)
-  assert.equal(stats.modelContextTokens, null)
-  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+  assert.equal(stats.contextLimit, null)
+  assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
 })
 
 test("transform ignores an infinite model reported limit and falls through to the explicit defaultContextTokens option", async () => {
@@ -1389,8 +1389,8 @@ test("transform ignores an infinite model reported limit and falls through to th
 
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
   const stats = await readStats(hooks, SESSION_ID)
-  assert.equal(stats.modelContextTokens, EXPLICIT_DEFAULT_CONTEXT_TOKENS)
-  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_DEFAULT)
+  assert.equal(stats.contextLimit, EXPLICIT_DEFAULT_CONTEXT_TOKENS)
+  assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_DEFAULT)
 })
 
 test("transform keeps a stored real context limit when a later chat params event carries none", async () => {
@@ -1440,8 +1440,8 @@ test("transform resets a stored budget captured for one model when a later chat 
 
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
   const stats = await readStats(hooks, SESSION_ID)
-  assert.equal(stats.modelContextTokens, null)
-  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+  assert.equal(stats.contextLimit, null)
+  assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
   assert.deepEqual(stats.lastRun, {
     estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS),
     watermarkTokens: null,
@@ -1459,8 +1459,8 @@ test("transform retains a stored budget when a later chat params event re-fires 
 
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
   const stats = await readStats(hooks, SESSION_ID)
-  assert.equal(stats.modelContextTokens, WATERMARK_PROBE_CONTEXT_LIMIT)
-  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+  assert.equal(stats.contextLimit, WATERMARK_PROBE_CONTEXT_LIMIT)
+  assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_MODEL)
 })
 
 test("transform retains a stored identity-less budget when a later chat params event names a different model without a limit", async () => {
@@ -1473,8 +1473,8 @@ test("transform retains a stored identity-less budget when a later chat params e
 
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
   const stats = await readStats(hooks, SESSION_ID)
-  assert.equal(stats.modelContextTokens, WATERMARK_PROBE_CONTEXT_LIMIT)
-  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+  assert.equal(stats.contextLimit, WATERMARK_PROBE_CONTEXT_LIMIT)
+  assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_MODEL)
 })
 
 test("transform replaces the stored budget when a later chat params event names a different model with its own reported limit", async () => {
@@ -1487,8 +1487,8 @@ test("transform replaces the stored budget when a later chat params event names 
 
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
   const stats = await readStats(hooks, SESSION_ID)
-  assert.equal(stats.modelContextTokens, ISOLATION_CONTEXT_LIMIT_B)
-  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+  assert.equal(stats.contextLimit, ISOLATION_CONTEXT_LIMIT_B)
+  assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_MODEL)
 })
 
 test("transform counts text parts toward the token estimate", async () => {
@@ -2038,8 +2038,8 @@ test("recall executes a hit and a miss end to end and describe reports the resul
     ),
   )
   const after = await readStats(hooks, SESSION_ID)
-  assert.equal(countersOf(after).stashHits, 1)
-  assert.equal(countersOf(after).stashMisses, 1)
+  assert.equal(countersOf(after).recallHits, 1)
+  assert.equal(countersOf(after).recallMisses, 1)
 })
 
 test("recall returns the full original output named by the tombstone after eviction", async () => {
@@ -2150,7 +2150,7 @@ test("recall states the stash holds nothing when the session stash exists but is
     ...fillerMessages(),
   ])
   await runTransform(hooks, bundle)
-  assert.deepEqual((await readStats(hooks, SESSION_ID)).stash, {
+  assert.deepEqual((await readStats(hooks, SESSION_ID)).pageStore, {
     entries: OCCUPANCY_ZERO_STASH_LIMIT,
     capacity: OCCUPANCY_ZERO_STASH_LIMIT,
   })
@@ -3780,17 +3780,17 @@ const STATS_ZEROED_COUNTERS = {
   evictions: 0,
   bytesReclaimed: 0,
   evictionTokensSaved: 0,
-  stashHits: 0,
-  stashMisses: 0,
-  stashDropped: 0,
+  recallHits: 0,
+  recallMisses: 0,
+  pagesDropped: 0,
   deduped: 0,
-  dedupedBytes: 0,
+  dedupedBytesUnique: 0,
   dedupedUnique: 0,
   dedupTokensSaved: 0,
   collapsedWindows: 0,
   collapsedWindowBytes: 0,
   collapsedWindowTokensSaved: 0,
-  postEvictionTouches: 0,
+  faults: 0,
   reasoningExpiredUnique: 0,
   reasoningBytesExpiredUnique: 0,
   reasoningTokensSaved: 0,
@@ -3859,8 +3859,8 @@ const storeMetricsSession = async (hooks: HookMap, index: number): Promise<void>
 const metricsRotationPanelSeedLine = (session: string = SESSION_ID): Record<string, unknown> => ({
   ts: "2026-09-17T00:00:00.000Z",
   session,
-  modelContextTokens: null,
-  modelContextTokensSource: CONTEXT_TOKENS_SOURCE_UNKNOWN,
+  contextLimit: null,
+  contextLimitSource: CONTEXT_TOKENS_SOURCE_UNKNOWN,
   estimatedTokens: METRICS_ROTATION_PANEL_SEED_ESTIMATED_TOKENS,
   watermarkTokens: null,
   deficitTokens: null,
@@ -3876,8 +3876,8 @@ const metricsRotationPanelSeedLine = (session: string = SESSION_ID): Record<stri
   reasoningExpiredThisRun: 0,
   reasoningBytesExpiredThisRun: 0,
   fenceEvictedThisRun: 0,
-  postEvictionTouchesThisRun: 0,
-  stashReadsSinceLastLine: 0,
+  faultsThisRun: 0,
+  recallsSinceLastLine: 0,
   totals: {
     ...STATS_ZEROED_COUNTERS,
     evictions: METRICS_ROTATION_PANEL_SEED_EVICTIONS,
@@ -3922,10 +3922,10 @@ test("describe reports zeroed counters unknown budget and empty stash for a sess
     protectedTools: ["task", "todowrite"],
     protectedPatterns: [],
   })
-  assert.equal(stats.modelContextTokens, null)
-  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+  assert.equal(stats.contextLimit, null)
+  assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
   assert.equal(stats.headroomTokens, null)
-  assert.deepEqual(stats.stash, { entries: 0, capacity: STASH_LIMIT })
+  assert.deepEqual(stats.pageStore, { entries: 0, capacity: STASH_LIMIT })
   assert.deepEqual(countersOf(stats), STATS_ZEROED_COUNTERS)
   assert.equal(stats.lastRun, null)
   assert.equal(Object.hasOwn(stats, "logWriteError"), false)
@@ -3937,8 +3937,8 @@ test("describe reports the explicit defaultContextTokens option as the budget wh
   const stats = await readStats(hooks, SESSION_ID)
 
   assert.equal(stats.options.defaultContextTokens, EXPLICIT_DEFAULT_CONTEXT_TOKENS)
-  assert.equal(stats.modelContextTokens, EXPLICIT_DEFAULT_CONTEXT_TOKENS)
-  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_DEFAULT)
+  assert.equal(stats.contextLimit, EXPLICIT_DEFAULT_CONTEXT_TOKENS)
+  assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_DEFAULT)
   assert.equal(stats.headroomTokens, null)
 })
 
@@ -3959,7 +3959,7 @@ test("describe reports headroomTokens as null when the context limit is unknown"
   await runTransform(hooks, bundle)
 
   const stats = await readStats(hooks, SESSION_ID)
-  assert.equal(stats.modelContextTokens, null)
+  assert.equal(stats.contextLimit, null)
   assert.ok(stats.lastRun !== null)
   assert.equal(stats.headroomTokens, null)
 })
@@ -3971,8 +3971,8 @@ test("describe records an unknown budget last run with null watermark and defici
   await runTransform(hooks, bundle)
 
   const stats = await readStats(hooks, SESSION_ID)
-  assert.equal(stats.modelContextTokens, null)
-  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+  assert.equal(stats.contextLimit, null)
+  assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
   assert.deepEqual(stats.lastRun, {
     estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS),
     watermarkTokens: null,
@@ -3988,8 +3988,8 @@ test("describe counts the eviction reclaimed bytes stash entry and last run defi
   await runTransform(hooks, bundle)
 
   const stats = await readStats(hooks, SESSION_ID)
-  assert.equal(stats.modelContextTokens, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
-  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+  assert.equal(stats.contextLimit, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+  assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_MODEL)
   assert.deepEqual(countersOf(stats), {
     ...STATS_ZEROED_COUNTERS,
     evictions: 1,
@@ -3998,7 +3998,7 @@ test("describe counts the eviction reclaimed bytes stash entry and last run defi
     processedContextBytes: 493,
     processedContextTokens: tokensForChars(493),
   })
-  assert.deepEqual(stats.stash, { entries: 1, capacity: STASH_LIMIT })
+  assert.deepEqual(stats.pageStore, { entries: 1, capacity: STASH_LIMIT })
   assert.deepEqual(stats.lastRun, {
     estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS),
     watermarkTokens: tokensForChars(STANDARD_BUNDLE_CHARS) - OVER_BY_ONE_TOKENS,
@@ -4059,7 +4059,7 @@ test("describe counts stash hits and misses from recall and leaves invalid subje
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
-    stashMisses: 1,
+    recallMisses: 1,
     processedContextBytes: 491,
     processedContextTokens: tokensForChars(491),
   })
@@ -4067,8 +4067,8 @@ test("describe counts stash hits and misses from recall and leaves invalid subje
   assert.equal(await recallTool(hooks, INVALID_SUBJECT_VALUE, SESSION_ID), invalidSubjectMissFor("number"))
   assert.equal(await recallTool(hooks, "", SESSION_ID), invalidSubjectMissFor("string"))
   const afterInvalid = await readStats(hooks, SESSION_ID)
-  assert.equal(countersOf(afterInvalid).stashMisses, 1)
-  assert.equal(countersOf(afterInvalid).stashHits, 0)
+  assert.equal(countersOf(afterInvalid).recallMisses, 1)
+  assert.equal(countersOf(afterInvalid).recallHits, 0)
 
   assert.equal(await recallTool(hooks, STATS_HIT_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
   const afterHit = await readStats(hooks, SESSION_ID)
@@ -4077,8 +4077,8 @@ test("describe counts stash hits and misses from recall and leaves invalid subje
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
-    stashHits: 1,
-    stashMisses: 1,
+    recallHits: 1,
+    recallMisses: 1,
     processedContextBytes: 491,
     processedContextTokens: tokensForChars(491),
   })
@@ -4094,10 +4094,10 @@ test("describe counts a post eviction touch exactly once for a matching later ca
 
   bundle.messages.push(syntheticMessageFor(SESSION_ID, [pathToolPart(POST_EVICT_TOUCH_PATH, APPEARANCE_ONLY_OUTPUT_BYTES)]))
   await runTransform(hooks, bundle)
-  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).postEvictionTouches, 1)
+  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).faults, 1)
 
   await runTransform(hooks, bundle)
-  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).postEvictionTouches, 1)
+  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).faults, 1)
 })
 
 test("describe leaves post eviction touches at zero when a later call matches nothing evicted", async () => {
@@ -4112,7 +4112,7 @@ test("describe leaves post eviction touches at zero when a later call matches no
   )
   await runTransform(hooks, bundle)
 
-  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).postEvictionTouches, 0)
+  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).faults, 0)
 })
 
 test("describe forgets the oldest evicted subject past the hundred subject cap and stops counting its post eviction touches", async () => {
@@ -4137,7 +4137,7 @@ test("describe forgets the oldest evicted subject past the hundred subject cap a
   )
   await runTransform(hooks, bundle)
 
-  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).postEvictionTouches, 1)
+  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).faults, 1)
 })
 
 test("transform credits a subject's fault from both a reload and a post eviction appearance and defers it past single source subjects", async () => {
@@ -4159,7 +4159,7 @@ test("transform credits a subject's fault from both a reload and a post eviction
     ]),
   )
   await runTransform(hooks, bundle)
-  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).postEvictionTouches, 2)
+  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).faults, 2)
 
   const touchContest = await runFaultContest(
     hooks,
@@ -4200,10 +4200,10 @@ test("describe counts one post eviction touch when a single bash appearance matc
     )
     await runTransform(hooks, bundle)
 
-    assert.equal(countersOf(await readStats(hooks, SESSION_ID)).postEvictionTouches, 1)
+    assert.equal(countersOf(await readStats(hooks, SESSION_ID)).faults, 1)
     const lines = metricsLinesIn(metricsLogPathIn(metricsDir))
     assert.equal(lines.length, 2)
-    assert.equal(lines[1].postEvictionTouchesThisRun, 1)
+    assert.equal(lines[1].faultsThisRun, 1)
   } finally {
     cleanupMetricsDir(metricsDir)
   }
@@ -4297,7 +4297,7 @@ test("describe accumulates the dedup token-savings estimate from each superseded
   assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), {
     ...STATS_ZEROED_COUNTERS,
     deduped: DEDUP_SAVINGS_PAIR_COUNT,
-    dedupedBytes: DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES,
+    dedupedBytesUnique: DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES,
     dedupedUnique: DEDUP_SAVINGS_PAIR_COUNT,
     dedupTokensSaved: tokensForChars(DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES),
     processedContextBytes: 6234,
@@ -4310,7 +4310,7 @@ test("describe accumulates the dedup token-savings estimate from each superseded
   const counters = countersOf(await readStats(hooks, SESSION_ID))
   assert.equal(counters.deduped, DEDUP_SAVINGS_PAIR_COUNT * REPEATED_STANDING_RUNS)
   assert.equal(counters.dedupedUnique, DEDUP_SAVINGS_PAIR_COUNT)
-  assert.equal(counters.dedupedBytes, DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES * REPEATED_STANDING_RUNS)
+  assert.equal(counters.dedupedBytesUnique, DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES * REPEATED_STANDING_RUNS)
   assert.equal(counters.dedupTokensSaved, tokensForChars(DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES * REPEATED_STANDING_RUNS))
 })
 
@@ -4329,9 +4329,9 @@ test("describe counts stash drops when a single run evicts fifty one entries pas
 
   const stats = await readStats(hooks, SESSION_ID)
   assert.equal(countersOf(stats).evictions, STASH_OVERFLOW_COUNT)
-  assert.equal(countersOf(stats).stashDropped, 1)
+  assert.equal(countersOf(stats).pagesDropped, 1)
   assert.equal(countersOf(stats).bytesReclaimed, STASH_OVERFLOW_COUNT * MIN_EVICTABLE_BYTES)
-  assert.deepEqual(stats.stash, { entries: STASH_LIMIT, capacity: STASH_LIMIT })
+  assert.deepEqual(stats.pageStore, { entries: STASH_LIMIT, capacity: STASH_LIMIT })
 })
 
 test("transform drops nothing from a session stash holding exactly the fifty entry bound", async () => {
@@ -4346,8 +4346,8 @@ test("transform drops nothing from a session stash holding exactly the fifty ent
   await runTransform(hooks, bundle)
 
   const stats = await readStats(hooks, SESSION_ID)
-  assert.equal(countersOf(stats).stashDropped, 0)
-  assert.deepEqual(stats.stash, { entries: STASH_LIMIT, capacity: STASH_LIMIT })
+  assert.equal(countersOf(stats).pagesDropped, 0)
+  assert.deepEqual(stats.pageStore, { entries: STASH_LIMIT, capacity: STASH_LIMIT })
   assert.equal(await recallTool(hooks, subjects[0], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
 })
 
@@ -4377,8 +4377,8 @@ test("recall drops the earliest runs' entries first when later runs push a sessi
 
   const stats = await readStats(hooks, SESSION_ID)
   assert.equal(countersOf(stats).evictions, STASH_CROSS_RUN_FIRST_COUNT + STASH_CROSS_RUN_SECOND_COUNT)
-  assert.equal(countersOf(stats).stashDropped, STASH_CROSS_RUN_DROP_COUNT)
-  assert.deepEqual(stats.stash, { entries: STASH_LIMIT, capacity: STASH_LIMIT })
+  assert.equal(countersOf(stats).pagesDropped, STASH_CROSS_RUN_DROP_COUNT)
+  assert.deepEqual(stats.pageStore, { entries: STASH_LIMIT, capacity: STASH_LIMIT })
   assert.equal(
     await recallTool(hooks, firstRunSubjects[0], SESSION_ID),
     stashMissFor(
@@ -4419,8 +4419,8 @@ test("metrics log appends one eventful jsonl line with expected fields and nothi
     assert.equal(typeof line.ts, "string")
     assert.ok(Number.isNaN(new Date(line.ts as string).getTime()) === false)
     assert.equal(line.session, SESSION_ID)
-    assert.equal(line.modelContextTokens, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
-    assert.equal(line.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+    assert.equal(line.contextLimit, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+    assert.equal(line.contextLimitSource, CONTEXT_TOKENS_SOURCE_MODEL)
     assert.equal(line.estimatedTokens, tokensForChars(STANDARD_BUNDLE_CHARS))
     assert.equal(line.watermarkTokens, tokensForChars(STANDARD_BUNDLE_CHARS) - OVER_BY_ONE_TOKENS)
     assert.equal(line.deficitTokens, OVER_BY_ONE_TOKENS)
@@ -4428,8 +4428,8 @@ test("metrics log appends one eventful jsonl line with expected fields and nothi
       { tool: READ_TOOL, subject: STATS_LOGGED_SUBJECT, bytes: MIN_EVICTABLE_BYTES, attachmentBytes: 0, messagesAgo: 5 },
     ])
     assert.equal(line.dedupedThisRun, 0)
-    assert.equal(line.postEvictionTouchesThisRun, 0)
-    assert.equal(line.stashReadsSinceLastLine, 0)
+    assert.equal(line.faultsThisRun, 0)
+    assert.equal(line.recallsSinceLastLine, 0)
     assert.deepEqual(line.totals, {
       ...STATS_ZEROED_COUNTERS,
       evictions: 1,
@@ -4461,8 +4461,8 @@ test("metrics log records an unknown budget skip state with null watermark on an
 
     const lines = metricsLinesIn(metricsLogPathIn(metricsDir))
     assert.equal(lines.length, STATS_LOG_FILE_LINES)
-    assert.equal(lines[0].modelContextTokens, null)
-    assert.equal(lines[0].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+    assert.equal(lines[0].contextLimit, null)
+    assert.equal(lines[0].contextLimitSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
     assert.equal(lines[0].watermarkTokens, null)
     assert.equal(lines[0].deficitTokens, null)
     assert.deepEqual(lines[0].evictedThisRun, [])
@@ -4470,7 +4470,7 @@ test("metrics log records an unknown budget skip state with null watermark on an
     assert.deepEqual(lines[0].totals, {
       ...STATS_ZEROED_COUNTERS,
       deduped: 1,
-      dedupedBytes: THREE_ENTRY_OUTPUT_BYTES,
+      dedupedBytesUnique: THREE_ENTRY_OUTPUT_BYTES,
       dedupedUnique: 1,
       dedupTokensSaved: tokensForChars(THREE_ENTRY_OUTPUT_BYTES),
       processedContextBytes: 3117,
@@ -4500,8 +4500,8 @@ test("metrics log records the default source label fields for an eventful explic
 
     const lines = metricsLinesIn(metricsLogPathIn(metricsDir))
     assert.equal(lines.length, STATS_LOG_FILE_LINES)
-    assert.equal(lines[0].modelContextTokens, EXPLICIT_DEFAULT_CONTEXT_TOKENS)
-    assert.equal(lines[0].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_DEFAULT)
+    assert.equal(lines[0].contextLimit, EXPLICIT_DEFAULT_CONTEXT_TOKENS)
+    assert.equal(lines[0].contextLimitSource, CONTEXT_TOKENS_SOURCE_DEFAULT)
   } finally {
     cleanupMetricsDir(metricsDir)
   }
@@ -4522,8 +4522,8 @@ test("metrics log records the override source label fields for a per model map d
 
     const lines = metricsLinesIn(metricsLogPathIn(metricsDir))
     assert.equal(lines.length, STATS_LOG_FILE_LINES)
-    assert.equal(lines[0].modelContextTokens, SMALL_CONTEXT_LIMIT)
-    assert.equal(lines[0].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_OVERRIDE)
+    assert.equal(lines[0].contextLimit, SMALL_CONTEXT_LIMIT)
+    assert.equal(lines[0].contextLimitSource, CONTEXT_TOKENS_SOURCE_OVERRIDE)
   } finally {
     cleanupMetricsDir(metricsDir)
   }
@@ -4543,13 +4543,13 @@ test("metrics log records stash reads since the last line on the next transform 
     const lines = metricsLinesIn(metricsLogPathIn(metricsDir))
     assert.equal(lines.length, METRICS_LINES_AFTER_RELOAD)
     assert.deepEqual(lines[1].evictedThisRun, [])
-    assert.equal(lines[1].stashReadsSinceLastLine, 1)
+    assert.equal(lines[1].recallsSinceLastLine, 1)
     assert.deepEqual(lines[1].totals, {
       ...STATS_ZEROED_COUNTERS,
       evictions: 1,
       bytesReclaimed: MIN_EVICTABLE_BYTES,
       evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
-      stashHits: 1,
+      recallHits: 1,
       processedContextBytes: 998,
       processedContextTokens: tokensForChars(998),
     })
@@ -4721,7 +4721,7 @@ test("metrics log clears a recorded write failure once a later write succeeds", 
     const stats = await readStats(hooks, SESSION_ID)
     assert.equal(Object.hasOwn(stats, "logWriteError"), false)
     assert.equal(countersOf(stats).evictions, 1)
-    assert.equal(countersOf(stats).postEvictionTouches, 1)
+    assert.equal(countersOf(stats).faults, 1)
     assert.equal(metricsLinesIn(blockedPath).length, METRICS_LINES_AFTER_RECOVERY)
   } finally {
     cleanupMetricsDir(metricsDir)
@@ -4800,14 +4800,14 @@ test("metrics log stays byte identical at exactly the rotation cap and rotates w
     ])
     const freshLines = metricsLinesIn(metricsPath)
     assert.equal(freshLines.length, STATS_LOG_FILE_LINES)
-    assert.equal(freshLines[0].stashReadsSinceLastLine, 1)
+    assert.equal(freshLines[0].recallsSinceLastLine, 1)
     assert.deepEqual(freshLines[0].evictedThisRun, [])
     assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), {
       ...STATS_ZEROED_COUNTERS,
       evictions: 1,
       bytesReclaimed: MIN_EVICTABLE_BYTES,
       evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
-      stashHits: 1,
+      recallHits: 1,
       processedContextBytes: 1014,
       processedContextTokens: tokensForChars(1014),
     })
@@ -4988,12 +4988,12 @@ test("live state snapshot is written on a quiet run with the exact schema budget
     assert.deepEqual(snapshot, {
       session: SESSION_ID,
       manualMode: false,
-      modelContextTokens: null,
-      modelContextTokensSource: CONTEXT_TOKENS_SOURCE_UNKNOWN,
-      modelContextTokensModelKey: null,
+      contextLimit: null,
+      contextLimitSource: CONTEXT_TOKENS_SOURCE_UNKNOWN,
+      contextLimitModelKey: null,
       lastRun: { estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS), watermarkTokens: null, deficitTokens: null },
       totals: { ...STATS_ZEROED_COUNTERS, processedContextBytes: STANDARD_BUNDLE_CHARS, processedContextTokens: tokensForChars(STANDARD_BUNDLE_CHARS) },
-      stash: { entries: 0, capacity: STASH_LIMIT },
+      pageStore: { entries: 0, capacity: STASH_LIMIT },
       hotSubjects: [LIVE_STATE_QUIET_SUBJECT],
     })
 
@@ -5001,12 +5001,12 @@ test("live state snapshot is written on a quiet run with the exact schema budget
     assert.deepEqual(snapshotBodyOf(stateDir, SESSION_ID).snapshot, {
       session: SESSION_ID,
       manualMode: false,
-      modelContextTokens: null,
-      modelContextTokensSource: CONTEXT_TOKENS_SOURCE_UNKNOWN,
-      modelContextTokensModelKey: null,
+      contextLimit: null,
+      contextLimitSource: CONTEXT_TOKENS_SOURCE_UNKNOWN,
+      contextLimitModelKey: null,
       lastRun: { estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS), watermarkTokens: null, deficitTokens: null },
       totals: { ...STATS_ZEROED_COUNTERS, processedContextBytes: 2 * STANDARD_BUNDLE_CHARS, processedContextTokens: tokensForChars(2 * STANDARD_BUNDLE_CHARS) },
-      stash: { entries: 0, capacity: STASH_LIMIT },
+      pageStore: { entries: 0, capacity: STASH_LIMIT },
       hotSubjects: [LIVE_STATE_QUIET_SUBJECT],
     })
   } finally {
@@ -5041,8 +5041,8 @@ test("live state snapshot carries the captured budget source manual mode and the
     assertValidTimestamp(ts)
     assert.equal(snapshot.session, SESSION_ID)
     assert.equal(snapshot.manualMode, true)
-    assert.equal(snapshot.modelContextTokens, WATERMARK_PROBE_CONTEXT_LIMIT)
-    assert.equal(snapshot.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+    assert.equal(snapshot.contextLimit, WATERMARK_PROBE_CONTEXT_LIMIT)
+    assert.equal(snapshot.contextLimitSource, CONTEXT_TOKENS_SOURCE_MODEL)
     assert.deepEqual(snapshot.lastRun, {
       estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS),
       watermarkTokens: MANUAL_ARMED_WATERMARK_TOKENS,
@@ -5053,7 +5053,7 @@ test("live state snapshot carries the captured budget source manual mode and the
       processedContextBytes: STANDARD_BUNDLE_CHARS,
       processedContextTokens: tokensForChars(STANDARD_BUNDLE_CHARS),
     })
-    assert.deepEqual(snapshot.stash, { entries: 0, capacity: STASH_LIMIT })
+    assert.deepEqual(snapshot.pageStore, { entries: 0, capacity: STASH_LIMIT })
     assert.deepEqual(snapshot.hotSubjects, [LIVE_STATE_MANUAL_SUBJECT])
   } finally {
     cleanupMetricsDir(stateDir)
@@ -5071,8 +5071,8 @@ test("live state snapshot records eviction totals stash occupancy and an empty h
 
     const { snapshot } = snapshotBodyOf(stateDir, SESSION_ID)
     assert.equal(snapshot.manualMode, false)
-    assert.equal(snapshot.modelContextTokens, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
-    assert.equal(snapshot.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+    assert.equal(snapshot.contextLimit, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+    assert.equal(snapshot.contextLimitSource, CONTEXT_TOKENS_SOURCE_MODEL)
     assert.deepEqual(snapshot.lastRun, {
       estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS),
       watermarkTokens: tokensForChars(STANDARD_BUNDLE_CHARS) - OVER_BY_ONE_TOKENS,
@@ -5086,7 +5086,7 @@ test("live state snapshot records eviction totals stash occupancy and an empty h
       processedContextBytes: 495,
       processedContextTokens: tokensForChars(495),
     })
-    assert.deepEqual(snapshot.stash, { entries: 1, capacity: STASH_LIMIT })
+    assert.deepEqual(snapshot.pageStore, { entries: 1, capacity: STASH_LIMIT })
     assert.deepEqual(snapshot.hotSubjects, [])
   } finally {
     cleanupMetricsDir(stateDir)
@@ -5577,7 +5577,7 @@ test("metrics totals accumulate the post-transform processed context chars acros
     assert.deepEqual(lines[0].totals, {
       ...STATS_ZEROED_COUNTERS,
       deduped: DEDUP_TOMBSTONE_SINGLE_COUNT,
-      dedupedBytes: COMPOSITION_TOOL_COLD_BYTES,
+      dedupedBytesUnique: COMPOSITION_TOOL_COLD_BYTES,
       dedupedUnique: DEDUP_TOMBSTONE_SINGLE_COUNT,
       dedupTokensSaved: tokensForChars(COMPOSITION_TOOL_COLD_BYTES),
       collapsedWindows: DEDUP_TOMBSTONE_SINGLE_COUNT,
@@ -5950,7 +5950,7 @@ test("describe counts a superseded duplicate's attachment payload chars in the d
   assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), {
     ...STATS_ZEROED_COUNTERS,
     deduped: 1,
-    dedupedBytes: MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS,
+    dedupedBytesUnique: MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS,
     dedupedUnique: 1,
     dedupTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS),
     processedContextBytes: 2165,
@@ -6226,8 +6226,8 @@ test("recall evicts the oldest stashed entry when fence evictions push a session
 
   const stats = await readStats(hooks, SESSION_ID)
   assert.equal(countersOf(stats).fenceEvicted, fenceCount)
-  assert.equal(countersOf(stats).stashDropped, 1)
-  assert.deepEqual(stats.stash, { entries: STASH_LIMIT, capacity: STASH_LIMIT })
+  assert.equal(countersOf(stats).pagesDropped, 1)
+  assert.deepEqual(stats.pageStore, { entries: STASH_LIMIT, capacity: STASH_LIMIT })
   assert.equal(
     await recallTool(hooks, fenceFirstLineOf("block0"), SESSION_ID),
     stashMissFor(
@@ -6271,7 +6271,7 @@ test("transform lowers the estimate with fence bytes before the budget decision 
   const stats = await readStats(hooks, SESSION_ID)
   assert.equal(countersOf(stats).fenceEvicted, 1)
   assert.equal(countersOf(stats).evictions, 0)
-  assert.deepEqual(stats.stash, { entries: 1, capacity: STASH_LIMIT })
+  assert.deepEqual(stats.pageStore, { entries: 1, capacity: STASH_LIMIT })
 })
 
 test("transform replaces a fence block whose closer ends the part text without dropping the prose before it", async () => {
@@ -6335,7 +6335,7 @@ test("describe counts fence evictions in a distinct fenceEvicted counter without
     processedContextTokens: tokensForChars(286),
   })
   assert.deepEqual(stats.options.userFenceEviction, { enabled: true, minBlockLines: FENCE_DEFAULT_MIN_BLOCK_LINES })
-  assert.deepEqual(stats.stash, { entries: 1, capacity: STASH_LIMIT })
+  assert.deepEqual(stats.pageStore, { entries: 1, capacity: STASH_LIMIT })
 })
 
 test("metrics log records a fence only run as eventful with the fenceEvictedThisRun counter", async () => {
@@ -6536,17 +6536,17 @@ test("metrics log keeps stash read accounting correct across a suppressed then f
 
     const lines = metricsLinesIn(metricsPath)
     assert.equal(lines.length, METRICS_COALESCE_LINES_AFTER_FLUSH)
-    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].stashReadsSinceLastLine, 1)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].recallsSinceLastLine, 1)
 
     assert.equal(await recallTool(hooks, METRICS_COALESCE_RELOAD_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
     await runTransform(hooks, buildBundle([[textPart(textOfChars(FILLER_TEXT_CHARS))], ...fillerMessages(2)]))
 
     const flushedLines = metricsLinesIn(metricsPath)
     assert.equal(flushedLines.length, METRICS_COALESCE_LINES_AFTER_SPAN)
-    assert.equal(flushedLines[METRICS_COALESCE_LINES_AFTER_SPAN - 1].stashReadsSinceLastLine, 1)
+    assert.equal(flushedLines[METRICS_COALESCE_LINES_AFTER_SPAN - 1].recallsSinceLastLine, 1)
     assert.deepEqual(flushedLines[METRICS_COALESCE_LINES_AFTER_SPAN - 1].evictedThisRun, [])
-    assert.equal(countersOf(await readStats(hooks, SESSION_ID)).stashHits, METRICS_COALESCE_STASH_HIT_COUNT)
-    assert.equal(countersOf(await readStats(hooks, SESSION_ID)).stashMisses, 0)
+    assert.equal(countersOf(await readStats(hooks, SESSION_ID)).recallHits, METRICS_COALESCE_STASH_HIT_COUNT)
+    assert.equal(countersOf(await readStats(hooks, SESSION_ID)).recallMisses, 0)
   } finally {
     cleanupMetricsDir(metricsDir)
   }
@@ -6561,8 +6561,8 @@ test("metrics log flushes a coalesced session when the budget source changes mid
 
     await runTransform(hooks, reasoningOnlyBundle())
     assert.equal(metricsLinesIn(metricsPath).length, STATS_LOG_FILE_LINES)
-    assert.equal(metricsLinesIn(metricsPath)[0].modelContextTokens, LARGE_DEFAULT_CONTEXT_TOKENS)
-    assert.equal(metricsLinesIn(metricsPath)[0].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+    assert.equal(metricsLinesIn(metricsPath)[0].contextLimit, LARGE_DEFAULT_CONTEXT_TOKENS)
+    assert.equal(metricsLinesIn(metricsPath)[0].contextLimitSource, CONTEXT_TOKENS_SOURCE_MODEL)
 
     await runTransform(hooks, reasoningOnlyBundle())
     assert.equal(metricsLinesIn(metricsPath).length, STATS_LOG_FILE_LINES)
@@ -6574,8 +6574,8 @@ test("metrics log flushes a coalesced session when the budget source changes mid
 
     const lines = metricsLinesIn(metricsPath)
     assert.equal(lines.length, METRICS_COALESCE_LINES_AFTER_FLUSH)
-    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].modelContextTokens, null)
-    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].contextLimit, null)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].contextLimitSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
     assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].reasoningExpiredThisRun, EXPIRED_REASONING_SINGLE_COUNT)
   } finally {
     cleanupMetricsDir(metricsDir)
@@ -6734,8 +6734,8 @@ test("transform keeps a per model override budget from driving eviction while ma
 
   const stats = await readStats(hooks, SESSION_ID)
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
-  assert.equal(stats.modelContextTokens, SMALL_CONTEXT_LIMIT)
-  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_OVERRIDE)
+  assert.equal(stats.contextLimit, SMALL_CONTEXT_LIMIT)
+  assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_OVERRIDE)
 })
 
 test("transform under manualMode with an unknown budget is byte-identical to the unknown-budget stand-down", async () => {
@@ -7446,8 +7446,8 @@ test("the chat.params handler survives hostile payloads without throwing", async
   }
 
   const stats = await readStats(hooks, SESSION_ID)
-  assert.equal(stats.modelContextTokens, null)
-  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+  assert.equal(stats.contextLimit, null)
+  assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
 })
 
 const DRY_RUN_CANDIDATE_BYTES = 3000
@@ -7530,8 +7530,8 @@ test("manual mode with watermarkTokens and no captured budget still reports the 
   await runTransform(hooks, bundle)
 
   const stats = await readStats(hooks, SESSION_ID)
-  assert.equal(stats.modelContextTokens, null)
-  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+  assert.equal(stats.contextLimit, null)
+  assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
   const dryRun = stats.dryRun as Record<string, unknown>
   assert.ok(dryRun !== undefined)
   assert.ok((dryRun.deficitTokens as number) > 0)
@@ -7742,8 +7742,8 @@ test("describe reports the manual state the captured budget and the armed waterm
 
   const stats = await readStats(hooks, SESSION_ID)
   assert.equal(stats.options.manualMode, true)
-  assert.equal(stats.modelContextTokens, WATERMARK_PROBE_CONTEXT_LIMIT)
-  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+  assert.equal(stats.contextLimit, WATERMARK_PROBE_CONTEXT_LIMIT)
+  assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_MODEL)
   assert.deepEqual(stats.lastRun, {
     estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS),
     watermarkTokens: MANUAL_ARMED_WATERMARK_TOKENS,
@@ -7758,8 +7758,8 @@ test("describe keeps a null watermark and deficit for a manual session with no b
   await runTransform(hooks, bundle)
 
   const stats = await readStats(hooks, SESSION_ID)
-  assert.equal(stats.modelContextTokens, null)
-  assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+  assert.equal(stats.contextLimit, null)
+  assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
   assert.deepEqual(stats.lastRun, {
     estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS),
     watermarkTokens: null,
@@ -7798,7 +7798,7 @@ const STASH_LIMIT_OVERRIDE_SUBJECT_PREFIX = "/data/slim-stash"
 test("describe reports the default stash capacity of fifty entries when stashLimit is unset", async () => {
   const stats = await readStats(await loadPluginHooks(), SESSION_ID)
 
-  assert.deepEqual(stats.stash, { entries: 0, capacity: STASH_LIMIT })
+  assert.deepEqual(stats.pageStore, { entries: 0, capacity: STASH_LIMIT })
 })
 
 test("recall applies a custom stashLimit dropping the oldest stashed entry past the bound", async () => {
@@ -7812,7 +7812,7 @@ test("recall applies a custom stashLimit dropping the oldest stashed entry past 
   ])
   await runTransform(hooks, bundle)
 
-  assert.deepEqual((await readStats(hooks, SESSION_ID)).stash, {
+  assert.deepEqual((await readStats(hooks, SESSION_ID)).pageStore, {
     entries: STASH_LIMIT_OVERRIDE,
     capacity: STASH_LIMIT_OVERRIDE,
   })
@@ -7832,7 +7832,7 @@ test("describe keeps the default stash capacity when stashLimit is invalid", asy
     const hooks = await loadPluginHooksWith({ stashLimit: invalidLimit })
     const stats = await readStats(hooks, SESSION_ID)
 
-    assert.deepEqual(stats.stash, { entries: 0, capacity: STASH_LIMIT })
+    assert.deepEqual(stats.pageStore, { entries: 0, capacity: STASH_LIMIT })
   }
 })
 
@@ -7961,7 +7961,7 @@ const rememberedSubjectsTouchCountFor = async (optionValue: number): Promise<num
   bundle.messages.push(syntheticMessageFor(SESSION_ID, [pathToolPart(REMEMBERED_SECOND_SUBJECT, APPEARANCE_ONLY_OUTPUT_BYTES)]))
   await runTransform(hooks, bundle)
 
-  return countersOf(await readStats(hooks, SESSION_ID)).postEvictionTouches
+  return countersOf(await readStats(hooks, SESSION_ID)).faults
 }
 
 test("describe forgets the oldest evicted subject at the rememberedEvictedSubjects bound so its touch goes uncounted", async () => {
@@ -8122,9 +8122,9 @@ const metricsLinesForSession = (metricsPath: string, sessionID: string): Record<
 const rehydrateSeedLine = (session: string, ts: string, evictions: number): Record<string, unknown> => ({
   ts,
   session,
-  modelContextTokens: null,
-  modelContextTokensSource: CONTEXT_TOKENS_SOURCE_UNKNOWN,
-  modelContextTokensModelKey: null,
+  contextLimit: null,
+  contextLimitSource: CONTEXT_TOKENS_SOURCE_UNKNOWN,
+  contextLimitModelKey: null,
   estimatedTokens: 0,
   watermarkTokens: null,
   deficitTokens: null,
@@ -8133,8 +8133,8 @@ const rehydrateSeedLine = (session: string, ts: string, evictions: number): Reco
   reasoningExpiredThisRun: 0,
   reasoningBytesExpiredThisRun: 0,
   fenceEvictedThisRun: 0,
-  postEvictionTouchesThisRun: 0,
-  stashReadsSinceLastLine: 0,
+  faultsThisRun: 0,
+  recallsSinceLastLine: 0,
   totals: { ...STATS_ZEROED_COUNTERS, evictions },
 })
 
@@ -8143,12 +8143,12 @@ const rehydrateSeedSnapshot = (session: string, ts: string, evictions: number): 
     ts,
     session,
     manualMode: false,
-    modelContextTokens: null,
-    modelContextTokensSource: CONTEXT_TOKENS_SOURCE_UNKNOWN,
-    modelContextTokensModelKey: null,
+    contextLimit: null,
+    contextLimitSource: CONTEXT_TOKENS_SOURCE_UNKNOWN,
+    contextLimitModelKey: null,
     lastRun: { estimatedTokens: 0, watermarkTokens: null, deficitTokens: null },
     totals: { ...STATS_ZEROED_COUNTERS, evictions },
-    stash: { entries: 0, capacity: STASH_LIMIT },
+    pageStore: { entries: 0, capacity: STASH_LIMIT },
     hotSubjects: [],
   })}\n`
 
@@ -8156,7 +8156,7 @@ const withCounterDeltas = (baseline: Record<string, number>, deltas: Record<stri
   const expected = { ...baseline }
   for (const [key, delta] of Object.entries(deltas)) expected[key] = (expected[key] ?? 0) + delta
   expected.evictionTokensSaved = tokensForChars(expected.bytesReclaimed)
-  expected.dedupTokensSaved = tokensForChars(expected.dedupedBytes)
+  expected.dedupTokensSaved = tokensForChars(expected.dedupedBytesUnique)
   expected.reasoningTokensSaved = tokensForChars(expected.reasoningBytesExpiredUnique)
   expected.processedContextTokens = tokensForChars(expected.processedContextBytes)
   return expected
@@ -8173,11 +8173,11 @@ const REHYDRA_SITTING_PROCESSED_CHARS = 4058
 const SECOND_SITTING_COUNTER_DELTAS = {
   evictions: 1,
   bytesReclaimed: MIN_EVICTABLE_BYTES + REHYDRA_FENCE_BYTES,
-  stashHits: 1,
-  stashMisses: 1,
+  recallHits: 1,
+  recallMisses: 1,
   deduped: 1,
   dedupedUnique: 1,
-  dedupedBytes: THREE_ENTRY_OUTPUT_BYTES,
+  dedupedBytesUnique: THREE_ENTRY_OUTPUT_BYTES,
   reasoningExpiredUnique: 1,
   reasoningBytesExpiredUnique: REHYDRA_REASONING_TEXT.length,
   fenceEvicted: 1,
@@ -8237,7 +8237,7 @@ test("resumed session continues its lifetime counters across a restart in the me
     const lines = metricsLinesForSession(metricsPath, SESSION_ID)
     assert.equal(lines.length, lineCountAfterFirstSitting + REHYDRA_LINES_FROM_SECOND_SITTING)
     assert.deepEqual(lines[lines.length - 1].totals, expected)
-    assert.equal(lines[lines.length - 1].stashReadsSinceLastLine, 1)
+    assert.equal(lines[lines.length - 1].recallsSinceLastLine, 1)
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)
@@ -8252,7 +8252,7 @@ test("a restart drops fault feedback so a previously reloaded subject loses its 
     await setContextLimit(first, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
     await evictAndReload(first, FAULT_RESTART_RELOADED_PATH)
     // The next transform flushes the reload into the persisted totals, so
-    // the restarted instance's stashHits figure proves rehydration happened
+    // the restarted instance's recallHits figure proves rehydration happened
     // and the deferral loss is fault-specific, not a missing record.
     await runTransform(first, buildBundle(fillerMessages()))
 
@@ -8264,7 +8264,7 @@ test("a restart drops fault feedback so a previously reloaded subject loses its 
     )
     assertEntryTombstoned(contest, 0)
     assertEntryKept(contest, 1)
-    assert.equal(countersOf(await readStats(restarted, SESSION_ID)).stashHits, 1)
+    assert.equal(countersOf(await readStats(restarted, SESSION_ID)).recallHits, 1)
   } finally {
     cleanupMetricsDir(metricsDir)
   }
@@ -8332,6 +8332,81 @@ test("resumed session with neither snapshot nor metrics log seeds zeroed counter
       processedContextBytes: 513,
       processedContextTokens: tokensForChars(513),
     })
+  } finally {
+    cleanupMetricsDir(metricsDir)
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+// The 2026-10-02 reset: a record written before the key renames carries
+// totals spellings (recallHits and siblings) the renamed schema does not
+// admit, and every renamed key sits in UPGRADE_REQUIRED_COUNTER_KEYS, so
+// the seeder rejects the record wholesale: the session restarts at zero
+// instead of rehydrating half-old figures, and the pre-rename budget
+// fields (modelContextTokens and siblings) stop rehydrating too.
+test("a pre-rename record is rejected by the seeder so the session restarts at zero with an unknown context limit", async () => {
+  const metricsDir = makeMetricsDir()
+  const stateDir = makeLiveStateDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    writeFileSync(
+      metricsPath,
+      `${JSON.stringify({
+        ts: "2026-09-17T00:00:00.000Z",
+        session: SESSION_ID,
+        modelContextTokens: 250000,
+        modelContextTokensSource: CONTEXT_TOKENS_SOURCE_OVERRIDE,
+        modelContextTokensModelKey: "provider/model",
+        estimatedTokens: 60000,
+        watermarkTokens: 125000,
+        deficitTokens: 0,
+        evictedThisRun: [],
+        dedupedThisRun: 0,
+        reasoningExpiredThisRun: 0,
+        reasoningBytesExpiredThisRun: 0,
+        fenceEvictedThisRun: 0,
+        postEvictionTouchesThisRun: 0,
+        stashReadsSinceLastLine: 0,
+        totals: {
+          evictions: 4,
+          bytesReclaimed: 12000,
+          stashHits: 7,
+          stashMisses: 3,
+          stashDropped: 1,
+          deduped: 2,
+          dedupedBytes: 900,
+          dedupedUnique: 2,
+          collapsedWindows: 0,
+          collapsedWindowBytes: 0,
+          reasoningExpiredUnique: 0,
+          reasoningBytesExpiredUnique: 0,
+          postEvictionTouches: 1,
+          fenceEvicted: 0,
+          processedContextBytes: 480,
+          processedContextTokens: 120,
+          evictionTokensSaved: 3000,
+          dedupTokensSaved: 225,
+          collapsedWindowTokensSaved: 0,
+          reasoningTokensSaved: 0,
+        },
+      })}\n`,
+    )
+
+    const hooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
+    // No chat.params capture: with the seed rejected the persisted limit
+    // must not refill, so the budget stays unknown and eviction stands
+    // down (no metrics line, whatever the bundle carries).
+    await runTransform(hooks, buildStandardBundle(SESSION_ID, REHYDRA_EVICTION_SUBJECT_A))
+
+    const stats = await readStats(hooks, SESSION_ID)
+    assert.equal(stats.contextLimit, null)
+    assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+    assert.deepEqual(countersOf(stats), {
+      ...STATS_ZEROED_COUNTERS,
+      processedContextBytes: STANDARD_BUNDLE_CHARS,
+      processedContextTokens: tokensForChars(STANDARD_BUNDLE_CHARS),
+    })
+    assert.equal(metricsLinesIn(metricsPath).length, 1)
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)
@@ -8453,8 +8528,8 @@ test("resumed session resolves the budget persisted in its snapshot and logs it 
 
     const lines = metricsLinesForSession(metricsPath, SESSION_ID)
     assert.equal(lines.length, STATS_LOG_FILE_LINES)
-    assert.equal(lines[0].modelContextTokens, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
-    assert.equal(lines[0].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+    assert.equal(lines[0].contextLimit, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
+    assert.equal(lines[0].contextLimitSource, CONTEXT_TOKENS_SOURCE_MODEL)
     assert.equal(lines[0].watermarkTokens, BUDGET_PERSISTENCE_CONTEXT_LIMIT * WATERMARK_RATIO)
     assert.ok((lines[0].deficitTokens as number) < 0)
   } finally {
@@ -8478,8 +8553,8 @@ test("a live chat.params capture overrides the budget rehydrated from the snapsh
 
     const lines = metricsLinesForSession(metricsPath, SESSION_ID)
     assert.equal(lines.length, STATS_LOG_FILE_LINES)
-    assert.equal(lines[0].modelContextTokens, SMALL_CONTEXT_LIMIT)
-    assert.equal(lines[0].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+    assert.equal(lines[0].contextLimit, SMALL_CONTEXT_LIMIT)
+    assert.equal(lines[0].contextLimitSource, CONTEXT_TOKENS_SOURCE_MODEL)
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)
@@ -8499,19 +8574,19 @@ test("a mid sitting model change without a limit invalidates the rehydrated budg
     // Rehydration lands first: the reasoning-only run resolves the
     // persisted budget before the invalidating chat.params event arrives.
     await runTransform(secondSittingHooks, reasoningOnlyBundle())
-    assert.equal(metricsLinesForSession(metricsPath, SESSION_ID)[0].modelContextTokens, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
+    assert.equal(metricsLinesForSession(metricsPath, SESSION_ID)[0].contextLimit, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
 
     await setChatParamsForModel(secondSittingHooks, SESSION_ID, OTHER_MODEL_PROVIDER, OTHER_MODEL_ID, undefined)
     assert.equal((await runStandDownProbe(secondSittingHooks)).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
     const stats = await readStats(secondSittingHooks, SESSION_ID)
-    assert.equal(stats.modelContextTokens, null)
-    assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+    assert.equal(stats.contextLimit, null)
+    assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
 
     await runTransform(secondSittingHooks, reasoningOnlyBundle())
     const lines = metricsLinesForSession(metricsPath, SESSION_ID)
     assert.equal(lines.length, METRICS_COALESCE_LINES_AFTER_FLUSH)
-    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].modelContextTokens, null)
-    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].contextLimit, null)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].contextLimitSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)
@@ -8533,8 +8608,8 @@ test("a model change across a restart suppresses the persisted budget instead of
 
     const lines = metricsLinesForSession(metricsPath, SESSION_ID)
     assert.equal(lines.length, STATS_LOG_FILE_LINES)
-    assert.equal(lines[0].modelContextTokens, null)
-    assert.equal(lines[0].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+    assert.equal(lines[0].contextLimit, null)
+    assert.equal(lines[0].contextLimitSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
 
     assert.equal((await runStandDownProbe(secondSittingHooks)).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
     assert.equal(countersOf(await readStats(secondSittingHooks, SESSION_ID)).evictions, 0)
@@ -8559,8 +8634,8 @@ test("a same model no limit chat params event keeps the rehydrated budget resolv
 
     const lines = metricsLinesForSession(metricsPath, SESSION_ID)
     assert.equal(lines.length, STATS_LOG_FILE_LINES)
-    assert.equal(lines[0].modelContextTokens, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
-    assert.equal(lines[0].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+    assert.equal(lines[0].contextLimit, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
+    assert.equal(lines[0].contextLimitSource, CONTEXT_TOKENS_SOURCE_MODEL)
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)
@@ -8575,8 +8650,8 @@ test("a model change across a restart suppresses a budget seeded from the metric
     await setChatParamsForModel(firstSittingHooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
     await runTransform(firstSittingHooks, reasoningOnlyBundle())
     const seedLine = metricsLinesForSession(metricsPath, SESSION_ID)[0]
-    assert.equal(seedLine.modelContextTokens, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
-    assert.equal(seedLine.modelContextTokensModelKey, OVERRIDE_MODEL_KEY)
+    assert.equal(seedLine.contextLimit, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
+    assert.equal(seedLine.contextLimitModelKey, OVERRIDE_MODEL_KEY)
 
     const secondSittingHooks = await loadPluginHooksWith({ metricsLog: true, metricsPath, liveStateLog: false })
     await setChatParamsForModel(secondSittingHooks, SESSION_ID, OTHER_MODEL_PROVIDER, OTHER_MODEL_ID, undefined)
@@ -8584,8 +8659,8 @@ test("a model change across a restart suppresses a budget seeded from the metric
 
     const lines = metricsLinesForSession(metricsPath, SESSION_ID)
     assert.equal(lines.length, METRICS_COALESCE_LINES_AFTER_FLUSH)
-    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].modelContextTokens, null)
-    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].contextLimit, null)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].contextLimitSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
 
     assert.equal((await runStandDownProbe(secondSittingHooks)).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
     assert.equal(countersOf(await readStats(secondSittingHooks, SESSION_ID)).evictions, 0)
@@ -8607,8 +8682,8 @@ test("a removed model override suppresses the persisted override budget across a
     const secondSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir, overrideOptions)
     await runTransform(secondSittingHooks, reasoningOnlyBundle())
     const rehydratedLines = metricsLinesForSession(metricsPath, SESSION_ID)
-    assert.equal(rehydratedLines[0].modelContextTokens, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
-    assert.equal(rehydratedLines[0].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_OVERRIDE)
+    assert.equal(rehydratedLines[0].contextLimit, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
+    assert.equal(rehydratedLines[0].contextLimitSource, CONTEXT_TOKENS_SOURCE_OVERRIDE)
     assert.equal(rehydratedLines.length, STATS_LOG_FILE_LINES)
 
     // The override leaves the config only now: the third sitting rehydrates
@@ -8618,8 +8693,8 @@ test("a removed model override suppresses the persisted override budget across a
 
     const lines = metricsLinesForSession(metricsPath, SESSION_ID)
     assert.equal(lines.length, METRICS_COALESCE_LINES_AFTER_FLUSH)
-    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].modelContextTokens, null)
-    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].contextLimit, null)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].contextLimitSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
 
     assert.equal((await runStandDownProbe(thirdSittingHooks)).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
     assert.equal(countersOf(await readStats(thirdSittingHooks, SESSION_ID)).evictions, 0)
@@ -8640,8 +8715,8 @@ test("a removed defaultContextTokens option suppresses the persisted default bud
     const secondSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir, { defaultContextTokens: EXPLICIT_DEFAULT_CONTEXT_TOKENS })
     await runTransform(secondSittingHooks, reasoningOnlyBundle())
     const rehydratedLines = metricsLinesForSession(metricsPath, SESSION_ID)
-    assert.equal(rehydratedLines[0].modelContextTokens, EXPLICIT_DEFAULT_CONTEXT_TOKENS)
-    assert.equal(rehydratedLines[0].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_DEFAULT)
+    assert.equal(rehydratedLines[0].contextLimit, EXPLICIT_DEFAULT_CONTEXT_TOKENS)
+    assert.equal(rehydratedLines[0].contextLimitSource, CONTEXT_TOKENS_SOURCE_DEFAULT)
     assert.equal(rehydratedLines.length, STATS_LOG_FILE_LINES)
 
     // The option leaves the config only now: the third sitting rehydrates
@@ -8651,8 +8726,8 @@ test("a removed defaultContextTokens option suppresses the persisted default bud
 
     const lines = metricsLinesForSession(metricsPath, SESSION_ID)
     assert.equal(lines.length, METRICS_COALESCE_LINES_AFTER_FLUSH)
-    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].modelContextTokens, null)
-    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].contextLimit, null)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].contextLimitSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
 
     assert.equal((await runStandDownProbe(thirdSittingHooks)).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
     assert.equal(countersOf(await readStats(thirdSittingHooks, SESSION_ID)).evictions, 0)
@@ -8668,9 +8743,9 @@ test("a hostile model key in the persisted record rejects the whole seed", async
   try {
     const metricsPath = metricsLogPathIn(metricsDir)
     const hostileSnapshot = JSON.parse(rehydrateSeedSnapshot(SESSION_ID, REHYDRA_LATER_TS, REHYDRA_NEWER_RECORD_EVICTIONS)) as Record<string, unknown>
-    hostileSnapshot.modelContextTokens = BUDGET_PERSISTENCE_CONTEXT_LIMIT
-    hostileSnapshot.modelContextTokensSource = CONTEXT_TOKENS_SOURCE_MODEL
-    hostileSnapshot.modelContextTokensModelKey = 47
+    hostileSnapshot.contextLimit = BUDGET_PERSISTENCE_CONTEXT_LIMIT
+    hostileSnapshot.contextLimitSource = CONTEXT_TOKENS_SOURCE_MODEL
+    hostileSnapshot.contextLimitModelKey = 47
     writeFileSync(liveStatePathIn(stateDir, SESSION_ID), `${JSON.stringify(hostileSnapshot)}\n`)
 
     const hooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
@@ -8679,7 +8754,7 @@ test("a hostile model key in the persisted record rejects the whole seed", async
     const lines = metricsLinesForSession(metricsPath, SESSION_ID)
     assert.equal(lines.length, STATS_LOG_FILE_LINES)
     assert.equal((lines[0].totals as Record<string, number>).evictions, 0)
-    assert.equal(lines[0].modelContextTokens, null)
+    assert.equal(lines[0].contextLimit, null)
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)
@@ -8699,8 +8774,8 @@ test("describe resolves the rehydrated budget once the session entry is hydrated
     const secondSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
     await runTransform(secondSittingHooks, reasoningOnlyBundle())
     const stats = await readStats(secondSittingHooks, SESSION_ID)
-    assert.equal(stats.modelContextTokens, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
-    assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_MODEL)
+    assert.equal(stats.contextLimit, BUDGET_PERSISTENCE_CONTEXT_LIMIT)
+    assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_MODEL)
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)
@@ -8739,8 +8814,8 @@ test("a snapshot predating budget persistence seeds counters and leaves the budg
   try {
     const metricsPath = metricsLogPathIn(metricsDir)
     const legacySnapshot = JSON.parse(rehydrateSeedSnapshot(SESSION_ID, REHYDRA_LATER_TS, REHYDRA_NEWER_RECORD_EVICTIONS)) as Record<string, unknown>
-    delete legacySnapshot.modelContextTokens
-    delete legacySnapshot.modelContextTokensSource
+    delete legacySnapshot.contextLimit
+    delete legacySnapshot.contextLimitSource
     writeFileSync(liveStatePathIn(stateDir, SESSION_ID), `${JSON.stringify(legacySnapshot)}\n`)
 
     const hooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
@@ -8749,8 +8824,8 @@ test("a snapshot predating budget persistence seeds counters and leaves the budg
     const lines = metricsLinesForSession(metricsPath, SESSION_ID)
     assert.equal(lines.length, STATS_LOG_FILE_LINES)
     assert.equal((lines[0].totals as Record<string, number>).evictions, REHYDRA_NEWER_RECORD_EVICTIONS)
-    assert.equal(lines[0].modelContextTokens, null)
-    assert.equal(lines[0].modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+    assert.equal(lines[0].contextLimit, null)
+    assert.equal(lines[0].contextLimitSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)
@@ -8763,7 +8838,7 @@ test("a snapshot whose budget fields are invalid rejects the whole record and th
   try {
     const metricsPath = metricsLogPathIn(metricsDir)
     const hostileSnapshot = JSON.parse(rehydrateSeedSnapshot(SESSION_ID, REHYDRA_LATER_TS, REHYDRA_NEWER_RECORD_EVICTIONS)) as Record<string, unknown>
-    hostileSnapshot.modelContextTokens = "most of it"
+    hostileSnapshot.contextLimit = "most of it"
     writeFileSync(liveStatePathIn(stateDir, SESSION_ID), `${JSON.stringify(hostileSnapshot)}\n`)
 
     const hooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
@@ -8772,7 +8847,7 @@ test("a snapshot whose budget fields are invalid rejects the whole record and th
     const lines = metricsLinesForSession(metricsPath, SESSION_ID)
     assert.equal(lines.length, STATS_LOG_FILE_LINES)
     assert.equal((lines[0].totals as Record<string, number>).evictions, 0)
-    assert.equal(lines[0].modelContextTokens, null)
+    assert.equal(lines[0].contextLimit, null)
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)
@@ -8914,7 +8989,7 @@ test("a stash miss issued while the session's first hydration is in flight count
     )
     await resumeTransform
 
-    assert.equal(countersOf(await readStats(secondSittingHooks, SESSION_ID)).stashMisses, 2)
+    assert.equal(countersOf(await readStats(secondSittingHooks, SESSION_ID)).recallMisses, 2)
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)
@@ -8942,13 +9017,13 @@ test("a newest metrics line whose totals carry a non finite named counter is rej
   }
 })
 
-test("a metrics line predating dedupedBytes still seeds the resumed session with zero for it", async () => {
+test("a metrics line predating dedupedBytesUnique is rejected by the seeder and the session restarts at zero", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
   try {
     const metricsPath = metricsLogPathIn(metricsDir)
     const legacyTotals: Record<string, unknown> = { ...STATS_ZEROED_COUNTERS, evictions: REHYDRA_NEWER_RECORD_EVICTIONS }
-    delete legacyTotals.dedupedBytes
+    delete legacyTotals.dedupedBytesUnique
     writeFileSync(
       metricsPath,
       `${JSON.stringify({ ...rehydrateSeedLine(SESSION_ID, REHYDRA_LATER_TS, REHYDRA_NEWER_RECORD_EVICTIONS), totals: legacyTotals })}\n`,
@@ -8958,8 +9033,8 @@ test("a metrics line predating dedupedBytes still seeds the resumed session with
     await runQuietProbeTransform(hooks, SESSION_ID)
 
     const counters = countersOf(await readStats(hooks, SESSION_ID))
-    assert.equal(counters.evictions, REHYDRA_NEWER_RECORD_EVICTIONS)
-    assert.equal(counters.dedupedBytes, 0)
+    assert.equal(counters.evictions, 0)
+    assert.equal(counters.dedupedBytesUnique, 0)
   } finally {
     cleanupMetricsDir(metricsDir)
     cleanupMetricsDir(stateDir)
@@ -9418,7 +9493,7 @@ test("a fresh plugin instance reloads a prior session's evicted original through
       await recallTool(secondSittingHooks, PAGE_STORE_ROUNDTRIP_SUBJECT, SESSION_ID_B),
       `${outputOfBytes(MIN_EVICTABLE_BYTES)}\n${PAGE_STORE_RESTORED_LINE}`,
     )
-    assert.equal(countersOf(await readStats(secondSittingHooks, SESSION_ID_B)).stashHits, 1)
+    assert.equal(countersOf(await readStats(secondSittingHooks, SESSION_ID_B)).recallHits, 1)
   } finally {
     cleanupMetricsDir(pagesDir)
   }

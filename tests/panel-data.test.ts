@@ -107,8 +107,8 @@ test("parseMetricsLine parses a line carrying exactly the fields the panel consu
   assert.ok(line !== undefined)
   assert.equal(line.session, SESSION_A)
   assert.equal(line.ts, LOG_LINE_TS_STALE)
-  assert.equal(line.modelContextTokens, BUDGET_TOKENS_MODEL)
-  assert.equal(line.modelContextTokensSource, MODEL_CONTEXT_LIMIT_SOURCE)
+  assert.equal(line.contextLimit, BUDGET_TOKENS_MODEL)
+  assert.equal(line.contextLimitSource, MODEL_CONTEXT_LIMIT_SOURCE)
   assert.equal(line.estimatedTokens, ESTIMATED_TOKENS)
   assert.equal(line.totals.evictions, TOTALS_EVICTIONS)
   assert.equal(line.evictedThisRun.length, 1)
@@ -116,12 +116,12 @@ test("parseMetricsLine parses a line carrying exactly the fields the panel consu
 })
 
 test("parseMetricsLine accepts the nullable budget and watermark fields of unknown-budget runs", () => {
-  const raw = JSON.stringify(makeLine({ modelContextTokens: null, watermarkTokens: null, deficitTokens: null }))
+  const raw = JSON.stringify(makeLine({ contextLimit: null, watermarkTokens: null, deficitTokens: null }))
 
   const line = parseMetricsLine(raw)
 
   assert.ok(line !== undefined)
-  assert.equal(line.modelContextTokens, null)
+  assert.equal(line.contextLimit, null)
   assert.equal(line.watermarkTokens, null)
   assert.equal(line.deficitTokens, null)
 })
@@ -188,6 +188,85 @@ test("parseMetricsLine and parseCheckpoint drop pre-upgrade records whose totals
   assert.equal(parseCheckpoint(legacySnapshot), undefined)
 })
 
+// The pre-rename shape the 2026-10-02 reset retired: old totals key
+// spellings (recallHits and siblings), the old budget field names
+// (contextLimit and siblings), and the old pageStore checkpoint block.
+// Both parsers reject these wholesale, so a session with only pre-rename
+// records goes dark until its next eventful run writes a current record.
+const makePreRenameTotals = (): Record<string, number> => ({
+  evictions: 2,
+  bytesReclaimed: 6000,
+  stashHits: 5,
+  stashMisses: 3,
+  stashDropped: 1,
+  deduped: 1,
+  dedupedBytes: 900,
+  dedupedUnique: 1,
+  collapsedWindows: 0,
+  collapsedWindowBytes: 0,
+  reasoningExpiredUnique: 0,
+  reasoningBytesExpiredUnique: 0,
+  postEvictionTouches: 1,
+  fenceEvicted: 0,
+  processedContextBytes: 480,
+  processedContextTokens: 120,
+  evictionTokensSaved: 1500,
+  dedupTokensSaved: 225,
+  collapsedWindowTokensSaved: 0,
+  reasoningTokensSaved: 0,
+})
+
+const makePreRenameLine = (): Record<string, unknown> => ({
+  session: SESSION_A,
+  ts: LOG_LINE_TS_STALE,
+  modelContextTokens: BUDGET_TOKENS_MODEL,
+  modelContextTokensSource: MODEL_CONTEXT_LIMIT_SOURCE,
+  estimatedTokens: ESTIMATED_TOKENS,
+  watermarkTokens: WATERMARK_TOKENS,
+  deficitTokens: DEFICIT_TOKENS,
+  evictedThisRun: [],
+  totals: makePreRenameTotals(),
+})
+
+const makePreRenameSnapshot = (): Record<string, unknown> => ({
+  ts: SNAPSHOT_TS,
+  session: SESSION_A,
+  manualMode: true,
+  modelContextTokens: BUDGET_TOKENS_MODEL,
+  modelContextTokensSource: MODEL_CONTEXT_LIMIT_SOURCE,
+  lastRun: { estimatedTokens: ESTIMATED_TOKENS, watermarkTokens: WATERMARK_TOKENS, deficitTokens: DEFICIT_TOKENS },
+  totals: makePreRenameTotals(),
+  stash: { entries: SNAPSHOT_STASH_ENTRIES, capacity: SNAPSHOT_STASH_CAPACITY },
+  hotSubjects: SNAPSHOT_HOT_SUBJECTS,
+})
+
+test("parseMetricsLine and parseCheckpoint reject pre-rename records whose spellings predate the reset", () => {
+  assert.equal(parseMetricsLine(JSON.stringify(makePreRenameLine())), undefined)
+  assert.equal(parseCheckpoint(JSON.stringify(makePreRenameSnapshot())), undefined)
+})
+
+test("parseTotals rejects a totals block missing a renamed reset key", () => {
+  const { recallHits: _recallHits, ...absentRecallHits } = makeTotals() as Record<string, number>
+  assert.equal(parseMetricsLine(JSON.stringify(makeLine({ totals: absentRecallHits }))), undefined)
+})
+
+test("a session with only pre-rename records renders nothing log- or snapshot-derived until its next eventful run lands a current record", async () => {
+  await withTempDir(async (dir) => {
+    const logPath = join(dir, "context-metrics.jsonl")
+    writeFileSync(logPath, `${JSON.stringify(makePreRenameLine())}\n`)
+    writeSnapshot(dir, SESSION_A, makePreRenameSnapshot())
+
+    const dark = await loadPanelData({ path: logPath, stateDir: dir, sessionID: SESSION_A })
+    assert.equal(dark.current, undefined)
+    assert.equal(dark.global.runs, 0)
+
+    appendFileSync(logPath, `${JSON.stringify(makeLine({ ts: SNAPSHOT_TS }))}\n`)
+    const recovered = await loadPanelData({ path: logPath, stateDir: dir, sessionID: SESSION_A })
+    assert.ok(recovered.current !== undefined)
+    assert.equal(recovered.current.runs, 1)
+  })
+})
+
 test("readMetricsLog keeps the newest parseable line per session and skips pre-upgrade and malformed lines in a mixed log", async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, "metrics.jsonl")
@@ -232,14 +311,10 @@ test("readMetricsLog preserves the eviction footer and runs count of strict sess
   })
 })
 
-test("parseTotals defaults an absent dedupedBytes to zero while still rejecting other missing keys", () => {
-  const { dedupedBytes: _dedupedBytes, ...preDedupedBytesTotals } = makeTotals()
-  const raw = JSON.stringify(makeLine({ totals: preDedupedBytesTotals }))
-
-  const line = parseMetricsLine(raw)
-
-  assert.ok(line !== undefined)
-  assert.equal(line.totals.dedupedBytes, 0)
+test("parseTotals rejects an absent first-crossing dedup byte key after the reset while the transitional keys still default", () => {
+  const { dedupedBytesUnique: _dedupedBytes, ...absentDedupedBytes } = makeTotals()
+  const raw = JSON.stringify(makeLine({ totals: absentDedupedBytes }))
+  assert.equal(parseMetricsLine(raw), undefined)
   const { fenceEvicted: _fenceEvicted, ...missingFenceTotals } = makeTotals()
   assert.equal(parseMetricsLine(JSON.stringify(makeLine({ totals: missingFenceTotals }))), undefined)
 })
@@ -531,7 +606,7 @@ test("parseMetricsLine consumes the line's ts and accepts the plugin's remaining
     reasoningExpiredThisRun: 1,
     reasoningBytesExpiredThisRun: 512,
     fenceEvictedThisRun: 1,
-    postEvictionTouchesThisRun: 1,
+    faultsThisRun: 1,
     stashReadsSinceLastLine: 3,
     wouldEvictThisRun: 4,
     wouldEvictBytesThisRun: 12288,
@@ -598,7 +673,7 @@ test("loadPanelData surfaces the read error when the log path cannot be read", a
 
     assert.ok(data.error !== undefined)
     assert.equal(data.current, undefined)
-    assert.deepEqual(data.global.stashReads, 0)
+    assert.deepEqual(data.global.recalls, 0)
   })
 })
 
@@ -645,8 +720,8 @@ test("sessionPanelData returns undefined when the session has no lines", () => {
 
 test("sessionPanelData reports the budget, source, and last run from the session's most recent line", () => {
   const lines = [
-    makeLine({ modelContextTokens: BUDGET_TOKENS_SMALL, estimatedTokens: SECOND_LINE_ESTIMATED }),
-    makeLine({ modelContextTokensSource: DEFAULT_CONTEXT_LIMIT_SOURCE }),
+    makeLine({ contextLimit: BUDGET_TOKENS_SMALL, estimatedTokens: SECOND_LINE_ESTIMATED }),
+    makeLine({ contextLimitSource: DEFAULT_CONTEXT_LIMIT_SOURCE }),
   ]
 
   const panel = sessionPanelData(lines, SESSION_A)
@@ -665,7 +740,7 @@ test("sessionPanelData reports cumulative counters and stash reads from the most
   assert.ok(panel !== undefined)
   assert.equal(panel.totals.evictions, TOTALS_EVICTIONS)
   assert.equal(panel.totals.bytesReclaimed, TOTALS_BYTES)
-  assert.equal(panel.stashReads, TOTALS_STASH_HITS + TOTALS_STASH_MISSES)
+  assert.equal(panel.recalls, TOTALS_STASH_HITS + TOTALS_STASH_MISSES)
 })
 
 test("sessionPanelData lists recent evictions newest first bounded by the limit", () => {
@@ -711,7 +786,7 @@ test("globalTotals sums each session's latest cumulative totals once per session
   assert.equal(totals.runs, LINE_COUNT_THREE)
   assert.equal(totals.evictions, TOTALS_EVICTIONS * 2 + 1)
   assert.equal(totals.bytesReclaimed, TOTALS_BYTES * 2 + SUBJECT_TAIL.length)
-  assert.equal(totals.stashReads, (TOTALS_STASH_HITS + TOTALS_STASH_MISSES) * 2)
+  assert.equal(totals.recalls, (TOTALS_STASH_HITS + TOTALS_STASH_MISSES) * 2)
 })
 
 test("loadPanelData selects the requested session's panel data", async () => {
@@ -811,25 +886,25 @@ test("parseCheckpoint parses a snapshot carrying exactly the fields the panel co
   assert.equal(snapshot.ts, SNAPSHOT_TS)
   assert.equal(snapshot.session, SESSION_A)
   assert.equal(snapshot.manualMode, true)
-  assert.equal(snapshot.modelContextTokens, BUDGET_TOKENS_MODEL)
-  assert.equal(snapshot.modelContextTokensSource, MODEL_CONTEXT_LIMIT_SOURCE)
+  assert.equal(snapshot.contextLimit, BUDGET_TOKENS_MODEL)
+  assert.equal(snapshot.contextLimitSource, MODEL_CONTEXT_LIMIT_SOURCE)
   assert.deepEqual(snapshot.lastRun, {
     estimatedTokens: ESTIMATED_TOKENS,
     watermarkTokens: WATERMARK_TOKENS,
     deficitTokens: DEFICIT_TOKENS,
   })
   assert.equal(snapshot.totals.evictions, TOTALS_EVICTIONS)
-  assert.deepEqual(snapshot.stash, { entries: SNAPSHOT_STASH_ENTRIES, capacity: SNAPSHOT_STASH_CAPACITY })
+  assert.deepEqual(snapshot.pageStore, { entries: SNAPSHOT_STASH_ENTRIES, capacity: SNAPSHOT_STASH_CAPACITY })
   assert.deepEqual(snapshot.hotSubjects, SNAPSHOT_HOT_SUBJECTS)
 })
 
 test("parseCheckpoint accepts a null unknown-budget watermark trio like the metrics line", () => {
   const snapshot = parseCheckpoint(
-    JSON.stringify(makeSnapshot({ modelContextTokens: null, lastRun: { estimatedTokens: ESTIMATED_TOKENS, watermarkTokens: null, deficitTokens: null } })),
+    JSON.stringify(makeSnapshot({ contextLimit: null, lastRun: { estimatedTokens: ESTIMATED_TOKENS, watermarkTokens: null, deficitTokens: null } })),
   )
 
   assert.ok(snapshot !== undefined)
-  assert.equal(snapshot.modelContextTokens, null)
+  assert.equal(snapshot.contextLimit, null)
   assert.deepEqual(snapshot.lastRun, { estimatedTokens: ESTIMATED_TOKENS, watermarkTokens: null, deficitTokens: null })
 })
 
@@ -838,9 +913,9 @@ test("parseCheckpoint rejects snapshots that are not valid JSON or miss required
   assert.equal(parseCheckpoint(JSON.stringify({ session: SESSION_A })), undefined)
   assert.equal(parseCheckpoint(JSON.stringify(makeSnapshot({ ts: 42 }))), undefined)
   assert.equal(parseCheckpoint(JSON.stringify(makeSnapshot({ manualMode: "yes" }))), undefined)
-  assert.equal(parseCheckpoint(JSON.stringify(makeSnapshot({ modelContextTokensSource: 42 }))), undefined)
+  assert.equal(parseCheckpoint(JSON.stringify(makeSnapshot({ contextLimitSource: 42 }))), undefined)
   assert.equal(parseCheckpoint(JSON.stringify(makeSnapshot({ totals: { ...makeTotals(), evictions: "many" } }))), undefined)
-  assert.equal(parseCheckpoint(JSON.stringify(makeSnapshot({ stash: { entries: SNAPSHOT_STASH_ENTRIES } }))), undefined)
+  assert.equal(parseCheckpoint(JSON.stringify(makeSnapshot({ pageStore: { entries: SNAPSHOT_STASH_ENTRIES } }))), undefined)
   assert.equal(parseCheckpoint(JSON.stringify(makeSnapshot({ lastRun: { estimatedTokens: ESTIMATED_TOKENS } }))), undefined)
   assert.equal(parseCheckpoint(JSON.stringify(makeSnapshot({ hotSubjects: ["ok", 42] }))), undefined)
 })
@@ -880,8 +955,8 @@ test("loadPanelData prefers the live snapshot for the session block and keeps lo
       deficitTokens: DEFICIT_TOKENS,
     })
     assert.deepEqual(data.current.totals, makeTotals())
-    assert.equal(data.current.stashReads, TOTALS_STASH_HITS + TOTALS_STASH_MISSES)
-    assert.deepEqual(data.current.stash, { entries: SNAPSHOT_STASH_ENTRIES, capacity: SNAPSHOT_STASH_CAPACITY })
+    assert.equal(data.current.recalls, TOTALS_STASH_HITS + TOTALS_STASH_MISSES)
+    assert.deepEqual(data.current.pageStore, { entries: SNAPSHOT_STASH_ENTRIES, capacity: SNAPSHOT_STASH_CAPACITY })
     assert.deepEqual(data.current.hotSubjects, SNAPSHOT_HOT_SUBJECTS)
     assert.equal(data.current.runs, SESSION_A_LOG_LINE_COUNT)
     assert.equal(data.current.recentEvictions.length, 1)
@@ -918,7 +993,7 @@ test("loadPanelData lets the session's newer log line win the fields it carries 
     assert.equal(data.current.lastRun.estimatedTokens, SECOND_LINE_ESTIMATED)
     assert.deepEqual(data.current.totals, logLineNewerThanSnapshot().totals)
     assert.equal(data.current.manualMode, true)
-    assert.deepEqual(data.current.stash, { entries: SNAPSHOT_STASH_ENTRIES, capacity: SNAPSHOT_STASH_CAPACITY })
+    assert.deepEqual(data.current.pageStore, { entries: SNAPSHOT_STASH_ENTRIES, capacity: SNAPSHOT_STASH_CAPACITY })
     assert.deepEqual(data.current.hotSubjects, SNAPSHOT_HOT_SUBJECTS)
     assert.equal(data.current.runs, SESSION_A_LOG_LINE_COUNT)
     assert.equal(data.current.recentEvictions.length, 1)
@@ -942,7 +1017,7 @@ test("loadPanelData keeps the snapshot's fields when the newest log line shares 
     assert.equal(data.current.lastRun.estimatedTokens, ESTIMATED_TOKENS)
     assert.deepEqual(data.current.totals, makeTotals())
     assert.equal(data.current.manualMode, true)
-    assert.deepEqual(data.current.stash, { entries: SNAPSHOT_STASH_ENTRIES, capacity: SNAPSHOT_STASH_CAPACITY })
+    assert.deepEqual(data.current.pageStore, { entries: SNAPSHOT_STASH_ENTRIES, capacity: SNAPSHOT_STASH_CAPACITY })
   })
 })
 
@@ -975,7 +1050,7 @@ test("loadPanelData renders the snapshot block with empty history when no metric
     assert.equal(data.current.contextLimitTokens, BUDGET_TOKENS_MODEL)
     assert.equal(data.current.manualMode, false)
     assert.deepEqual(data.current.totals, makeTotals())
-    assert.deepEqual(data.current.stash, { entries: SNAPSHOT_STASH_ENTRIES, capacity: SNAPSHOT_STASH_CAPACITY })
+    assert.deepEqual(data.current.pageStore, { entries: SNAPSHOT_STASH_ENTRIES, capacity: SNAPSHOT_STASH_CAPACITY })
     assert.equal(data.current.runs, 0)
     assert.deepEqual(data.current.recentEvictions, [])
     assert.equal(panelRows(data)[0].text, "Context Manager")
@@ -995,7 +1070,7 @@ test("loadPanelData falls back to the metrics log when no snapshot exists for th
     assert.ok(data.current !== undefined)
     assert.equal(data.current.contextLimitTokens, BUDGET_TOKENS_SMALL)
     assert.equal(data.current.manualMode, undefined)
-    assert.equal(data.current.stash, undefined)
+    assert.equal(data.current.pageStore, undefined)
     assert.equal(data.current.hotSubjects, undefined)
     assert.deepEqual(data.current.totals, logLineStaleAgainstSnapshot().totals)
     assert.equal(data.current.runs, SESSION_A_LOG_LINE_COUNT)
@@ -1028,7 +1103,7 @@ test("loadPanelData degrades to the metrics log when the snapshot is malformed",
     assert.ok(data.current !== undefined)
     assert.equal(data.current.contextLimitTokens, BUDGET_TOKENS_SMALL)
     assert.equal(data.current.manualMode, undefined)
-    assert.equal(data.current.stash, undefined)
+    assert.equal(data.current.pageStore, undefined)
   })
 })
 
@@ -1046,7 +1121,7 @@ test("loadPanelData falls back to the metrics log when the snapshot file cannot 
     assert.ok(data.current !== undefined)
     assert.equal(data.current.contextLimitTokens, BUDGET_TOKENS_SMALL)
     assert.equal(data.current.manualMode, undefined)
-    assert.equal(data.current.stash, undefined)
+    assert.equal(data.current.pageStore, undefined)
   })
 })
 
@@ -1065,7 +1140,7 @@ test("loadPanelData serves the snapshot block alongside the log warning when the
     assert.equal(data.current.contextLimitTokens, BUDGET_TOKENS_MODEL)
     assert.equal(data.current.manualMode, true)
     assert.deepEqual(data.current.totals, makeTotals())
-    assert.deepEqual(data.current.stash, { entries: SNAPSHOT_STASH_ENTRIES, capacity: SNAPSHOT_STASH_CAPACITY })
+    assert.deepEqual(data.current.pageStore, { entries: SNAPSHOT_STASH_ENTRIES, capacity: SNAPSHOT_STASH_CAPACITY })
     assert.equal(data.current.runs, 0)
     assert.deepEqual(data.current.recentEvictions, [])
 

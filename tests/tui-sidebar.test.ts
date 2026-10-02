@@ -154,7 +154,7 @@ test("SidebarEntry renders, polls, and disposes against the temp HOME fixtures",
   })
 
   await suite.test("mount renders the snapshot's budget and totals while the log supplies the recent eviction", async (st) => {
-    writeSessionSnapshot(DEFAULT_LIVE_STATE_DIR, MOUNT_SESSION, { session: MOUNT_SESSION, modelContextTokens: 300000 })
+    writeSessionSnapshot(DEFAULT_LIVE_STATE_DIR, MOUNT_SESSION, { session: MOUNT_SESSION, contextLimit: 300000 })
     writeMetricsLog(DEFAULT_METRICS_PATH, [makeLine({ session: MOUNT_SESSION, totals: { ...makeTotals(), evictions: 9 } })])
     await withPollSidebar(st, tui, MOUNT_SESSION, false, async (sidebar) => {
       await settleUntil(() => nodeText(sidebar.root).includes("Context Manager"))
