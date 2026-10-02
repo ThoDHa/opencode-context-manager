@@ -22,7 +22,7 @@ import {
   EVICTED_MESSAGES_AGO,
   EXPECTED_DEDUPED_STAT,
   EXPECTED_REASONING_STAT,
-  EXPECTED_TOKENS_USED_STAT,
+  EXPECTED_TOKENS_PROCESSED_STAT,
   HUGE_RECLAIMED_BYTES,
   LOG_LINE_ONLY_EVICTIONS,
   OVERRIDE_BUDGET_SOURCE,
@@ -76,7 +76,7 @@ test("sidebarRows renders the approved layout's header, stat block, and eviction
     { text: "Budget: 200k", tone: "normal" },
     { text: "Watermark: 100k", tone: "normal" },
     { text: "Over by: 23.5k", tone: "warning" },
-    { text: EXPECTED_TOKENS_USED_STAT, tone: "success" },
+    { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "success" },
     { text: `Evictions: ${TOTALS_EVICTIONS}, 3.1k tokens`, tone: "success" },
     { text: EXPECTED_DEDUPED_STAT, tone: "success" },
     { text: EXPECTED_REASONING_STAT, tone: "success" },
@@ -183,7 +183,7 @@ test("sidebarRows keeps the snapshot-fed session block under the warning group w
       { text: "Budget: 200k", tone: "normal" },
       { text: "Watermark: 100k", tone: "normal" },
       { text: "Over by: 23.5k", tone: "warning" },
-      { text: EXPECTED_TOKENS_USED_STAT, tone: "success" },
+      { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "success" },
       { text: `Evictions: ${TOTALS_EVICTIONS}, 3.1k tokens`, tone: "success" },
       { text: EXPECTED_DEDUPED_STAT, tone: "success" },
       { text: EXPECTED_REASONING_STAT, tone: "success" },
@@ -209,7 +209,7 @@ test("sidebarRows renders the log-fed fallback session in the spaced groups", as
       { text: `Budget: 600`, tone: "normal" },
       { text: "Watermark: 100k", tone: "normal" },
       { text: "Over by: 23.5k", tone: "warning" },
-      { text: EXPECTED_TOKENS_USED_STAT, tone: "success" },
+      { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "success" },
       { text: `Evictions: ${LOG_LINE_ONLY_EVICTIONS}, 3.1k tokens`, tone: "success" },
       { text: EXPECTED_DEDUPED_STAT, tone: "success" },
       { text: EXPECTED_REASONING_STAT, tone: "success" },
@@ -289,7 +289,7 @@ test("sidebarRows restyles a null budget and a missing watermark into the colon 
     { text: " ", tone: "normal" },
     { text: "Budget: inactive (no budget)", tone: "normal" },
     { text: "Watermark: none", tone: "normal" },
-    { text: EXPECTED_TOKENS_USED_STAT, tone: "success" },
+    { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "success" },
     { text: `Evictions: ${TOTALS_EVICTIONS}, 3.1k tokens`, tone: "success" },
     { text: EXPECTED_DEDUPED_STAT, tone: "success" },
     { text: EXPECTED_REASONING_STAT, tone: "success" },
@@ -311,7 +311,7 @@ test("sidebarRows shows Watermark none for a present budget when only the waterm
     { text: " ", tone: "normal" },
     { text: "Budget: 200k", tone: "normal" },
     { text: "Watermark: none", tone: "normal" },
-    { text: EXPECTED_TOKENS_USED_STAT, tone: "success" },
+    { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "success" },
     { text: `Evictions: ${TOTALS_EVICTIONS}, 3.1k tokens`, tone: "success" },
     { text: EXPECTED_DEDUPED_STAT, tone: "success" },
     { text: EXPECTED_REASONING_STAT, tone: "success" },
@@ -333,7 +333,7 @@ test("sidebarRows omits the over-by line when the deficit is zero or negative", 
     assert.deepEqual(rows.slice(2), [
       { text: `Budget: 200k`, tone: "normal" },
       { text: "Watermark: 100k", tone: "normal" },
-      { text: EXPECTED_TOKENS_USED_STAT, tone: "success" },
+      { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "success" },
       { text: `Evictions: ${TOTALS_EVICTIONS}, 3.1k tokens`, tone: "success" },
       { text: EXPECTED_DEDUPED_STAT, tone: "success" },
       { text: EXPECTED_REASONING_STAT, tone: "success" },
@@ -342,7 +342,7 @@ test("sidebarRows omits the over-by line when the deficit is zero or negative", 
   }
 })
 
-test("sidebarRows leads the stat rows with a zeroed Tokens used row before the savings rows", () => {
+test("sidebarRows leads the stat rows with a zeroed Tokens processed row before the savings rows", () => {
   const data = {
     source: "/tmp/metrics.jsonl",
     activeSession: SESSION_A,
@@ -353,12 +353,12 @@ test("sidebarRows leads the stat rows with a zeroed Tokens used row before the s
 
   const rows = sidebarRowsWithinWidth(data)
 
-  const tokensUsedIndex = rows.findIndex((row) => row.text.startsWith("Tokens used:"))
+  const tokensProcessedIndex = rows.findIndex((row) => row.text.startsWith("Tokens processed:"))
   const evictionsIndex = rows.findIndex((row) => row.text.startsWith("Evictions:"))
-  assert.notEqual(tokensUsedIndex, -1)
+  assert.notEqual(tokensProcessedIndex, -1)
   assert.notEqual(evictionsIndex, -1)
-  assert.deepEqual(rows[tokensUsedIndex], { text: "Tokens used: 0 tokens", tone: "success" })
-  assert.ok(tokensUsedIndex < evictionsIndex, "the Tokens used row must precede the Evictions row")
+  assert.deepEqual(rows[tokensProcessedIndex], { text: "Tokens processed: 0 tokens", tone: "success" })
+  assert.ok(tokensProcessedIndex < evictionsIndex, "the Tokens processed row must precede the Evictions row")
 })
 
 test("sidebarRows drops the budget source label while the panel keeps it", () => {

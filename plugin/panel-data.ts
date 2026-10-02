@@ -908,7 +908,7 @@ const SIDEBAR_EVICTIONS_LABEL = "Evictions"
 const SIDEBAR_DEDUPED_LABEL = "Deduped"
 const SIDEBAR_REASONING_LABEL = "Reasoning expired"
 const SIDEBAR_STASH_READS_LABEL = "Stash reads"
-const SIDEBAR_TOKENS_USED_LABEL = "Tokens used"
+const SIDEBAR_TOKENS_PROCESSED_LABEL = "Tokens processed"
 const SIDEBAR_TOKENS_UNIT = "tokens"
 const SIDEBAR_HITS_UNIT = "hits"
 const SIDEBAR_BUDGET_INACTIVE_TEXT = `${SIDEBAR_BUDGET_LABEL}: inactive (no budget)`
@@ -937,7 +937,7 @@ const savingsStatText = (label: string, count: number, tokensSaved: number): str
   `${label}: ${count}, ${formatTokenCount(tokensSaved)} ${SIDEBAR_TOKENS_UNIT}`
 
 const tokensStatText = (tokens: number): string =>
-  `${SIDEBAR_TOKENS_USED_LABEL}: ${formatTokenCount(tokens)} ${SIDEBAR_TOKENS_UNIT}`
+  `${SIDEBAR_TOKENS_PROCESSED_LABEL}: ${formatTokenCount(tokens)} ${SIDEBAR_TOKENS_UNIT}`
 
 const stashReadsStatText = (stashReads: number, stashHits: number): string =>
   `${SIDEBAR_STASH_READS_LABEL}: ${stashReads}, ${stashHits} ${SIDEBAR_HITS_UNIT}`

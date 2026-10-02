@@ -17,7 +17,7 @@ import {
   type SessionPanel,
   type SubagentChild,
 } from "../plugin/panel-data.ts"
-import { EXPECTED_DEDUPED_STAT, EXPECTED_REASONING_STAT, EXPECTED_TOKENS_USED_STAT, makeLine, makeTotals } from "./panel-fixtures.ts"
+import { EXPECTED_DEDUPED_STAT, EXPECTED_REASONING_STAT, EXPECTED_TOKENS_PROCESSED_STAT, makeLine, makeTotals } from "./panel-fixtures.ts"
 
 const MINUTE_MS = 60 * 1000
 const HOUR_MS = 60 * MINUTE_MS
@@ -100,14 +100,14 @@ test("sidebarSubagentsGroup renders the type's agent count on its row and the to
 
   assert.deepEqual(rows, [
     { text: "Subagents: 2", tone: "normal", labelTone: "info", labelBold: true },
-    { text: "Tokens used: 39k tokens", tone: "normal" },
+    { text: "Tokens processed: 39k tokens", tone: "normal" },
     { text: "Evictions: 2, 900 tokens", tone: "normal" },
     { text: "Deduped: 10, 4.5k tokens", tone: "normal" },
     { text: "Reasoning expired: 12, 1.3k tokens", tone: "normal" },
     { text: "Stash reads: 20, 8 hits", tone: "normal" },
     { text: " ", tone: "normal" },
     { text: "Scout: 2 agents", tone: "normal", labelTone: "info", labelBold: true },
-    { text: "Tokens used: 39k tokens", tone: "normal" },
+    { text: "Tokens processed: 39k tokens", tone: "normal" },
     { text: "Evictions: 2, 900 tokens", tone: "normal" },
     { text: "Deduped: 10, 4.5k tokens", tone: "normal" },
     { text: "Reasoning expired: 12, 1.3k tokens", tone: "normal" },
@@ -123,14 +123,14 @@ test("sidebarSubagentsGroup uses the singular agent unit for a single-child type
 
   assert.deepEqual(rows, [
     { text: "Subagents: 1", tone: "normal", labelTone: "info", labelBold: true },
-    { text: EXPECTED_TOKENS_USED_STAT, tone: "normal" },
+    { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "normal" },
     { text: "Evictions: 1, 900 tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
     { text: "Stash reads: 10, 4 hits", tone: "normal" },
     { text: " ", tone: "normal" },
     { text: "Scout: 1 agent", tone: "normal", labelTone: "info", labelBold: true },
-    { text: EXPECTED_TOKENS_USED_STAT, tone: "normal" },
+    { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "normal" },
     { text: "Evictions: 1, 900 tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
@@ -159,14 +159,14 @@ test("sidebarSubagentsGroup sums the landed panels of a type and keeps the agent
 
   assert.deepEqual(rows, [
     { text: "Subagents: 2", tone: "normal", labelTone: "info", labelBold: true },
-    { text: EXPECTED_TOKENS_USED_STAT, tone: "normal" },
+    { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "normal" },
     { text: "Evictions: 2, 900 tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
     { text: "Stash reads: 10, 4 hits", tone: "normal" },
     { text: " ", tone: "normal" },
     { text: "Scout: 2 agents", tone: "normal", labelTone: "info", labelBold: true },
-    { text: EXPECTED_TOKENS_USED_STAT, tone: "normal" },
+    { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "normal" },
     { text: "Evictions: 2, 900 tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
@@ -186,21 +186,21 @@ test("sidebarSubagentsGroup renders the cumulative token-first block directly un
 
   assert.deepEqual(rows, [
     { text: "Subagents: 2", tone: "normal", labelTone: "info", labelBold: true },
-    { text: "Tokens used: 1.1k tokens", tone: "normal" },
+    { text: "Tokens processed: 1.1k tokens", tone: "normal" },
     { text: "Evictions: 3, 1.5k tokens", tone: "normal" },
     { text: "Deduped: 8, 4.5k tokens", tone: "normal" },
     { text: "Reasoning expired: 6, 1.3k tokens", tone: "normal" },
     { text: "Stash reads: 20, 8 hits", tone: "normal" },
     { text: " ", tone: "normal" },
     { text: "Worker: 1 agent", tone: "normal", labelTone: "info", labelBold: true },
-    { text: "Tokens used: 400 tokens", tone: "normal" },
+    { text: "Tokens processed: 400 tokens", tone: "normal" },
     { text: "Evictions: 1, 600 tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
     { text: "Stash reads: 10, 4 hits", tone: "normal" },
     { text: " ", tone: "normal" },
     { text: "Scout: 1 agent", tone: "normal", labelTone: "info", labelBold: true },
-    { text: "Tokens used: 700 tokens", tone: "normal" },
+    { text: "Tokens processed: 700 tokens", tone: "normal" },
     { text: "Evictions: 2, 900 tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
@@ -235,9 +235,9 @@ test("sidebarSubagentsGroup sums the token rows over the landed children only", 
   const rows = rowsWithinWidth(sidebarSubagentsGroup([landedOne, landedTwo, dataless], data))
 
   assert.equal(rows[0].text, "Subagents: 3")
-  assert.equal(rows[1].text, "Tokens used: 1.1k tokens")
+  assert.equal(rows[1].text, "Tokens processed: 1.1k tokens")
   assert.equal(rows[7].text, "Scout: 3 agents")
-  assert.equal(rows[8].text, "Tokens used: 1.1k tokens")
+  assert.equal(rows[8].text, "Tokens processed: 1.1k tokens")
 })
 
 test("sidebarSubagentsGroup orders type blocks alphabetically regardless of the type's most recent child update", () => {
@@ -249,7 +249,7 @@ test("sidebarSubagentsGroup orders type blocks alphabetically regardless of the 
 
   assert.deepEqual(rows, [
     { text: "Subagents: 2", tone: "normal", labelTone: "info", labelBold: true },
-    { text: EXPECTED_TOKENS_USED_STAT, tone: "normal" },
+    { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "normal" },
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
@@ -258,7 +258,7 @@ test("sidebarSubagentsGroup orders type blocks alphabetically regardless of the 
     { text: "Probe: no data yet", tone: "normal", labelTone: "info", labelBold: true },
     { text: " ", tone: "normal" },
     { text: "Scan: 1 agent", tone: "normal", labelTone: "info", labelBold: true },
-    { text: EXPECTED_TOKENS_USED_STAT, tone: "normal" },
+    { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "normal" },
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
@@ -279,7 +279,7 @@ test("sidebarSubagentsGroup places the fleet agent types first in the canonical 
 
   assert.deepEqual(rows, [
     { text: "Subagents: 6", tone: "normal", labelTone: "info", labelBold: true },
-    { text: EXPECTED_TOKENS_USED_STAT, tone: "normal" },
+    { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "normal" },
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
@@ -296,7 +296,7 @@ test("sidebarSubagentsGroup places the fleet agent types first in the canonical 
     { text: "Explore: no data yet", tone: "normal", labelTone: "info", labelBold: true },
     { text: " ", tone: "normal" },
     { text: "Zeta: 1 agent", tone: "normal", labelTone: "info", labelBold: true },
-    { text: EXPECTED_TOKENS_USED_STAT, tone: "normal" },
+    { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "normal" },
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
@@ -329,7 +329,7 @@ test("sidebarSubagentsGroup compares non-fleet types locale-free so an uppercase
 
   assert.deepEqual(rows, [
     { text: "Subagents: 2", tone: "normal", labelTone: "info", labelBold: true },
-    { text: EXPECTED_TOKENS_USED_STAT, tone: "normal" },
+    { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "normal" },
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
@@ -338,7 +338,7 @@ test("sidebarSubagentsGroup compares non-fleet types locale-free so an uppercase
     { text: "Summarizer: no data yet", tone: "normal", labelTone: "info", labelBold: true },
     { text: " ", tone: "normal" },
     { text: "Audit: 1 agent", tone: "normal", labelTone: "info", labelBold: true },
-    { text: EXPECTED_TOKENS_USED_STAT, tone: "normal" },
+    { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "normal" },
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
@@ -366,14 +366,14 @@ test("sidebarSubagentsGroup excludes an archived child from the count and the ty
 
   assert.deepEqual(rows, [
     { text: "Subagents: 1", tone: "normal", labelTone: "info", labelBold: true },
-    { text: EXPECTED_TOKENS_USED_STAT, tone: "normal" },
+    { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "normal" },
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
     { text: "Stash reads: 10, 4 hits", tone: "normal" },
     { text: " ", tone: "normal" },
     { text: "Probe: 1 agent", tone: "normal", labelTone: "info", labelBold: true },
-    { text: EXPECTED_TOKENS_USED_STAT, tone: "normal" },
+    { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "normal" },
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
@@ -400,14 +400,14 @@ test("sidebarSubagentsGroup capitalizes only the first letter of an already-capi
 
   assert.deepEqual(rows, [
     { text: "Subagents: 2", tone: "normal", labelTone: "info", labelBold: true },
-    { text: EXPECTED_TOKENS_USED_STAT, tone: "normal" },
+    { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "normal" },
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
     { text: "Stash reads: 10, 4 hits", tone: "normal" },
     { text: " ", tone: "normal" },
     { text: "Scout: 1 agent", tone: "normal", labelTone: "info", labelBold: true },
-    { text: EXPECTED_TOKENS_USED_STAT, tone: "normal" },
+    { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "normal" },
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
@@ -424,9 +424,9 @@ test("sidebarSubagentsGroup caps an over-long type label's row at the sidebar co
   const rows = rowsWithinWidth(sidebarSubagentsGroup([child], data))
 
   assert.equal(rows.length, 13)
-  assert.equal(rows[1].text, EXPECTED_TOKENS_USED_STAT)
+  assert.equal(rows[1].text, EXPECTED_TOKENS_PROCESSED_STAT)
   assert.equal(rows[7].text, `A${"a".repeat(SIDEBAR_COLUMN_LIMIT - 2)}…`)
-  assert.equal(rows[8].text, EXPECTED_TOKENS_USED_STAT)
+  assert.equal(rows[8].text, EXPECTED_TOKENS_PROCESSED_STAT)
   assert.equal(rows[9].text, "Evictions: 5, 3.1k tokens")
   assert.equal(rows[10].text, EXPECTED_DEDUPED_STAT)
   assert.equal(rows[11].text, EXPECTED_REASONING_STAT)

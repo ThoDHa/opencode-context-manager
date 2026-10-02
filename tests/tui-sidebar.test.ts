@@ -27,7 +27,7 @@ after(() => {
 const { createTuiApiMock } = await import("./tui/api-mock.ts")
 const { nodeText, renderTree, settleUntil } = await import("./tui/opentui-stub.ts")
 const { assertTempHomeOwnsPaths, writeMetricsLog, writeSessionSnapshot } = await import("./tui/fixtures.ts")
-const { EXPECTED_TOKENS_USED_STAT, makeLine, makeTotals } = await import("./panel-fixtures.ts")
+const { EXPECTED_TOKENS_PROCESSED_STAT, makeLine, makeTotals } = await import("./panel-fixtures.ts")
 const { DEFAULT_LIVE_STATE_DIR, DEFAULT_METRICS_PATH } = await import("../plugin/panel-data.ts")
 
 const POLL_INTERVAL_MS = 5000
@@ -164,7 +164,7 @@ test("SidebarEntry renders, polls, and disposes against the temp HOME fixtures",
       assert.ok(!text.includes("Budget: 200k"))
       assert.ok(text.includes("Watermark: 100k"))
       assert.ok(text.includes("Over by: 23.5k"))
-      assert.ok(text.includes(EXPECTED_TOKENS_USED_STAT))
+      assert.ok(text.includes(EXPECTED_TOKENS_PROCESSED_STAT))
       assert.ok(text.includes("Evictions: 5, 3.1k tokens"), `snapshot totals should win: ${text}`)
       assert.ok(!text.includes("Evictions: 9"))
       assert.ok(text.includes("Last evicted: read /data/a.txt"), `log should supply evictions: ${text}`)
@@ -210,7 +210,7 @@ test("SidebarEntry renders, polls, and disposes against the temp HOME fixtures",
       assert.deepEqual(sidebar.calls.children, [{ sessionID: SUBAGENTS_SESSION }])
       const text = nodeText(sidebar.root)
       assert.ok(text.includes("Subagents: 1"))
-      assert.ok(text.includes(EXPECTED_TOKENS_USED_STAT))
+      assert.ok(text.includes(EXPECTED_TOKENS_PROCESSED_STAT))
       assert.ok(text.includes("Explore: 1 agent"))
       assert.ok(text.includes("Evictions: 2, 1.5k tokens"))
       assert.ok(text.includes("Deduped: 1, 800 tokens"))
