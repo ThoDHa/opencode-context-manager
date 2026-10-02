@@ -4279,7 +4279,7 @@ test("describe counts dedup tombstones without counting evictions and stays incr
   assert.equal(countersOf(await readStats(hooks, SESSION_ID)).deduped, 1)
 })
 
-test("describe accumulates the dedup token-savings estimate from each superseded duplicate's bytes", async () => {
+test("describe credits the dedup token-savings estimate once per pair and holds it constant across repeated standing runs", async () => {
   const hooks = await loadPluginHooks()
   const dedupSavingsParts = (): MessagePart[][] => [
     [pathToolPart(DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
@@ -4305,13 +4305,17 @@ test("describe accumulates the dedup token-savings estimate from each superseded
   })
 
   // The host re-materializes the stored messages on every run, so a standing
-  // pair re-tombstones every run: the repeat runs on a fresh identical copy.
+  // pair re-tombstones every run (the per-request truth stays on the line's
+  // dedupedThisRun and the deduped count) and the repeat runs on a fresh
+  // identical copy; the lifetime unique totals credit each pair once, in
+  // count and in first-crossing bytes alike, mirroring the reasoning
+  // unique precedent.
   await runTransform(hooks, buildBundle(dedupSavingsParts()))
   const counters = countersOf(await readStats(hooks, SESSION_ID))
   assert.equal(counters.deduped, DEDUP_SAVINGS_PAIR_COUNT * REPEATED_STANDING_RUNS)
   assert.equal(counters.dedupedUnique, DEDUP_SAVINGS_PAIR_COUNT)
-  assert.equal(counters.dedupedBytesUnique, DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES * REPEATED_STANDING_RUNS)
-  assert.equal(counters.dedupTokensSaved, tokensForChars(DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES * REPEATED_STANDING_RUNS))
+  assert.equal(counters.dedupedBytesUnique, DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES)
+  assert.equal(counters.dedupTokensSaved, tokensForChars(DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES))
 })
 
 test("describe counts stash drops when a single run evicts fifty one entries past the stash bound", async () => {
