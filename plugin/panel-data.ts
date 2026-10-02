@@ -339,18 +339,19 @@ const parseEvictedEntries = (value: unknown): PanelEvictedEntry[] | undefined =>
   return entries
 }
 
-// Every totals key is required and must be a finite number, with a
-// transitional exception: `processedContextBytes` and
-// `processedContextTokens` postdate the other raw counters, and rotation
-// holds weeks of records written before they existed, so absent
-// processed-context keys default to 0 while a present non-finite value
-// still rejects the record: a brand-new from-zero counter carries no
-// legacy meaning to distrust, so pre-upgrade records keep parsing with
-// truthful zeros and the totals begin accumulating from the upgrade
-// forward. The 2026-10-02 renamed keys (recallHits, recallMisses,
-// pagesDropped, faults, dedupedBytesUnique) do NOT join this list: their
-// absence marks the reset boundary, so records predating it are rejected
-// wholesale and such sessions go dark until their next eventful run.
+// Every totals key is required and must be a finite number, with one
+// narrow defaulting exception that mirrors the producer's seeder: the
+// parser reads an absent `processedContextBytes` or `processedContextTokens`
+// as 0 exactly when the seeder's own `persistedCounterOf` does (the two
+// absent-as-zero lists are the same two keys, so both sides accept and
+// reject the same records), while a present non-finite value rejects the
+// record on both sides alike. Every other absent key rejects the record
+// here because the seeder rejects it there: the 2026-10-02 renamed keys
+// (recallHits, recallMisses, pagesDropped, faults, dedupedBytesUnique)
+// and reasoningBytesExpiredUnique sit on the seeder's
+// UPGRADE_REQUIRED_COUNTER_KEYS, and the parser's matching strictness is
+// what makes a pre-reset session go dark on both surfaces together
+// instead of rendering figures the seeder refused to seed.
 const TRANSITIONAL_ABSENT_ZERO_KEYS: readonly TotalsKey[] = ["processedContextBytes", "processedContextTokens"]
 
 const parseTotals = (value: unknown): PanelTotals | undefined => {

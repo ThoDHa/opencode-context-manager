@@ -29,8 +29,8 @@ import {
   SESSION_A,
   SESSION_B,
   TOTALS_EVICTIONS,
-  TOTALS_STASH_HITS,
-  TOTALS_STASH_MISSES,
+  TOTALS_RECALL_HITS,
+  TOTALS_RECALL_MISSES,
   UNKNOWN_CONTEXT_LIMIT_SOURCE,
   logLineStaleAgainstSnapshot,
   makeLine,
@@ -83,7 +83,7 @@ test("sidebarRows renders the approved layout's header, stat block, and eviction
     { text: `Evictions: ${TOTALS_EVICTIONS}, 3.1k tokens`, tone: "success" },
     { text: EXPECTED_DEDUPED_STAT, tone: "success" },
     { text: EXPECTED_REASONING_STAT, tone: "success" },
-    { text: `Recalls: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "success" },
+    { text: `Recalls: ${TOTALS_RECALL_HITS + TOTALS_RECALL_MISSES}, ${TOTALS_RECALL_HITS} hits`, tone: "success" },
     { text: " ", tone: "normal" },
     { text: "Last evicted: read /data/a.txt", tone: "info" },
     { text: `3 kB, ${EVICTED_MESSAGES_AGO} messages ago`, tone: "info" },
@@ -191,7 +191,7 @@ test("sidebarRows keeps the snapshot-fed session block under the warning group w
       { text: `Evictions: ${TOTALS_EVICTIONS}, 3.1k tokens`, tone: "success" },
       { text: EXPECTED_DEDUPED_STAT, tone: "success" },
       { text: EXPECTED_REASONING_STAT, tone: "success" },
-      { text: `Recalls: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "success" },
+      { text: `Recalls: ${TOTALS_RECALL_HITS + TOTALS_RECALL_MISSES}, ${TOTALS_RECALL_HITS} hits`, tone: "success" },
     ])
   })
 })
@@ -218,7 +218,7 @@ test("sidebarRows renders the log-fed fallback session in the spaced groups", as
       { text: `Evictions: ${LOG_LINE_ONLY_EVICTIONS}, 3.1k tokens`, tone: "success" },
       { text: EXPECTED_DEDUPED_STAT, tone: "success" },
       { text: EXPECTED_REASONING_STAT, tone: "success" },
-      { text: `Recalls: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "success" },
+      { text: `Recalls: ${TOTALS_RECALL_HITS + TOTALS_RECALL_MISSES}, ${TOTALS_RECALL_HITS} hits`, tone: "success" },
       { text: " ", tone: "normal" },
       { text: "Last evicted: read /data/a.txt", tone: "info" },
       { text: `3 kB, ${EVICTED_MESSAGES_AGO} messages ago`, tone: "info" },
@@ -269,7 +269,7 @@ test("sidebarRows caps an over-long read error in the warning group at the sideb
   ])
 })
 
-test("sidebarRows restyles a null budget and a missing watermark into the colon forms without an over-by line", () => {
+test("sidebarRows restyles a null context limit and a missing watermark into the colon forms without an over-by line", () => {
   const data = {
     source: "/tmp/metrics.jsonl",
     activeSession: SESSION_A,
@@ -299,11 +299,11 @@ test("sidebarRows restyles a null budget and a missing watermark into the colon 
     { text: `Evictions: ${TOTALS_EVICTIONS}, 3.1k tokens`, tone: "success" },
     { text: EXPECTED_DEDUPED_STAT, tone: "success" },
     { text: EXPECTED_REASONING_STAT, tone: "success" },
-    { text: `Recalls: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "success" },
+    { text: `Recalls: ${TOTALS_RECALL_HITS + TOTALS_RECALL_MISSES}, ${TOTALS_RECALL_HITS} hits`, tone: "success" },
   ])
 })
 
-test("sidebarRows shows Watermark none for a present budget when only the watermark trio is null", () => {
+test("sidebarRows shows Watermark none for a present context limit when only the watermark trio is null", () => {
   const data = {
     source: "/tmp/metrics.jsonl",
     activeSession: SESSION_A,
@@ -322,7 +322,7 @@ test("sidebarRows shows Watermark none for a present budget when only the waterm
     { text: `Evictions: ${TOTALS_EVICTIONS}, 3.1k tokens`, tone: "success" },
     { text: EXPECTED_DEDUPED_STAT, tone: "success" },
     { text: EXPECTED_REASONING_STAT, tone: "success" },
-    { text: `Recalls: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "success" },
+    { text: `Recalls: ${TOTALS_RECALL_HITS + TOTALS_RECALL_MISSES}, ${TOTALS_RECALL_HITS} hits`, tone: "success" },
   ])
 })
 
@@ -345,7 +345,7 @@ test("sidebarRows omits the over-by line when the deficit is zero or negative", 
       { text: `Evictions: ${TOTALS_EVICTIONS}, 3.1k tokens`, tone: "success" },
       { text: EXPECTED_DEDUPED_STAT, tone: "success" },
       { text: EXPECTED_REASONING_STAT, tone: "success" },
-      { text: `Recalls: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "success" },
+      { text: `Recalls: ${TOTALS_RECALL_HITS + TOTALS_RECALL_MISSES}, ${TOTALS_RECALL_HITS} hits`, tone: "success" },
     ])
   }
 })
@@ -394,7 +394,7 @@ test("sidebarRows renders the Window row from the newest run's estimate between 
     { text: `Evictions: ${TOTALS_EVICTIONS}, 3.1k tokens`, tone: "success" },
     { text: EXPECTED_DEDUPED_STAT, tone: "success" },
     { text: EXPECTED_REASONING_STAT, tone: "success" },
-    { text: `Recalls: ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES}, ${TOTALS_STASH_HITS} hits`, tone: "success" },
+    { text: `Recalls: ${TOTALS_RECALL_HITS + TOTALS_RECALL_MISSES}, ${TOTALS_RECALL_HITS} hits`, tone: "success" },
   ])
 })
 
@@ -417,7 +417,7 @@ test("sidebarRows omits the Window row when the session has no run yet", () => {
   ])
 })
 
-test("sidebarRows drops the budget source label while the panel keeps it", () => {
+test("sidebarRows drops the context-limit source label while the panel keeps it", () => {
   const data = {
     source: "/tmp/metrics.jsonl",
     activeSession: SESSION_A,

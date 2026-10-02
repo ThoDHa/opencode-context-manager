@@ -17,8 +17,8 @@ import {
   TOTALS_EVICTIONS,
   TOTALS_FENCE_EVICTED,
   TOTALS_REASONING_EXPIRED,
-  TOTALS_STASH_HITS,
-  TOTALS_STASH_MISSES,
+  TOTALS_RECALL_HITS,
+  TOTALS_RECALL_MISSES,
   UNKNOWN_CONTEXT_LIMIT_SOURCE,
   makeLine,
 } from "./panel-fixtures.ts"
@@ -52,7 +52,7 @@ test("splitRowText returns undefined for a row whose label before the colon-spac
   assert.equal(splitRowText(": value"), undefined)
 })
 
-test("panelRows renders the session's budget, last run, compact counters, and newest eviction", () => {
+test("panelRows renders the session's context limit, last run, compact counters, and newest eviction", () => {
   const data = {
     source: "/tmp/metrics.jsonl",
     activeSession: SESSION_A,
@@ -78,7 +78,7 @@ test("panelRows renders the session's budget, last run, compact counters, and ne
     rows.some(
       (row) =>
         row.text ===
-        `counters: ${TOTALS_EVICTIONS} evictions (12 kB reclaimed, 3.1k tokens saved), ${TOTALS_DEDUPED_UNIQUE} dedup (2.3k tokens saved), ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} recalls (${TOTALS_STASH_HITS} hits)`,
+        `counters: ${TOTALS_EVICTIONS} evictions (12 kB reclaimed, 3.1k tokens saved), ${TOTALS_DEDUPED_UNIQUE} dedup (2.3k tokens saved), ${TOTALS_RECALL_HITS + TOTALS_RECALL_MISSES} recalls (${TOTALS_RECALL_HITS} hits)`,
     ),
   )
   assert.ok(rows.some((row) => row.text === `last evicted: read /data/a.txt (3 kB, ${EVICTED_MESSAGES_AGO} msgs ago)`))
@@ -138,7 +138,7 @@ test("panelRows flags manual mode in the header and leaves the automatic-mode he
   assert.ok(!panelRows(automaticData).some((row) => row.text.startsWith("mode:")))
 })
 
-test("panelRows marks an unknown budget inactive and omits watermark fields when null", () => {
+test("panelRows marks an unknown context limit inactive and omits watermark fields when null", () => {
   const data = {
     source: "/tmp/metrics.jsonl",
     activeSession: SESSION_A,
@@ -156,7 +156,7 @@ test("panelRows marks an unknown budget inactive and omits watermark fields when
   assert.ok(rows.some((row) => row.text === "last run: 123.5k estimated, no watermark"))
 })
 
-test("panelRows labels an override-sourced budget as a per-model override", () => {
+test("panelRows labels an override-sourced context limit as a per-model override", () => {
   const data = {
     source: "/tmp/metrics.jsonl",
     activeSession: SESSION_A,

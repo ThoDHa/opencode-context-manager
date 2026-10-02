@@ -16,9 +16,9 @@ const EVICTED_BYTES = 3072
 const EVICTED_MESSAGES_AGO = 7
 const TOTALS_EVICTIONS = 5
 const TOTALS_BYTES = 12288
-const TOTALS_STASH_HITS = 4
-const TOTALS_STASH_MISSES = 6
-const TOTALS_STASH_DROPPED = 1
+const TOTALS_RECALL_HITS = 4
+const TOTALS_RECALL_MISSES = 6
+const TOTALS_PAGES_DROPPED = 1
 const TOTALS_DEDUPED = 9
 const TOTALS_DEDUPED_UNIQUE = 4
 // Not a schema key: the retired per-request-recounted cumulative count,
@@ -46,8 +46,8 @@ const OVERRIDE_CONTEXT_LIMIT_SOURCE = "override"
 const MODEL_CONTEXT_LIMIT_SOURCE = "model"
 
 const SNAPSHOT_SUFFIX = ".json"
-const SNAPSHOT_STASH_ENTRIES = 2
-const SNAPSHOT_STASH_CAPACITY = 50
+const SNAPSHOT_PAGE_STORE_ENTRIES = 2
+const SNAPSHOT_PAGE_STORE_CAPACITY = 50
 const SNAPSHOT_HOT_SUBJECTS = ["/data/hot-a.txt", "/data/hot-b.txt"]
 const SNAPSHOT_TS = "2026-09-18T09:00:00.000Z"
 const LOG_LINE_TS_STALE = "2026-09-18T08:00:00.000Z"
@@ -64,9 +64,9 @@ const TOTALS_VALUES: Record<TotalsKey, number> = {
   evictions: TOTALS_EVICTIONS,
   bytesReclaimed: TOTALS_BYTES,
   evictionTokensSaved: TOTALS_EVICTION_TOKENS_SAVED,
-  recallHits: TOTALS_STASH_HITS,
-  recallMisses: TOTALS_STASH_MISSES,
-  pagesDropped: TOTALS_STASH_DROPPED,
+  recallHits: TOTALS_RECALL_HITS,
+  recallMisses: TOTALS_RECALL_MISSES,
+  pagesDropped: TOTALS_PAGES_DROPPED,
   deduped: TOTALS_DEDUPED,
   dedupedBytesUnique: TOTALS_DEDUPED_BYTES,
   dedupedUnique: TOTALS_DEDUPED_UNIQUE,
@@ -147,7 +147,7 @@ const makeSnapshot = (overrides: Record<string, unknown> = {}): Record<string, u
   contextLimitSource: MODEL_CONTEXT_LIMIT_SOURCE,
   lastRun: { estimatedTokens: ESTIMATED_TOKENS, watermarkTokens: WATERMARK_TOKENS, deficitTokens: DEFICIT_TOKENS },
   totals: makeTotals(),
-  pageStore: { entries: SNAPSHOT_STASH_ENTRIES, capacity: SNAPSHOT_STASH_CAPACITY },
+  pageStore: { entries: SNAPSHOT_PAGE_STORE_ENTRIES, capacity: SNAPSHOT_PAGE_STORE_CAPACITY },
   hotSubjects: SNAPSHOT_HOT_SUBJECTS,
   ...overrides,
 })
@@ -180,8 +180,8 @@ export {
   EVICTED_MESSAGES_AGO,
   TOTALS_EVICTIONS,
   TOTALS_BYTES,
-  TOTALS_STASH_HITS,
-  TOTALS_STASH_MISSES,
+  TOTALS_RECALL_HITS,
+  TOTALS_RECALL_MISSES,
   TOTALS_DEDUPED,
   TOTALS_DEDUPED_UNIQUE,
   TOTALS_COLLAPSED_WINDOWS,
@@ -202,8 +202,8 @@ export {
   MODEL_CONTEXT_LIMIT_SOURCE,
   HUGE_RECLAIMED_BYTES,
   SNAPSHOT_SUFFIX,
-  SNAPSHOT_STASH_ENTRIES,
-  SNAPSHOT_STASH_CAPACITY,
+  SNAPSHOT_PAGE_STORE_ENTRIES,
+  SNAPSHOT_PAGE_STORE_CAPACITY,
   SNAPSHOT_HOT_SUBJECTS,
   SNAPSHOT_TS,
   LOG_LINE_TS_STALE,
