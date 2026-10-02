@@ -489,7 +489,8 @@ type RetainedFileDuplicate = { msgIndex: number; label: string }
 
 type DedupTarget = { stateRef: { output: string; attachments?: unknown }; tool: string; input: Record<string, unknown> }
 
-type DedupOutcome = { tombstones: number; supersededBytes: number; tombstonedKeys: string[] }
+type DedupedPairBytes = { key: string; bytes: number }
+type DedupOutcome = { tombstones: number; tombstonedPairs: DedupedPairBytes[] }
 
 type MessageBundle = {
   info: { sessionID?: string; role?: unknown }
@@ -816,8 +817,7 @@ const dedupTargetOf = (part: Record<string, unknown>): DedupTarget | undefined =
 const deduplicateToolOutputs = (messages: MessageBundle[], options: ResolvedOptions): DedupOutcome => {
   const retainedByKey = new Map<string, RetainedDuplicate>()
   let tombstones = 0
-  let supersededBytes = 0
-  const tombstonedKeys: string[] = []
+  const tombstonedPairs: DedupedPairBytes[] = []
   for (let msgIndex = messages.length - 1; msgIndex >= 0; msgIndex -= 1) {
     for (const part of messages[msgIndex].parts) {
       const target = dedupTargetOf(part)
@@ -833,15 +833,15 @@ const deduplicateToolOutputs = (messages: MessageBundle[], options: ResolvedOpti
         continue
       }
       if (retained.supersedes) {
-        supersededBytes += target.stateRef.output.length + attachmentPayloadCharsOf(target.stateRef)
+        const supersededBytes = target.stateRef.output.length + attachmentPayloadCharsOf(target.stateRef)
         target.stateRef.output = buildDedupTombstone(retained.tool, retained.msgIndex)
         stripStateAttachments(target.stateRef)
         tombstones += 1
-        tombstonedKeys.push(key)
+        tombstonedPairs.push({ key, bytes: supersededBytes })
       }
     }
   }
-  return { tombstones, supersededBytes, tombstonedKeys }
+  return { tombstones, tombstonedPairs }
 }
 
 const filePartOf = (part: Record<string, unknown>): FilePartFields | undefined => {
@@ -864,7 +864,7 @@ const deduplicateFileAttachments = (messages: MessageBundle[], options: Resolved
   const retainedByKey = new Map<string, RetainedFileDuplicate>()
   const hotFromIndex = hotFromIndexOf(messages, options)
   let tombstones = 0
-  const tombstonedKeys: string[] = []
+  const tombstonedPairs: DedupedPairBytes[] = []
   for (let msgIndex = messages.length - 1; msgIndex >= 0; msgIndex -= 1) {
     const messageParts = messages[msgIndex].parts
     for (let partIndex = messageParts.length - 1; partIndex >= 0; partIndex -= 1) {
@@ -879,12 +879,12 @@ const deduplicateFileAttachments = (messages: MessageBundle[], options: Resolved
       if (msgIndex >= hotFromIndex) continue
       messageParts[partIndex] = { type: TEXT_PART_TYPE, text: buildFileDedupTombstone(retained.label, retained.msgIndex) }
       tombstones += 1
-      tombstonedKeys.push(key)
+      tombstonedPairs.push({ key, bytes: 0 })
     }
   }
   // A file part's payload size is not observable from its url, so file dedup
-  // contributes tombstones but no superseded bytes to the savings estimate.
-  return { tombstones, supersededBytes: 0, tombstonedKeys }
+  // contributes tombstones whose pairs carry no bytes to the unique estimate.
+  return { tombstones, tombstonedPairs }
 }
 
 type RangeReadWindow = { msgIndex: number; stateRef: { output: string }; range: SubjectRange }
@@ -981,12 +981,16 @@ const rememberUniqueKey = (seenKeys: string[], key: string, rememberedBound: num
 // Like the reasoning seen-set, the key list lives on the session's metrics
 // entry and resets if that entry is evicted from the metrics store and
 // reseeded within one process.
-const countUniqueDedupedPairs = (metrics: SessionMetrics, keys: string[]): number => {
+const countUniqueDedupedPairs = (metrics: SessionMetrics, pairs: DedupedPairBytes[]): { unique: number; bytes: number } => {
   let unique = 0
-  for (const key of keys) {
-    if (rememberUniqueKey(metrics.dedupedPairKeys, key, DEFAULT_REMEMBERED_DEDUP_PAIRS)) unique += 1
+  let bytes = 0
+  for (const pair of pairs) {
+    if (rememberUniqueKey(metrics.dedupedPairKeys, pair.key, DEFAULT_REMEMBERED_DEDUP_PAIRS)) {
+      unique += 1
+      bytes += pair.bytes
+    }
   }
-  return unique
+  return { unique, bytes }
 }
 
 const estimateTokensFromBytes = (bytes: number, charsPerToken: number): number => Math.ceil(bytes / charsPerToken)
@@ -2710,9 +2714,12 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
   const fileDedup = deduplicateFileAttachments(messages, options)
   const rangeCollapse = collapseRangeReads(messages, options)
   const dedupedThisRun = toolDedup.tombstones + fileDedup.tombstones
-  const dedupedUniqueThisRun = countUniqueDedupedPairs(sessionMetrics, [
-    ...toolDedup.tombstonedKeys,
-    ...fileDedup.tombstonedKeys,
+  // The lifetime unique credit gates count and bytes alike on the pair
+  // identity: a standing duplicate re-tombstones every run, but only its
+  // first creation credits the pair's superseded bytes.
+  const { unique: dedupedUniqueThisRun, bytes: dedupedBytesUniqueThisRun } = countUniqueDedupedPairs(sessionMetrics, [
+    ...toolDedup.tombstonedPairs,
+    ...fileDedup.tombstonedPairs,
   ])
   purgeErroredToolInputs(messages, options)
   const reasoningExpiredThisRun = expireAgedReasoning(sessionMetrics, messages, options)
@@ -2745,7 +2752,7 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
   const runOutcome: RunOutcome = {
     eviction,
     deduped: dedupedThisRun,
-    dedupedBytesUnique: toolDedup.supersededBytes,
+    dedupedBytesUnique: dedupedBytesUniqueThisRun,
     dedupedUnique: dedupedUniqueThisRun,
     collapsedWindows: rangeCollapse.collapsed,
     collapsedWindowBytes: rangeCollapse.collapsedBytes,
