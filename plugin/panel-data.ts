@@ -247,7 +247,7 @@ export type PanelMetricsLine = {
 
 export type PanelSnapshotStash = { entries: number; capacity: number }
 
-export type PanelSnapshot = {
+export type PanelCheckpoint = {
   ts: string
   session: string
   manualMode: boolean
@@ -561,7 +561,7 @@ const parseSnapshotStash = (value: unknown): PanelSnapshotStash | undefined => {
   return { entries: value["entries"], capacity: value["capacity"] }
 }
 
-const parseSnapshotLastRun = (value: unknown): PanelSnapshot["lastRun"] | undefined => {
+const parseSnapshotLastRun = (value: unknown): PanelCheckpoint["lastRun"] | undefined => {
   if (!isRecord(value)) return undefined
   if (!isFiniteNumber(value["estimatedTokens"])) return undefined
   if (!isOptionalFiniteNumber(value["watermarkTokens"])) return undefined
@@ -583,7 +583,7 @@ const parseSnapshotHotSubjects = (value: unknown): string[] | undefined => {
   return subjects
 }
 
-export const parseStateSnapshot = (raw: string): PanelSnapshot | undefined => {
+export const parseCheckpoint = (raw: string): PanelCheckpoint | undefined => {
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
@@ -617,7 +617,7 @@ export const parseStateSnapshot = (raw: string): PanelSnapshot | undefined => {
   }
 }
 
-export const readStateSnapshot = async (path: string, sessionID: string): Promise<PanelSnapshot | undefined> => {
+export const readCheckpoint = async (path: string, sessionID: string): Promise<PanelCheckpoint | undefined> => {
   let content: string
   try {
     content = await readFile(path, "utf8")
@@ -626,7 +626,7 @@ export const readStateSnapshot = async (path: string, sessionID: string): Promis
     if (code === "ENOENT") return undefined
     throw error
   }
-  const snapshot = parseStateSnapshot(content)
+  const snapshot = parseCheckpoint(content)
   return snapshot !== undefined && snapshot.session === sessionID ? snapshot : undefined
 }
 
@@ -642,7 +642,7 @@ const newestSessionLineOf = (lines: PanelMetricsLine[], sessionID: string): Pane
   return undefined
 }
 
-const isLogNewerThanSnapshot = (snapshot: PanelSnapshot, lines: PanelMetricsLine[], sessionID: string): boolean => {
+const isLogNewerThanSnapshot = (snapshot: PanelCheckpoint, lines: PanelMetricsLine[], sessionID: string): boolean => {
   const newest = newestSessionLineOf(lines, sessionID)
   if (newest === undefined) return false
   const snapshotMs = timestampMsOf(snapshot.ts)
@@ -651,7 +651,7 @@ const isLogNewerThanSnapshot = (snapshot: PanelSnapshot, lines: PanelMetricsLine
 }
 
 export const snapshotSessionPanel = (
-  snapshot: PanelSnapshot,
+  snapshot: PanelCheckpoint,
   lines: PanelMetricsLine[],
   sessionID: string,
   recentEvictionsLimit: number = DEFAULT_RECENT_EVICTIONS,
@@ -733,9 +733,9 @@ export const globalTotals = (lines: PanelMetricsLine[]): GlobalTotals => {
   return totals
 }
 
-const readSessionSnapshot = async (stateDir: string, sessionID: string): Promise<PanelSnapshot | undefined> => {
+const readSessionSnapshot = async (stateDir: string, sessionID: string): Promise<PanelCheckpoint | undefined> => {
   try {
-    return await readStateSnapshot(join(stateDir, `${sessionID}${SNAPSHOT_FILE_SUFFIX}`), sessionID)
+    return await readCheckpoint(join(stateDir, `${sessionID}${SNAPSHOT_FILE_SUFFIX}`), sessionID)
   } catch {
     return undefined
   }

@@ -459,7 +459,7 @@ const everyMetricIsSeeded: AssertEveryMetricSeeded = true
 // second edit.
 type CumulativeCounters = { [K in TotalsKey]: number }
 
-type LiveStateSnapshot = {
+type SessionCheckpoint = {
   ts: string
   session: string
   manualMode: boolean
@@ -1698,7 +1698,7 @@ const persistedCountersOf = (value: unknown): PersistedCounters | undefined => {
   return counters
 }
 
-const snapshotTotalsSeedOf = async (options: ResolvedOptions, sessionKey: string): Promise<PersistedTotals | undefined> => {
+const checkpointTotalsSeedOf = async (options: ResolvedOptions, sessionKey: string): Promise<PersistedTotals | undefined> => {
   if (options.liveStateLog === false) return undefined
   if (!isSafeSessionFileStem(sessionKey)) return undefined
   let content: string
@@ -1755,7 +1755,7 @@ const logTotalsSeedOf = async (options: ResolvedOptions, sessionKey: string): Pr
 // preference: the snapshot covers quiet runs, while a strictly newer log
 // line means another writer landed after the last snapshot.
 const newestPersistedTotalsOf = async (options: ResolvedOptions, sessionKey: string): Promise<PersistedTotals | undefined> => {
-  const [snapshotSeed, logSeed] = await Promise.all([snapshotTotalsSeedOf(options, sessionKey), logTotalsSeedOf(options, sessionKey)])
+  const [snapshotSeed, logSeed] = await Promise.all([checkpointTotalsSeedOf(options, sessionKey), logTotalsSeedOf(options, sessionKey)])
   if (snapshotSeed === undefined) return logSeed
   if (logSeed === undefined) return snapshotSeed
   return logSeed.tsMs > snapshotSeed.tsMs ? logSeed : snapshotSeed
@@ -2096,7 +2096,7 @@ const totalsOf = (metrics: SessionMetrics, charsPerToken: number): CumulativeCou
   return totals
 }
 
-const liveStateSnapshotOf = (
+const sessionCheckpointOf = (
   sessionKey: string,
   budget: ContextLimit,
   options: ResolvedOptions,
@@ -2104,7 +2104,7 @@ const liveStateSnapshotOf = (
   lastRun: LastRunMetrics,
   stash: SessionStash,
   hotSubjects: HotSubject[],
-): LiveStateSnapshot => ({
+): SessionCheckpoint => ({
   ts: new Date(options.now()).toISOString(),
   session: sessionKey,
   manualMode: options.manualMode,
@@ -2136,7 +2136,7 @@ const liveStateSnapshotOf = (
 const isPrunableStateFileName = (name: string): boolean =>
   name.endsWith(LIVE_STATE_FILE_SUFFIX) || name.endsWith(`${LIVE_STATE_FILE_SUFFIX}${LIVE_STATE_TEMP_FILE_SUFFIX}`)
 
-const pruneLiveStateFiles = async (
+const pruneCheckpointFiles = async (
   dir: string,
   maxAgeMs: number,
   throttle: PruneThrottle,
@@ -2169,7 +2169,7 @@ const pruneLiveStateFiles = async (
 const isSafeSessionFileStem = (sessionKey: string): boolean =>
   sessionKey.length > 0 && sessionKey !== "." && sessionKey !== ".." && !sessionKey.includes(PATH_SEGMENT_SEPARATOR)
 
-const recordLiveStateSnapshot = async (
+const recordSessionCheckpoint = async (
   options: ResolvedOptions,
   sessionKey: string,
   budget: ContextLimit,
@@ -2182,7 +2182,7 @@ const recordLiveStateSnapshot = async (
   const lastRun = metrics.lastRun
   if (lastRun === undefined) return
   if (!isSafeSessionFileStem(sessionKey)) return
-  const snapshot = liveStateSnapshotOf(sessionKey, budget, options, metrics, lastRun, stash, hotSubjects)
+  const snapshot = sessionCheckpointOf(sessionKey, budget, options, metrics, lastRun, stash, hotSubjects)
   const stateFile = join(options.liveStatePath, `${sessionKey}${LIVE_STATE_FILE_SUFFIX}`)
   const tempFile = `${stateFile}${LIVE_STATE_TEMP_FILE_SUFFIX}`
   try {
@@ -2197,7 +2197,7 @@ const recordLiveStateSnapshot = async (
     await unlink(tempFile).catch(() => {})
     return
   }
-  await pruneLiveStateFiles(options.liveStatePath, options.liveStatePruneMaxAgeMs, pruneThrottle, options.liveStatePruneMinIntervalMs, options.now())
+  await pruneCheckpointFiles(options.liveStatePath, options.liveStatePruneMaxAgeMs, pruneThrottle, options.liveStatePruneMinIntervalMs, options.now())
 }
 
 const modelKeyOf = (model: ChatParamsModel | undefined): string | undefined => {
@@ -2744,7 +2744,7 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
   storeHint(deps.hintBySession, sessionKey, eviction.hotSubjects, options.hintSubjects, options.hintSessions)
   await recordPageStoreLines(options, deps.metricsBySession, sessionKey, pageStoreEntries)
   await recordMetricsLine(options, sessionMetrics, sessionKey, budget, runOutcome)
-  await recordLiveStateSnapshot(options, sessionKey, budget, sessionMetrics, sessionStash, eviction.hotSubjects, deps.pruneThrottle)
+  await recordSessionCheckpoint(options, sessionKey, budget, sessionMetrics, sessionStash, eviction.hotSubjects, deps.pruneThrottle)
 }
 
 // A throwing tool degrades to a structured error string the TUI can

@@ -19,9 +19,9 @@ import {
   panelRows,
   parseMetricsLine,
   parseMetricsLog,
-  parseStateSnapshot,
+  parseCheckpoint,
   readMetricsLog,
-  readStateSnapshot,
+  readCheckpoint,
   sessionPanelData,
   type PanelMetricsLine,
 } from "../plugin/panel-data.ts"
@@ -179,13 +179,13 @@ test("parseMetricsLine rejects a line whose totals carry a non-numeric or missin
   assert.equal(parseMetricsLine(rawMissingReasoningBytesExpiredUnique), undefined)
 })
 
-test("parseMetricsLine and parseStateSnapshot drop pre-upgrade records whose totals predate the token-savings keys", () => {
+test("parseMetricsLine and parseCheckpoint drop pre-upgrade records whose totals predate the token-savings keys", () => {
   const legacyTotals = makePreSchemaTotals()
   const legacyLine = JSON.stringify(makeLine({ totals: legacyTotals }))
   const legacySnapshot = JSON.stringify(makeSnapshot({ totals: legacyTotals }))
 
   assert.equal(parseMetricsLine(legacyLine), undefined)
-  assert.equal(parseStateSnapshot(legacySnapshot), undefined)
+  assert.equal(parseCheckpoint(legacySnapshot), undefined)
 })
 
 test("readMetricsLog keeps the newest parseable line per session and skips pre-upgrade and malformed lines in a mixed log", async () => {
@@ -250,7 +250,7 @@ test("parseTotals defaults the absent processed context keys to zero while still
   const rawSnapshot = JSON.stringify(makeSnapshot({ totals: preTokenUsageTotals }))
 
   const line = parseMetricsLine(rawLine)
-  const snapshot = parseStateSnapshot(rawSnapshot)
+  const snapshot = parseCheckpoint(rawSnapshot)
 
   assert.ok(line !== undefined)
   assert.equal(line.totals.processedContextBytes, 0)
@@ -804,8 +804,8 @@ test("the panel's default metrics path matches the plugin core's resolved metric
   assert.equal(stats.options.metricsPath, DEFAULT_METRICS_PATH)
 })
 
-test("parseStateSnapshot parses a snapshot carrying exactly the fields the panel consumes", () => {
-  const snapshot = parseStateSnapshot(JSON.stringify(makeSnapshot()))
+test("parseCheckpoint parses a snapshot carrying exactly the fields the panel consumes", () => {
+  const snapshot = parseCheckpoint(JSON.stringify(makeSnapshot()))
 
   assert.ok(snapshot !== undefined)
   assert.equal(snapshot.ts, SNAPSHOT_TS)
@@ -823,8 +823,8 @@ test("parseStateSnapshot parses a snapshot carrying exactly the fields the panel
   assert.deepEqual(snapshot.hotSubjects, SNAPSHOT_HOT_SUBJECTS)
 })
 
-test("parseStateSnapshot accepts a null unknown-budget watermark trio like the metrics line", () => {
-  const snapshot = parseStateSnapshot(
+test("parseCheckpoint accepts a null unknown-budget watermark trio like the metrics line", () => {
+  const snapshot = parseCheckpoint(
     JSON.stringify(makeSnapshot({ modelContextTokens: null, lastRun: { estimatedTokens: ESTIMATED_TOKENS, watermarkTokens: null, deficitTokens: null } })),
   )
 
@@ -833,27 +833,27 @@ test("parseStateSnapshot accepts a null unknown-budget watermark trio like the m
   assert.deepEqual(snapshot.lastRun, { estimatedTokens: ESTIMATED_TOKENS, watermarkTokens: null, deficitTokens: null })
 })
 
-test("parseStateSnapshot rejects snapshots that are not valid JSON or miss required fields", () => {
-  assert.equal(parseStateSnapshot("{not json"), undefined)
-  assert.equal(parseStateSnapshot(JSON.stringify({ session: SESSION_A })), undefined)
-  assert.equal(parseStateSnapshot(JSON.stringify(makeSnapshot({ ts: 42 }))), undefined)
-  assert.equal(parseStateSnapshot(JSON.stringify(makeSnapshot({ manualMode: "yes" }))), undefined)
-  assert.equal(parseStateSnapshot(JSON.stringify(makeSnapshot({ modelContextTokensSource: 42 }))), undefined)
-  assert.equal(parseStateSnapshot(JSON.stringify(makeSnapshot({ totals: { ...makeTotals(), evictions: "many" } }))), undefined)
-  assert.equal(parseStateSnapshot(JSON.stringify(makeSnapshot({ stash: { entries: SNAPSHOT_STASH_ENTRIES } }))), undefined)
-  assert.equal(parseStateSnapshot(JSON.stringify(makeSnapshot({ lastRun: { estimatedTokens: ESTIMATED_TOKENS } }))), undefined)
-  assert.equal(parseStateSnapshot(JSON.stringify(makeSnapshot({ hotSubjects: ["ok", 42] }))), undefined)
+test("parseCheckpoint rejects snapshots that are not valid JSON or miss required fields", () => {
+  assert.equal(parseCheckpoint("{not json"), undefined)
+  assert.equal(parseCheckpoint(JSON.stringify({ session: SESSION_A })), undefined)
+  assert.equal(parseCheckpoint(JSON.stringify(makeSnapshot({ ts: 42 }))), undefined)
+  assert.equal(parseCheckpoint(JSON.stringify(makeSnapshot({ manualMode: "yes" }))), undefined)
+  assert.equal(parseCheckpoint(JSON.stringify(makeSnapshot({ modelContextTokensSource: 42 }))), undefined)
+  assert.equal(parseCheckpoint(JSON.stringify(makeSnapshot({ totals: { ...makeTotals(), evictions: "many" } }))), undefined)
+  assert.equal(parseCheckpoint(JSON.stringify(makeSnapshot({ stash: { entries: SNAPSHOT_STASH_ENTRIES } }))), undefined)
+  assert.equal(parseCheckpoint(JSON.stringify(makeSnapshot({ lastRun: { estimatedTokens: ESTIMATED_TOKENS } }))), undefined)
+  assert.equal(parseCheckpoint(JSON.stringify(makeSnapshot({ hotSubjects: ["ok", 42] }))), undefined)
 })
 
-test("readStateSnapshot returns undefined when the snapshot file is missing", async () => {
+test("readCheckpoint returns undefined when the snapshot file is missing", async () => {
   await withTempDir(async (dir) => {
-    assert.equal(await readStateSnapshot(join(dir, "absent.json"), SESSION_A), undefined)
+    assert.equal(await readCheckpoint(join(dir, "absent.json"), SESSION_A), undefined)
   })
 })
 
-test("readStateSnapshot rejects a genuine read fault instead of swallowing it", async () => {
+test("readCheckpoint rejects a genuine read fault instead of swallowing it", async () => {
   await withTempDir(async (dir) => {
-    await assert.rejects(readStateSnapshot(dir, SESSION_A))
+    await assert.rejects(readCheckpoint(dir, SESSION_A))
   })
 })
 
