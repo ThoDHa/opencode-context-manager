@@ -11,16 +11,16 @@
 
 Run `make test`, then confirm the runner-reported `tests` total matches the expected count for your change. A suite file that fails to load (a syntax error, a duplicate import) drops its tests from the aggregate output while the remaining files still report pass, so a green-looking run can be silently short. Current totals per file:
 
-- `tests/context-manager.test.ts`: 430
-- `tests/panel-data.test.ts`: 70
-- `tests/panel-rows.test.ts`: 13
-- `tests/sidebar-rows.test.ts`: 18
+- `tests/context-manager.test.ts`: 436
+- `tests/panel-data.test.ts`: 73
+- `tests/panel-rows.test.ts`: 15
+- `tests/sidebar-rows.test.ts`: 20
 - `tests/sidebar-subagents.test.ts`: 35
 - `tests/tui-harness.test.ts`: 5
 - `tests/tui-registration.test.ts`: 13
-- `tests/tui-panel.test.ts`: 9
-- `tests/tui-sidebar.test.ts`: 10
-- aggregate: 603
+- `tests/tui-panel.test.ts`: 10
+- `tests/tui-sidebar.test.ts`: 11
+- aggregate: 618
 
 These counts drift as tests are added; `make ci` recomputes and cross-checks them per run, so treat its numbers as current and this list as a sanity reference.
 
