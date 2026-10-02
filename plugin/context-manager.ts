@@ -97,6 +97,9 @@ const STASH_OCCUPANCY_RANGE_OLDEST_LABEL = "oldest"
 const STASH_OCCUPANCY_RANGE_NEWEST_LABEL = "newest"
 const MAX_OCCUPANCY_CATEGORIES = 5
 const STASH_INVALID_SUBJECT_LEAD = "requires a non-empty subject string"
+const PAGE_STORE_RESTORED_LEAD = "restored from the prior-session page store"
+const PAGE_STORE_OLDER_LEAD = "older prior-session pages for subject"
+const PAGE_STORE_MISS_LEAD = "no prior-session page for subject"
 const RECEIVED_LABEL = "received"
 const FALLBACK_SESSION_KEY = "no-session"
 const DEDUP_MARKER = "[ctx-deduped]"
@@ -141,6 +144,14 @@ const defaultIngestionHygienePath = (): string => join(homedir(), ...DEFAULT_MET
 // a standing record, so its cap sits well under the metrics log's 20 MiB.
 export const DEFAULT_INGESTION_HYGIENE_ROTATION_MAX_BYTES = 5 * 1024 * 1024
 const HYGIENE_COPY_DISABLED_MAX_BYTES = 0
+const DEFAULT_PAGE_STORE_ENABLED = true
+const DEFAULT_PAGE_STORE_FILE_BASENAME = "context-pages.jsonl"
+const defaultPageStorePath = (): string => join(homedir(), ...DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_PAGE_STORE_FILE_BASENAME)
+// 20 MiB: metrics parity rather than the hygiene copy's smaller cap, because
+// page lines carry the same fat verbatim-output content class the metrics
+// log's cap was sized for, and the store is a standing record, not an
+// escape hatch.
+export const DEFAULT_PAGE_STORE_ROTATION_MAX_BYTES = 20 * 1024 * 1024
 const LIVE_STATE_FILE_SUFFIX = ".json"
 const MS_PER_SECOND = 1000
 const SECONDS_PER_MINUTE = 60
@@ -227,6 +238,9 @@ type ContextManagerOptions = {
   ingestionHygieneCopy?: boolean
   ingestionHygienePath?: string
   ingestionHygieneRotationMaxBytes?: number
+  pageStore?: boolean
+  pageStorePath?: string
+  pageStoreRotationMaxBytes?: number
   liveStateLog?: boolean
   liveStatePath?: string
   liveStatePruneMaxAgeMs?: number
@@ -403,6 +417,7 @@ type SessionMetrics = {
   logWriteError?: string
   stateWriteError?: string
   hygieneWriteError?: string
+  pageStoreWriteError?: string
 }
 
 type LastFault = { message: string; atMs: number }
@@ -598,6 +613,14 @@ const resolveOptions = (raw: ContextManagerOptions = {}): ResolvedOptions => {
       raw.ingestionHygieneRotationMaxBytes >= 0
         ? raw.ingestionHygieneRotationMaxBytes
         : DEFAULT_INGESTION_HYGIENE_ROTATION_MAX_BYTES,
+    pageStore: typeof raw.pageStore === "boolean" ? raw.pageStore : DEFAULT_PAGE_STORE_ENABLED,
+    pageStorePath: isNonEmptyString(raw.pageStorePath) ? raw.pageStorePath : defaultPageStorePath(),
+    pageStoreRotationMaxBytes:
+      typeof raw.pageStoreRotationMaxBytes === "number" &&
+      Number.isFinite(raw.pageStoreRotationMaxBytes) &&
+      raw.pageStoreRotationMaxBytes >= 0
+        ? raw.pageStoreRotationMaxBytes
+        : DEFAULT_PAGE_STORE_ROTATION_MAX_BYTES,
     liveStateLog: typeof raw.liveStateLog === "boolean" ? raw.liveStateLog : DEFAULT_LIVE_STATE_LOG_ENABLED,
     liveStatePath: isNonEmptyString(raw.liveStatePath) ? raw.liveStatePath : defaultLiveStateDir(),
     liveStatePruneMaxAgeMs:
@@ -1238,7 +1261,7 @@ const fenceFirstNonEmptyLineOf = (lines: string[], startLine: number, endLine: n
   return undefined
 }
 
-const evictLargeUserFences = (messages: MessageBundle[], options: ResolvedOptions, stash: SessionStash): FenceEviction => {
+const evictLargeUserFences = (messages: MessageBundle[], options: ResolvedOptions, stash: SessionStash, pageStoreEntries: StashEntry[]): FenceEviction => {
   if (options.userFenceEviction.enabled === false) return { blocks: 0, bytes: 0, stashDropped: 0 }
   const hotFromIndex = hotFromIndexOf(messages, options)
   const { minBlockLines } = options.userFenceEviction
@@ -1267,18 +1290,16 @@ const evictLargeUserFences = (messages: MessageBundle[], options: ResolvedOption
         const blockText = text.slice(startOffset, endOffset)
         const subject = boundedSingleLineOf(firstLine)
         const tombstone = buildFenceTombstone(span.language, contentLines, subject)
-        stashDropped += stashEvictedOutput(
-          stash,
-          {
-            output: blockText,
-            tool: FENCE_STASH_TOOL_LABEL,
-            subject,
-            msgIndex,
-            partIndex,
-            stashSlot: span.startLine,
-          },
-          options.stashLimit,
-        )
+        const stashed: StashEntry = {
+          output: blockText,
+          tool: FENCE_STASH_TOOL_LABEL,
+          subject,
+          msgIndex,
+          partIndex,
+          stashSlot: span.startLine,
+        }
+        stashDropped += stashEvictedOutput(stash, stashed, options.stashLimit)
+        pageStoreEntries.push(stashed)
         plans.push({
           startOffset,
           endOffset,
@@ -1456,12 +1477,75 @@ const sessionIDFromContext = (source: unknown): string | undefined => {
 
 const sessionKeyFromContext = (source: unknown): string => sessionIDFromContext(source) ?? FALLBACK_SESSION_KEY
 
+// The store's line shape, validated field by field: a line failing any
+// required field is skipped (per-line tolerance, mirroring the log seeder's
+// corrupt-line skip) rather than failing the whole read.
+const pageStoreLineOf = (parsed: unknown): StashEntry | undefined => {
+  if (!isRecord(parsed)) return undefined
+  const output = parsed["output"]
+  const tool = parsed["tool"]
+  const subject = parsed["subject"]
+  const msgIndex = parsed["msgIndex"]
+  const partIndex = parsed["partIndex"]
+  if (typeof output !== "string" || typeof tool !== "string" || typeof subject !== "string") return undefined
+  if (typeof msgIndex !== "number" || typeof partIndex !== "number") return undefined
+  const attachments = parsed["attachments"]
+  if (attachments !== undefined && !Array.isArray(attachments)) return undefined
+  const stashSlot = parsed["stashSlot"]
+  if (stashSlot !== undefined && typeof stashSlot !== "number") return undefined
+  return {
+    output,
+    tool,
+    subject,
+    msgIndex,
+    partIndex,
+    ...(stashSlot === undefined ? {} : { stashSlot }),
+    ...(attachments === undefined ? {} : { attachments }),
+  }
+}
+
+// Cross-session pages for one subject, read fresh per miss (misses are the
+// rare path) in file order, so the last matching line is the newest page.
+// Any read or parse failure degrades to no pages: a corrupt or unreadable
+// store is a clean miss, never a thrown tool error.
+const pageStoreMatchesFor = async (options: ResolvedOptions, subject: string): Promise<StashEntry[]> => {
+  if (options.pageStore === false) return []
+  let content: string
+  try {
+    content = await readFile(options.pageStorePath, "utf8")
+  } catch {
+    return []
+  }
+  const matches: StashEntry[] = []
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim()
+    if (trimmed.length === 0) continue
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(trimmed)
+    } catch {
+      continue
+    }
+    const entry = pageStoreLineOf(parsed)
+    if (entry !== undefined && entry.subject === subject) matches.push(entry)
+  }
+  return matches
+}
+
+const pageStoreRestoredLineFor = (): string => `${STASH_MARKER} ${PAGE_STORE_RESTORED_LEAD}.`
+
+const pageStoreOlderLineFor = (subject: string, count: number): string =>
+  `${STASH_MARKER} ${PAGE_STORE_OLDER_LEAD} "${subject}": ${count}.`
+
+const pageStoreMissLineFor = (subject: string): string => `${STASH_MARKER} ${PAGE_STORE_MISS_LEAD} "${subject}".`
+
 const executeReadEvicted = async (
   stashes: StashStore,
   metrics: MetricsStore,
   hydrations: MetricsHydration,
   persistedTotalsForSession: (sessionKey: string) => Promise<PersistedTotals | undefined>,
   metricsSessionBound: number,
+  options: ResolvedOptions,
   args: unknown,
   toolContext: unknown,
 ): Promise<string> => {
@@ -1471,14 +1555,27 @@ const executeReadEvicted = async (
   const stash = stashes.get(sessionKey)
   const matches = stash === undefined ? [] : stashedMatchesFor(stash, subject)
   if (matches.length === 0) {
-    // A first-touch hydration may still be seeding this session: await it
-    // so the miss lands on the settled entry instead of vanishing with the
-    // entry the seed replaces.
-    const inFlight = hydrations.get(sessionKey)
-    if (inFlight !== undefined) await inFlight.promise
-    const existing = metrics.get(sessionKey)
-    if (existing !== undefined) existing.stashMisses += 1
-    return `${stashMissTextFor(subject)}\n${stashOccupancyLineFor(stash ?? new Map())}`
+    const pages = await pageStoreMatchesFor(options, subject)
+    if (pages.length === 0) {
+      // A first-touch hydration may still be seeding this session: await it
+      // so the miss lands on the settled entry instead of vanishing with the
+      // entry the seed replaces.
+      const inFlight = hydrations.get(sessionKey)
+      if (inFlight !== undefined) await inFlight.promise
+      const existing = metrics.get(sessionKey)
+      if (existing !== undefined) existing.stashMisses += 1
+      return `${stashMissTextFor(subject)}\n${stashOccupancyLineFor(stash ?? new Map())}\n${pageStoreMissLineFor(subject)}`
+    }
+    // A page-store hit counts and fault-protects exactly like an in-session
+    // hit: the reload is the same event to the eviction policy.
+    const sessionMetrics = await metricsForSession(metrics, hydrations, persistedTotalsForSession, sessionKey, metricsSessionBound)
+    sessionMetrics.stashHits += 1
+    rememberFaultForSubject(sessionMetrics.faultCounts, subject, DEFAULT_REMEMBERED_FAULT_SUBJECTS)
+    const newest = pages[pages.length - 1]
+    const olderCount = pages.length - 1
+    const restored = `${newest.output}\n${pageStoreRestoredLineFor()}`
+    const withOlder = olderCount === 0 ? restored : `${restored}\n${pageStoreOlderLineFor(subject, olderCount)}`
+    return newest.attachments === undefined ? withOlder : `${withOlder}\n${stashedAttachmentsLineFor(newest.attachments)}`
   }
   // Refreshed before the await so the hit counts even if stash churn during
   // the hydration read evicts this session's stash entry.
@@ -1852,6 +1949,45 @@ const appendHygieneCopy = async (
   }
 }
 
+// The persistent half of the stash: every entry the evictor stashed this run
+// becomes one JSONL line beside the metrics log, so a later session's
+// read_evicted can reload an original its own in-memory stash never held.
+// Same discipline as the hygiene copy: rotation through the generic helper,
+// one append per run, a failed write surfaced as pageStoreWriteError on the
+// session's diagnostics without ever blocking the eviction, and both the
+// feature switch and a cap of 0 disabling writes entirely.
+const recordPageStoreLines = async (
+  options: ResolvedOptions,
+  metrics: MetricsStore,
+  sessionKey: string,
+  entries: StashEntry[],
+): Promise<void> => {
+  if (options.pageStore === false || entries.length === 0) return
+  if (options.pageStoreRotationMaxBytes === HYGIENE_COPY_DISABLED_MAX_BYTES) return
+  const lines = entries.map((entry) => ({
+    ts: new Date(options.now()).toISOString(),
+    session: sessionKey,
+    tool: entry.tool,
+    subject: entry.subject,
+    msgIndex: entry.msgIndex,
+    partIndex: entry.partIndex,
+    ...(entry.stashSlot === undefined ? {} : { stashSlot: entry.stashSlot }),
+    output: entry.output,
+    ...(entry.attachments === undefined ? {} : { attachments: entry.attachments }),
+  }))
+  try {
+    const pageStoreJsonLine = `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`
+    await rotateMetricsLogPastCap(options.pageStorePath, Buffer.byteLength(pageStoreJsonLine), options.pageStoreRotationMaxBytes)
+    await appendFile(options.pageStorePath, pageStoreJsonLine)
+    const entry = touchMapEntry(metrics, sessionKey)
+    if (entry !== undefined) delete entry.pageStoreWriteError
+  } catch (error) {
+    withSessionMetricsEntry(metrics, sessionKey, options.metricsSessions, (target) => {
+      target.pageStoreWriteError = error instanceof Error ? error.message : String(error)
+    })
+  }
+}
+
 const recordMetricsLine = async (
   options: ResolvedOptions,
   metrics: SessionMetrics,
@@ -2163,6 +2299,9 @@ const executeStatsTool = (source: StatsSource, toolContext: unknown): string => 
       ingestionHygieneCopy: source.options.ingestionHygieneCopy,
       ingestionHygienePath: source.options.ingestionHygienePath,
       ingestionHygieneRotationMaxBytes: source.options.ingestionHygieneRotationMaxBytes,
+      pageStore: source.options.pageStore,
+      pageStorePath: source.options.pageStorePath,
+      pageStoreRotationMaxBytes: source.options.pageStoreRotationMaxBytes,
       liveStateLog: source.options.liveStateLog,
       liveStatePath: source.options.liveStatePath,
       liveStatePruneMaxAgeMs: source.options.liveStatePruneMaxAgeMs,
@@ -2205,6 +2344,7 @@ const executeStatsTool = (source: StatsSource, toolContext: unknown): string => 
     ...(metrics.logWriteError === undefined ? {} : { logWriteError: metrics.logWriteError }),
     ...(metrics.stateWriteError === undefined ? {} : { stateWriteError: metrics.stateWriteError }),
     ...(metrics.hygieneWriteError === undefined ? {} : { hygieneWriteError: metrics.hygieneWriteError }),
+    ...(metrics.pageStoreWriteError === undefined ? {} : { pageStoreWriteError: metrics.pageStoreWriteError }),
   }
   return JSON.stringify(report, null, JSON_INDENT_SPACES)
 }
@@ -2387,6 +2527,7 @@ const evictLeastRecentlyUsed = (
   options: ResolvedOptions,
   watermarkTokens: number | null,
   stash: SessionStash,
+  pageStoreEntries: StashEntry[],
 ): EvictionResult => {
   const { evictable } = candidates
 
@@ -2414,6 +2555,7 @@ const evictLeastRecentlyUsed = (
     }
     if (droppedAttachments !== undefined) stashed.attachments = droppedAttachments
     stashDropped += stashEvictedOutput(stash, stashed, options.stashLimit)
+    pageStoreEntries.push(stashed)
     stripStateAttachments(entry.stateRef)
     entry.stateRef.output = `${tombstone}${buildReloadPointer(subject)}`
     reclaimedTokens += entry.bytes / options.charsPerToken
@@ -2538,6 +2680,9 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
   if (fallbackSuppressed) sessionMetrics.persistedBudget = undefined
   else if (budget.source !== CONTEXT_TOKENS_SOURCE_UNKNOWN) sessionMetrics.persistedBudget = { tokens: budget.tokens, source: budget.source, modelKey: budget.modelKey }
   const sessionStash = stashForSession(deps.stashBySession, sessionKey, options.stashSessions)
+  // The run's stashed entries, gathered at the two stash sites so the write
+  // below lands them eagerly in the same run as the eviction that built them.
+  const pageStoreEntries: StashEntry[] = []
   stripLegacyHintParts(messages)
   const toolDedup = deduplicateToolOutputs(messages, options)
   const fileDedup = deduplicateFileAttachments(messages, options)
@@ -2549,7 +2694,7 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
   ])
   purgeErroredToolInputs(messages, options)
   const reasoningExpiredThisRun = expireAgedReasoning(sessionMetrics, messages, options)
-  const fenceEvictedThisRun = evictLargeUserFences(messages, options, sessionStash)
+  const fenceEvictedThisRun = evictLargeUserFences(messages, options, sessionStash, pageStoreEntries)
   const effectiveWatermarkTokens = effectiveWatermarkTokensOf(budget.tokens, options)
   // One scan and one candidate walk feed whichever path runs: the
   // stand-downs (manual mode, or no watermark with the aged read tier
@@ -2561,7 +2706,7 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
   const standDown = options.manualMode || (effectiveWatermarkTokens === null && options.agedReadEvictionMessages === undefined)
   const eviction = standDown
     ? measureWithoutEvicting(candidates, effectiveWatermarkTokens)
-    : evictLeastRecentlyUsed(messages, candidates, options, effectiveWatermarkTokens, sessionStash)
+    : evictLeastRecentlyUsed(messages, candidates, options, effectiveWatermarkTokens, sessionStash, pageStoreEntries)
   // The manual-mode dry run: with an effective watermark set, report
   // what the evictor would reclaim (the combined watermark and aged
   // read policy) so a staged watermark or staged age threshold can be
@@ -2592,6 +2737,7 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
   sessionMetrics.lastDryRun = runOutcome.dryRun
   sessionMetrics.lastComposition = runOutcome.composition
   storeHint(deps.hintBySession, sessionKey, eviction.hotSubjects, options.hintSubjects, options.hintSessions)
+  await recordPageStoreLines(options, deps.metricsBySession, sessionKey, pageStoreEntries)
   await recordMetricsLine(options, sessionMetrics, sessionKey, budget, runOutcome)
   await recordLiveStateSnapshot(options, sessionKey, budget, sessionMetrics, sessionStash, eviction.hotSubjects, deps.pruneThrottle)
 }
@@ -2785,7 +2931,7 @@ const server = (async (_input, rawOptions) => {
   // { type: "string" } schema below is sufficient. If this file ever ships
   // somewhere @opencode-ai/plugin resolves, switch back to tool().
   const readEvicted = async (args: unknown, toolContext: unknown): Promise<string> =>
-    executeReadEvicted(stashBySession, metricsBySession, metricsHydrationBySession, persistedTotalsForSession, options.metricsSessions, args, toolContext)
+    executeReadEvicted(stashBySession, metricsBySession, metricsHydrationBySession, persistedTotalsForSession, options.metricsSessions, options, args, toolContext)
 
   const statsTool = async (_args: unknown, toolContext: unknown): Promise<string> =>
     executeStatsTool({ options, limits: contextTokensBySession, modelKeys: modelKeyBySession, stashes: stashBySession, metrics: metricsBySession }, toolContext)
