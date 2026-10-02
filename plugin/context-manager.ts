@@ -66,17 +66,17 @@ const DEFAULT_STASH_LIMIT = 50
 const DEFAULT_STASH_SESSIONS = 8
 const DEFAULT_LIMIT_SESSIONS = 8
 const DEFAULT_HINT_SESSIONS = 8
-const RELOAD_TOOL_NAME = "read_evicted"
-const RELOAD_ARG_NAME = "subject"
-const RELOAD_TOOL_DESCRIPTION =
+const RECALL_TOOL_NAME = "recall"
+const RECALL_ARG_NAME = "subject"
+const RECALL_TOOL_DESCRIPTION =
   "Return the full original content of anything the Context Manager evicted and stashed: a tool call output or a fenced code block from an old user message. Pass the subject exactly as it appears in the eviction notice."
-const RELOAD_ARG_DESCRIPTION = "The subject exactly as named in the eviction notice"
-const RELOAD_ARG_SCHEMA_TYPE = "string"
-const RELOAD_ARG_SCHEMA: Record<string, string> = {
-  type: RELOAD_ARG_SCHEMA_TYPE,
-  description: RELOAD_ARG_DESCRIPTION,
+const RECALL_ARG_DESCRIPTION = "The subject exactly as named in the eviction notice"
+const RECALL_ARG_SCHEMA_TYPE = "string"
+const RECALL_ARG_SCHEMA: Record<string, string> = {
+  type: RECALL_ARG_SCHEMA_TYPE,
+  description: RECALL_ARG_DESCRIPTION,
 }
-const RELOAD_POINTER_LEAD = " Evicted output stashed; reload it with"
+const RECALL_POINTER_LEAD = " Evicted output stashed; reload it with"
 const DIGEST_POINTER_LEAD = " Output digest: "
 const DIGEST_POINTER_TAIL = "."
 const STASH_MARKER = "[ctx-stash]"
@@ -175,8 +175,8 @@ const METRICS_ROTATION_DISABLED_MAX_BYTES = 0
 const METRICS_ROTATION_SUFFIX = ".1"
 const DEFAULT_METRICS_MIN_LINE_INTERVAL_MS = SECONDS_PER_MINUTE * MS_PER_SECOND
 const METRICS_COALESCING_DISABLED_MS = 0
-const STATS_TOOL_NAME = "context_stats"
-const STATS_TOOL_DESCRIPTION =
+const DESCRIBE_TOOL_NAME = "describe"
+const DESCRIBE_TOOL_DESCRIPTION =
   "Return live metrics for the Context Manager in this session: eviction counters, expired reasoning counts, post-eviction touches, stash occupancy, the effective context budget, and the most recent transform run's token estimate; also the newest run's post-transform composition (tool outputs, text, retained reasoning), the manual-mode dry run when armed, and the last transform fault when one occurred."
 const JSON_INDENT_SPACES = 2
 const CONTEXT_TOKENS_SOURCE_OVERRIDE = "override"
@@ -382,7 +382,7 @@ type SessionMetrics = {
   reasoningSeenKeys: string[]
   dedupedPairKeys: string[]
   // Per-entry fault bookkeeping: the rendered primary subject of every
-  // reloaded (read_evicted hit) or re-touched (keyed post-eviction
+  // reloaded (recall hit) or re-touched (keyed post-eviction
   // appearance) evicted output, mapped to its fault count. Like the
   // seen-key lists it resets when the metrics store evicts and reseeds
   // the entry, so fault memory is per-entry-lifetime and never persisted.
@@ -391,7 +391,7 @@ type SessionMetrics = {
   // beside evictedSubjects at the same points and trimmed at the same
   // bound: the keyed fault credit matches appearances against these
   // because the fault map's keys live in the rendered subject domain
-  // read_evicted matches on.
+  // recall matches on.
   evictedRenderedSubjects: string[]
   recallsLoggedThrough: number
   // Per-process bookkeeping for the metrics line coalesce gate: the moment
@@ -404,15 +404,15 @@ type SessionMetrics = {
   // unknown; a live chat.params capture always wins over it.
   persistedBudget?: PersistedContextLimit
   // The manual-mode dry run from this session's newest run: run-scoped
-  // diagnostic state for context_stats, never persisted, replaced every run.
+  // diagnostic state for describe, never persisted, replaced every run.
   lastDryRun?: DryRunResult
   // The newest run's composition (toolPoolBytes, textChars,
-  // reasoningInWindowBytes): run-scoped diagnostic state for context_stats,
+  // reasoningInWindowBytes): run-scoped diagnostic state for describe,
   // never persisted, replaced every run.
   lastComposition?: RunComposition
   // The newest fault-isolated failure on this session's transform: set by
   // the transform boundary when the body throws, surfaced through
-  // context_stats, never persisted, replaced by the next run's outcome.
+  // describe, never persisted, replaced by the next run's outcome.
   lastFault?: LastFault
   lastRun?: LastRunMetrics
   logWriteError?: string
@@ -639,7 +639,7 @@ const resolveOptions = (raw: ContextManagerOptions = {}): ResolvedOptions => {
     // Test-injection seam for wall-clock time: the coalesce window, the
     // prune throttle, and the metrics-line timestamp all read this one
     // source. The default is real time; only tests override it, so it is
-    // deliberately absent from the README's option surface and context_stats.
+    // deliberately absent from the README's option surface and describe.
     now: typeof raw.now === "function" ? raw.now : DEFAULT_NOW,
     faultTransform: typeof raw.faultTransform === "function" ? raw.faultTransform : undefined,
     faultCompaction: typeof raw.faultCompaction === "function" ? raw.faultCompaction : undefined,
@@ -1348,7 +1348,7 @@ const buildTombstone = (tool: string, subject: string, bytes: number, messagesAg
   `${EVICTION_MARKER} ${tool} ${subject} (${bytes} bytes${attachmentsDropped ? `, ${TOMBSTONE_ATTACHMENTS_NOTICE}` : ""}, ~${messagesAgo} messages ago) was evicted to reclaim context; re-run the tool to reload its output.${DIGEST_POINTER_LEAD}${digest}${DIGEST_POINTER_TAIL}`
 
 const buildReloadPointer = (subject: string): string =>
-  `${RELOAD_POINTER_LEAD} ${RELOAD_TOOL_NAME} (subject "${subject}").`
+  `${RECALL_POINTER_LEAD} ${RECALL_TOOL_NAME} (subject "${subject}").`
 
 const buildFenceTombstone = (language: string | undefined, contentLines: number, subject: string): string =>
   `${FENCE_EVICTION_MARKER} ${language === undefined ? FENCE_BLOCK_NOUN : `${language} ${FENCE_BLOCK_NOUN}`} (${contentLines} ${FENCE_LINE_COUNT_LABEL}, ${FENCE_FIRST_LINE_LABEL} "${subject}") ${FENCE_EVICTED_NOTICE}${buildReloadPointer(subject)}`
@@ -1443,7 +1443,7 @@ const pageStoreOccupancyLineFor = (pageStore: SessionPageStore): string => {
 }
 
 const invalidSubjectTextFor = (received: string): string =>
-  `${STASH_MARKER} ${RELOAD_TOOL_NAME} ${STASH_INVALID_SUBJECT_LEAD} (${RECEIVED_LABEL} ${received}).`
+  `${STASH_MARKER} ${RECALL_TOOL_NAME} ${STASH_INVALID_SUBJECT_LEAD} (${RECEIVED_LABEL} ${received}).`
 
 const olderMatchesLineFor = (subject: string, older: PageEntry[]): string =>
   `${STASH_MARKER} ${STASH_OLDER_LEAD} "${subject}": ${older
@@ -1950,7 +1950,7 @@ const appendHygieneCopy = async (
 
 // The persistent half of the stash: every entry the evictor stashed this run
 // becomes one JSONL line beside the metrics log, so a later session's
-// read_evicted can reload an original its own in-memory stash never held.
+// recall can reload an original its own in-memory stash never held.
 // Same discipline as the hygiene copy: rotation through the generic helper,
 // one append per run, a failed write surfaced as pageStoreWriteError on the
 // session's diagnostics without ever blocking the eviction, and both the
@@ -2242,7 +2242,7 @@ const resolveContextLimit = (sessionEntry: ContextLimitEntry | undefined, explic
 
 type ContextLimitResolution = { budget: ContextLimit; fallbackSuppressed: boolean }
 
-// Shared by the transform hook and context_stats so the two surfaces resolve
+// Shared by the transform hook and describe so the two surfaces resolve
 // identically. Precedence: a live chat.params capture, the explicit
 // defaultContextTokens option, then the budget persisted for the session;
 // the persisted value fills only the unknown state. The fallback is
@@ -2482,7 +2482,7 @@ const isEvictedByWalkPolicy = (
 // The stand-down measurement: the run record of a transform that evicted
 // nothing. The watermark and deficit ride through when an effective
 // watermark exists (armed manual mode with a captured budget or a set
-// watermarkTokens), so the sidebar and context_stats show the real
+// watermarkTokens), so the sidebar and describe show the real
 // figures the dry run acts on; a null watermark (either mode) keeps both
 // null, matching a session that genuinely has no watermark. The deficit
 // is the shared estimate-minus-watermark arithmetic over the shared
@@ -2617,7 +2617,7 @@ const storeHint = (hintBySession: Map<string, string>, sessionKey: string, hotSu
 // bound, not its membership: the hint renders live subjects, this renders
 // remembered evicted subjects) and, when the session stash holds
 // reloadable outputs, a one-line note naming the newest stashed subjects
-// through read_evicted. Appends context strings only; the native prompt
+// through recall. Appends context strings only; the native prompt
 // is never replaced, and an unknown session attaches nothing.
 const COMPACTION_BLOCK_MARKER = "[ctx]"
 const compactionContextFor = (metricsEntry: SessionMetrics | undefined, pageStore: SessionPageStore | undefined, limit: number): string[] => {
@@ -2638,7 +2638,7 @@ const compactionContextFor = (metricsEntry: SessionMetrics | undefined, pageStor
       seenSubjects.add(subject)
       newestSubjects.push(subject)
     }
-    context.push(`${COMPACTION_BLOCK_MARKER} tombstoned outputs remain reloadable via the ${RELOAD_TOOL_NAME} tool; newest subjects: ${newestSubjects.join(SUBJECT_SEPARATOR)}`)
+    context.push(`${COMPACTION_BLOCK_MARKER} tombstoned outputs remain reloadable via the ${RECALL_TOOL_NAME} tool; newest subjects: ${newestSubjects.join(SUBJECT_SEPARATOR)}`)
   }
   return context
 }
@@ -2923,7 +2923,7 @@ const server = (async (_input, rawOptions) => {
     options,
   }
 
-  // Workaround: read_evicted and context_stats are registered as plain
+  // Workaround: recall and describe are registered as plain
   // { description, args, execute } definitions instead of calling tool() from
   // @opencode-ai/plugin. The package only resolves inside the opencode runtime
    // (Bun follows the deployment symlink to this repository's real path, where
@@ -2935,10 +2935,10 @@ const server = (async (_input, rawOptions) => {
   // that are not zod schemas take its legacyJsonSchema path, so the plain
   // { type: "string" } schema below is sufficient. If this file ever ships
   // somewhere @opencode-ai/plugin resolves, switch back to tool().
-  const readEvicted = async (args: unknown, toolContext: unknown): Promise<string> =>
+  const recallTool = async (args: unknown, toolContext: unknown): Promise<string> =>
     executeReadEvicted(pageStoreBySession, metricsBySession, metricsHydrationBySession, persistedTotalsForSession, options.metricsSessions, options, args, toolContext)
 
-  const statsTool = async (_args: unknown, toolContext: unknown): Promise<string> =>
+  const describeTool = async (_args: unknown, toolContext: unknown): Promise<string> =>
     executeStatsTool({ options, limits: contextLimits, modelKeys: modelKeyBySession, pageStores: pageStoreBySession, metrics: metricsBySession }, toolContext)
 
   return {
@@ -2969,7 +2969,7 @@ const server = (async (_input, rawOptions) => {
         // untouched; a mid-body fault returns the partially applied
         // normal edits (same references, subset of healthy edits) —
         // either way never a corrupted structure — and the failure
-        // surfaces through context_stats.
+        // surfaces through describe.
         const fault = { message: error instanceof Error ? error.message : String(error), atMs: options.now() }
         rememberFault(metricsBySession, sessionKey, fault, options.metricsSessions)
       }
@@ -3035,15 +3035,15 @@ const server = (async (_input, rawOptions) => {
       }
     },
     tool: {
-      [RELOAD_TOOL_NAME]: {
-        description: RELOAD_TOOL_DESCRIPTION,
-        args: { [RELOAD_ARG_NAME]: RELOAD_ARG_SCHEMA },
-        execute: guardTool(readEvicted),
+      [RECALL_TOOL_NAME]: {
+        description: RECALL_TOOL_DESCRIPTION,
+        args: { [RECALL_ARG_NAME]: RECALL_ARG_SCHEMA },
+        execute: guardTool(recallTool),
       },
-      [STATS_TOOL_NAME]: {
-        description: STATS_TOOL_DESCRIPTION,
+      [DESCRIBE_TOOL_NAME]: {
+        description: DESCRIBE_TOOL_DESCRIPTION,
         args: {},
-        execute: guardTool(statsTool),
+        execute: guardTool(describeTool),
       },
     },
   }

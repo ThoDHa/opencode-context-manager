@@ -120,9 +120,9 @@ const NO_SESSION_HINT_PATH = "/data/no-session-hint.txt"
 const HINT_SKIP_RUN_PATH = "/data/hint-skip-run.txt"
 const SYSTEM_GUARD_HINT_PATH = "/data/system-guard.txt"
 const SYSTEM_GUARD_NON_ARRAY_VALUE = "not a block array"
-const RELOAD_TOOL_NAME = "read_evicted"
-const RELOAD_TOOL_MAP_KEY = "tool"
-const RELOAD_POINTER_LEAD = " Evicted output stashed; reload it with"
+const RECALL_TOOL_NAME = "recall"
+const TOOL_MAP_KEY = "tool"
+const RECALL_POINTER_LEAD = " Evicted output stashed; reload it with"
 const STASH_MARKER = "[ctx-stash]"
 const STASH_OLDER_LEAD = "older matches for subject"
 const STASH_MESSAGE_LABEL = "at message"
@@ -400,7 +400,7 @@ type StrictBundle = { messages: StrictMessage[] }
 
 type HookMap = Record<string, (input: unknown, output: unknown) => Promise<unknown>>
 
-type ReloadToolDefinition = { execute: (args: unknown, context: unknown) => Promise<unknown> }
+type RecallToolDefinition = { execute: (args: unknown, context: unknown) => Promise<unknown> }
 
 const textPart = (text: string): TextPart => ({ type: "text", text })
 
@@ -565,7 +565,7 @@ const runTransform = async (hooks: HookMap, bundle: StrictBundle): Promise<void>
 }
 
 const reloadPointerFor = (subject: string): string =>
-  `${RELOAD_POINTER_LEAD} ${RELOAD_TOOL_NAME} (subject "${subject}").`
+  `${RECALL_POINTER_LEAD} ${RECALL_TOOL_NAME} (subject "${subject}").`
 
 const digestLinesOf = (output: string): string[] => output.split(/\r\n|\r|\n/)
 
@@ -632,7 +632,7 @@ const pageStoreOccupancyLineFor = (entries: OccupancyEntryShape[]): string => {
 }
 
 const invalidSubjectMissFor = (received: string): string =>
-  `${STASH_MARKER} ${RELOAD_TOOL_NAME} ${STASH_INVALID_SUBJECT_LEAD} (${RECEIVED_LABEL} ${received}).`
+  `${STASH_MARKER} ${RECALL_TOOL_NAME} ${STASH_INVALID_SUBJECT_LEAD} (${RECEIVED_LABEL} ${received}).`
 
 const olderMatchesLineFor = (subject: string, pointers: string[]): string =>
   `${STASH_MARKER} ${STASH_OLDER_LEAD} "${subject}": ${pointers.join(STASH_MATCH_SEPARATOR)}`
@@ -645,8 +645,8 @@ const dedupTombstoneFor = (tool: string, msgIndex: number): string =>
 const fileDedupTombstoneFor = (label: string, msgIndex: number): string =>
   `${DEDUP_MARKER} ${label} ${DEDUP_FILE_SUPERSEDED_LEAD} ${msgIndex}`
 
-const readEvicted = async (hooks: HookMap, subject: unknown, sessionID: string): Promise<unknown> =>
-  (hooks as Record<string, Record<string, ReloadToolDefinition>>)[RELOAD_TOOL_MAP_KEY][RELOAD_TOOL_NAME].execute(
+const recallTool = async (hooks: HookMap, subject: unknown, sessionID: string): Promise<unknown> =>
+  (hooks as Record<string, Record<string, RecallToolDefinition>>)[TOOL_MAP_KEY][RECALL_TOOL_NAME].execute(
     { subject },
     { sessionID },
   )
@@ -666,7 +666,7 @@ const runFaultContest = async (hooks: HookMap, paths: string[], deficitTokens: n
 
 const evictAndReload = async (hooks: HookMap, path: string): Promise<void> => {
   await runTransform(hooks, buildBundle([[pathToolPart(path, MIN_EVICTABLE_BYTES)], ...fillerMessages()]))
-  assert.equal(await readEvicted(hooks, path, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(await recallTool(hooks, path, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
 }
 
 const evictAndReloadEach = async (hooks: HookMap, paths: string[]): Promise<void> => {
@@ -675,7 +675,7 @@ const evictAndReloadEach = async (hooks: HookMap, paths: string[]): Promise<void
     buildBundle([...paths.map((path) => [pathToolPart(path, MIN_EVICTABLE_BYTES)]), ...fillerMessages()]),
   )
   for (const path of paths) {
-    assert.equal(await readEvicted(hooks, path, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+    assert.equal(await recallTool(hooks, path, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
   }
 }
 
@@ -1170,7 +1170,7 @@ test("transform derives distinct digests from evicted content that differs only 
 
   const digestOf = (tombstone: string): string => {
     const digestStart = tombstone.indexOf(DIGEST_POINTER_LEAD) + DIGEST_POINTER_LEAD.length
-    return tombstone.slice(digestStart, tombstone.indexOf(RELOAD_POINTER_LEAD, digestStart))
+    return tombstone.slice(digestStart, tombstone.indexOf(RECALL_POINTER_LEAD, digestStart))
   }
   const tombstoneA = toolPartAt(sessionA.messages[0], 0).state.output
   const tombstoneB = toolPartAt(sessionB.messages[0], 0).state.output
@@ -2017,7 +2017,32 @@ test("chat system transform lists one hint entry from the retained copy when ide
   assert.equal(hintBlocks[0].split("/data/dup.txt").length - 1, 1)
 })
 
-test("read_evicted returns the full original output named by the tombstone after eviction", async () => {
+test("the tool registry carries exactly the recall and describe definitions with no legacy names", async () => {
+  const hooks = await loadPluginHooks()
+  const tools = Object.keys((hooks as Record<string, Record<string, unknown>>)[TOOL_MAP_KEY]).sort()
+  assert.deepEqual(tools, ["describe", "recall"])
+})
+
+test("recall executes a hit and a miss end to end and describe reports the resulting reads", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  await runTransform(hooks, buildStandardBundle(SESSION_ID, STATS_HIT_SUBJECT))
+
+  assert.equal(await recallTool(hooks, STATS_HIT_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(
+    await recallTool(hooks, STATS_MISS_SUBJECT, SESSION_ID),
+    stashMissFor(
+      STATS_MISS_SUBJECT,
+      pageStoreOccupancyLineFor([{ tool: READ_TOOL, subject: STATS_HIT_SUBJECT, msgIndex: 0 }]),
+    ),
+  )
+  const after = await readStats(hooks, SESSION_ID)
+  assert.equal(countersOf(after).stashHits, 1)
+  assert.equal(countersOf(after).stashMisses, 1)
+})
+
+test("recall returns the full original output named by the tombstone after eviction", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -2029,10 +2054,10 @@ test("read_evicted returns the full original output named by the tombstone after
     toolPartAt(bundle.messages[0], 0).state.output,
     `${TOMBSTONE_MARKER} read /data/stashed.txt (3000 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${digestSentenceFor(READ_TOOL, "/data/stashed.txt", outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))}${reloadPointerFor("/data/stashed.txt")}`,
   )
-  assert.equal(await readEvicted(hooks, "/data/stashed.txt", SESSION_ID), original)
+  assert.equal(await recallTool(hooks, "/data/stashed.txt", SESSION_ID), original)
 })
 
-test("read_evicted returns the newest match in full and one-line pointers to older matches", async () => {
+test("recall returns the newest match in full and one-line pointers to older matches", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -2043,12 +2068,12 @@ test("read_evicted returns the newest match in full and one-line pointers to old
   await runTransform(hooks, bundle)
 
   assert.equal(
-    await readEvicted(hooks, "/data/dup.txt", SESSION_ID),
+    await recallTool(hooks, "/data/dup.txt", SESSION_ID),
     `${outputOfBytes(COLD_OUTPUT_BYTES)}\n${olderMatchesLineFor("/data/dup.txt", [pointerFor(READ_TOOL, 0)])}`,
   )
 })
 
-test("read_evicted lists every older match oldest first when three evictions share one subject", async () => {
+test("recall lists every older match oldest first when three evictions share one subject", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -2062,18 +2087,18 @@ test("read_evicted lists every older match oldest first when three evictions sha
   await runTransform(hooks, bundle)
 
   assert.equal(
-    await readEvicted(hooks, "/data/order.txt", SESSION_ID),
+    await recallTool(hooks, "/data/order.txt", SESSION_ID),
     `${outputOfBytes(COLD_OUTPUT_BYTES)}\n${olderMatchesLineFor("/data/order.txt", [pointerFor(READ_TOOL, 0), pointerFor(READ_TOOL, 5)])}`,
   )
 })
 
-test("read_evicted returns an error-style miss naming the subject when nothing was stashed for it", async () => {
+test("recall returns an error-style miss naming the subject when nothing was stashed for it", async () => {
   const hooks = await loadPluginHooks()
 
-  assert.equal(await readEvicted(hooks, "/data/never-evicted.txt", SESSION_ID), stashMissFor("/data/never-evicted.txt", STASH_EMPTY_OCCUPANCY))
+  assert.equal(await recallTool(hooks, "/data/never-evicted.txt", SESSION_ID), stashMissFor("/data/never-evicted.txt", STASH_EMPTY_OCCUPANCY))
 })
 
-test("read_evicted appends a populated occupancy line with alphabetical categories and the message range on a miss against a multi tool stash", async () => {
+test("recall appends a populated occupancy line with alphabetical categories and the message range on a miss against a multi tool stash", async () => {
   const hooks = await loadPluginHooksWith({ protectedTools: [] })
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -2089,7 +2114,7 @@ test("read_evicted appends a populated occupancy line with alphabetical categori
   await runTransform(hooks, bundle)
 
   assert.equal(
-    await readEvicted(hooks, OCCUPANCY_MISS_SUBJECT, SESSION_ID),
+    await recallTool(hooks, OCCUPANCY_MISS_SUBJECT, SESSION_ID),
     stashMissFor(
       OCCUPANCY_MISS_SUBJECT,
       "[ctx-stash] stash holds 6 entries across 6 subjects: bash 2, glob 1, grep 1, read 2; oldest at message 0, newest at message 5.",
@@ -2097,7 +2122,7 @@ test("read_evicted appends a populated occupancy line with alphabetical categori
   )
 })
 
-test("read_evicted reports the single message bound on a miss whose stashed entries all sit at one message index", async () => {
+test("recall reports the single message bound on a miss whose stashed entries all sit at one message index", async () => {
   const hooks = await loadPluginHooksWith({ stashLimit: OCCUPANCY_SLIM_STASH_LIMIT })
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -2108,7 +2133,7 @@ test("read_evicted reports the single message bound on a miss whose stashed entr
   await runTransform(hooks, bundle)
 
   assert.equal(
-    await readEvicted(hooks, OCCUPANCY_MISS_SUBJECT, SESSION_ID),
+    await recallTool(hooks, OCCUPANCY_MISS_SUBJECT, SESSION_ID),
     stashMissFor(
       OCCUPANCY_MISS_SUBJECT,
       "[ctx-stash] stash holds 1 entry across 1 subject: read 1; at message 0.",
@@ -2116,7 +2141,7 @@ test("read_evicted reports the single message bound on a miss whose stashed entr
   )
 })
 
-test("read_evicted states the stash holds nothing when the session stash exists but is empty", async () => {
+test("recall states the stash holds nothing when the session stash exists but is empty", async () => {
   const hooks = await loadPluginHooksWith({ stashLimit: OCCUPANCY_ZERO_STASH_LIMIT })
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -2131,12 +2156,12 @@ test("read_evicted states the stash holds nothing when the session stash exists 
   })
 
   assert.equal(
-    await readEvicted(hooks, OCCUPANCY_MISS_SUBJECT, SESSION_ID),
+    await recallTool(hooks, OCCUPANCY_MISS_SUBJECT, SESSION_ID),
     stashMissFor(OCCUPANCY_MISS_SUBJECT, "[ctx-stash] stash holds nothing from this session."),
   )
 })
 
-test("read_evicted caps the occupancy category list at five categories with an overflow clause", async () => {
+test("recall caps the occupancy category list at five categories with an overflow clause", async () => {
   const hooks = await loadPluginHooksWith({ protectedTools: [], userFenceEviction: { enabled: true } })
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -2169,7 +2194,7 @@ test("read_evicted caps the occupancy category list at five categories with an o
   )
 
   assert.equal(
-    await readEvicted(hooks, OCCUPANCY_MISS_SUBJECT, SESSION_ID),
+    await recallTool(hooks, OCCUPANCY_MISS_SUBJECT, SESSION_ID),
     stashMissFor(
       OCCUPANCY_MISS_SUBJECT,
       "[ctx-stash] stash holds 17 entries across 17 subjects: bash 3, fence 2, glob 3, grep 3, read 3, +1 more; oldest at message 0, newest at message 14.",
@@ -2177,7 +2202,7 @@ test("read_evicted caps the occupancy category list at five categories with an o
   )
 })
 
-test("read_evicted categorizes fence stashed entries under the fence label alongside tool entries", async () => {
+test("recall categorizes fence stashed entries under the fence label alongside tool entries", async () => {
   const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -2191,7 +2216,7 @@ test("read_evicted categorizes fence stashed entries under the fence label along
   await runTransform(hooks, userFenceBundle(block))
 
   assert.equal(
-    await readEvicted(hooks, OCCUPANCY_MISS_SUBJECT, SESSION_ID),
+    await recallTool(hooks, OCCUPANCY_MISS_SUBJECT, SESSION_ID),
     stashMissFor(
       OCCUPANCY_MISS_SUBJECT,
       "[ctx-stash] stash holds 3 entries across 3 subjects: fence 1, read 2; oldest at message 0, newest at message 1.",
@@ -2199,7 +2224,7 @@ test("read_evicted categorizes fence stashed entries under the fence label along
   )
 })
 
-test("read_evicted evicts the oldest stashed entry when a session stash exceeds the fifty entry bound", async () => {
+test("recall evicts the oldest stashed entry when a session stash exceeds the fifty entry bound", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -2211,17 +2236,17 @@ test("read_evicted evicts the oldest stashed entry when a session stash exceeds 
   await runTransform(hooks, bundle)
 
   assert.equal(
-    await readEvicted(hooks, stashSubjects[0], SESSION_ID),
+    await recallTool(hooks, stashSubjects[0], SESSION_ID),
     stashMissFor(
       stashSubjects[0],
       pageStoreOccupancyLineFor(stashSubjects.slice(1).map((subject, index) => ({ tool: READ_TOOL, subject, msgIndex: index + 1 }))),
     ),
   )
-  assert.equal(await readEvicted(hooks, stashSubjects[1], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
-  assert.equal(await readEvicted(hooks, stashSubjects[STASH_LIMIT], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(await recallTool(hooks, stashSubjects[1], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(await recallTool(hooks, stashSubjects[STASH_LIMIT], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
 })
 
-test("read_evicted keeps stashes isolated between sessions", async () => {
+test("recall keeps stashes isolated between sessions", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
   await setContextLimit(hooks, SESSION_ID_B, WATERMARK_PROBE_CONTEXT_LIMIT)
@@ -2237,10 +2262,10 @@ test("read_evicted keeps stashes isolated between sessions", async () => {
   await runTransform(hooks, sessionA)
   await runTransform(hooks, sessionB)
 
-  assert.equal(await readEvicted(hooks, STASH_ISOLATION_SUBJECT, SESSION_ID), outputOfBytes(COLD_OUTPUT_BYTES))
-  assert.equal(await readEvicted(hooks, STASH_ISOLATION_SUBJECT, SESSION_ID_B), outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
+  assert.equal(await recallTool(hooks, STASH_ISOLATION_SUBJECT, SESSION_ID), outputOfBytes(COLD_OUTPUT_BYTES))
+  assert.equal(await recallTool(hooks, STASH_ISOLATION_SUBJECT, SESSION_ID_B), outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
   assert.equal(
-    await readEvicted(hooks, STASH_ISOLATION_SUBJECT, STASH_ISOLATION_SESSION_C),
+    await recallTool(hooks, STASH_ISOLATION_SUBJECT, STASH_ISOLATION_SESSION_C),
     stashMissFor(STASH_ISOLATION_SUBJECT, STASH_EMPTY_OCCUPANCY),
   )
 })
@@ -2253,14 +2278,14 @@ test("transform leaves no stash behind when the estimate sits under the watermar
   await runTransform(hooks, bundle)
 
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
-  assert.equal(await readEvicted(hooks, "/data/kept.txt", SESSION_ID), stashMissFor("/data/kept.txt", STASH_EMPTY_OCCUPANCY))
+  assert.equal(await recallTool(hooks, "/data/kept.txt", SESSION_ID), stashMissFor("/data/kept.txt", STASH_EMPTY_OCCUPANCY))
 })
 
-test("read_evicted returns an error-style miss when the subject is not a non-empty string", async () => {
+test("recall returns an error-style miss when the subject is not a non-empty string", async () => {
   const hooks = await loadPluginHooks()
 
-  assert.equal(await readEvicted(hooks, INVALID_SUBJECT_VALUE, SESSION_ID), invalidSubjectMissFor("number"))
-  assert.equal(await readEvicted(hooks, "", SESSION_ID), invalidSubjectMissFor("string"))
+  assert.equal(await recallTool(hooks, INVALID_SUBJECT_VALUE, SESSION_ID), invalidSubjectMissFor("number"))
+  assert.equal(await recallTool(hooks, "", SESSION_ID), invalidSubjectMissFor("string"))
 })
 
 test("transform tombstones an older identical call with the dedup marker and keeps the newest output verbatim", async () => {
@@ -2314,7 +2339,7 @@ test("transform dedups an older identical call with the estimate under the water
   assert.ok(!toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
 })
 
-test("transform never stashes a dedup tombstoned output so read_evicted misses it", async () => {
+test("transform never stashes a dedup tombstoned output so recall misses it", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -2327,7 +2352,7 @@ test("transform never stashes a dedup tombstoned output so read_evicted misses i
 
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, dedupTombstoneFor(READ_TOOL, 1))
   assert.equal(toolPartAt(bundle.messages[1], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
-  assert.equal(await readEvicted(hooks, DEDUP_PATH, SESSION_ID), stashMissFor(DEDUP_PATH, STASH_EMPTY_OCCUPANCY))
+  assert.equal(await recallTool(hooks, DEDUP_PATH, SESSION_ID), stashMissFor(DEDUP_PATH, STASH_EMPTY_OCCUPANCY))
 })
 
 test("transform lists a deduped subject once from the retained copy and never from the tombstone", async () => {
@@ -2782,7 +2807,7 @@ test("transform leaves file dedup results unchanged on a second transform pass",
   assert.deepEqual(bundle.messages[0].parts[0], { type: "text", text: fileDedupTombstoneFor(FILE_FILENAME, 3) })
 })
 
-test("context_stats counts file attachment dedup tombstones in the deduped counter", async () => {
+test("describe counts file attachment dedup tombstones in the deduped counter", async () => {
   const hooks = await loadPluginHooks()
 
   const bundle = buildBundle([
@@ -3223,7 +3248,7 @@ test("transform falls back to the default protected tools when protectedTools is
   assert.equal(toolPartAt(emptyEntryBundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
 })
 
-test("transform never stashes a protected output so read_evicted misses it after an eviction run under pressure", async () => {
+test("transform never stashes a protected output so recall misses it after an eviction run under pressure", async () => {
   const hooks = await loadPluginHooksWith({ protectedTools: [GREP_TOOL] })
   await setContextLimit(
     hooks,
@@ -3247,13 +3272,13 @@ test("transform never stashes a protected output so read_evicted misses it after
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(PROTECTED_OUTPUT_BYTES))
   assert.ok(toolPartAt(bundle.messages[1], 0).state.output.startsWith(TOMBSTONE_MARKER))
   assert.equal(
-    await readEvicted(hooks, STASH_PROTECTED_PATTERN, SESSION_ID),
+    await recallTool(hooks, STASH_PROTECTED_PATTERN, SESSION_ID),
     stashMissFor(
       STASH_PROTECTED_PATTERN,
       pageStoreOccupancyLineFor([{ tool: READ_TOOL, subject: STASH_PROTECTED_VICTIM_PATH, msgIndex: 1 }]),
     ),
   )
-  assert.equal(await readEvicted(hooks, STASH_PROTECTED_VICTIM_PATH, SESSION_ID), outputOfBytes(PROTECTED_OUTPUT_BYTES))
+  assert.equal(await recallTool(hooks, STASH_PROTECTED_VICTIM_PATH, SESSION_ID), outputOfBytes(PROTECTED_OUTPUT_BYTES))
 })
 
 test("transform dedups protected tool duplicates with the newest substantial output superseding the older", async () => {
@@ -3449,40 +3474,40 @@ const evictStashSession = async (hooks: HookMap, index: number): Promise<void> =
   await runTransform(hooks, stashOverflowSessionBundle(index))
 }
 
-test("read_evicted drops the least recently active session stash when a ninth session stashes an eviction", async () => {
+test("recall drops the least recently active session stash when a ninth session stashes an eviction", async () => {
   const hooks = await loadPluginHooks()
   for (let index = 0; index < STASH_SESSION_BOUND; index += 1) await evictStashSession(hooks, index)
 
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(0), stashSessionId(0)),
+    await recallTool(hooks, stashSessionSubject(0), stashSessionId(0)),
     outputOfBytes(MIN_EVICTABLE_BYTES),
   )
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(STASH_SESSION_BOUND - 1), stashSessionId(STASH_SESSION_BOUND - 1)),
+    await recallTool(hooks, stashSessionSubject(STASH_SESSION_BOUND - 1), stashSessionId(STASH_SESSION_BOUND - 1)),
     outputOfBytes(MIN_EVICTABLE_BYTES),
   )
 
   await evictStashSession(hooks, STASH_SESSION_OVERFLOW_COUNT - 1)
 
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(0), stashSessionId(0)),
+    await recallTool(hooks, stashSessionSubject(0), stashSessionId(0)),
     outputOfBytes(MIN_EVICTABLE_BYTES),
   )
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(1), stashSessionId(1)),
+    await recallTool(hooks, stashSessionSubject(1), stashSessionId(1)),
     stashMissFor(stashSessionSubject(1), STASH_EMPTY_OCCUPANCY),
   )
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(STASH_SESSION_BOUND - 1), stashSessionId(STASH_SESSION_BOUND - 1)),
+    await recallTool(hooks, stashSessionSubject(STASH_SESSION_BOUND - 1), stashSessionId(STASH_SESSION_BOUND - 1)),
     outputOfBytes(MIN_EVICTABLE_BYTES),
   )
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(STASH_SESSION_OVERFLOW_COUNT - 1), stashSessionId(STASH_SESSION_OVERFLOW_COUNT - 1)),
+    await recallTool(hooks, stashSessionSubject(STASH_SESSION_OVERFLOW_COUNT - 1), stashSessionId(STASH_SESSION_OVERFLOW_COUNT - 1)),
     outputOfBytes(MIN_EVICTABLE_BYTES),
   )
 })
 
-test("read_evicted protects a refreshed hot session stash when a ninth session stashes an eviction", async () => {
+test("recall protects a refreshed hot session stash when a ninth session stashes an eviction", async () => {
   const hooks = await loadPluginHooks()
   for (let index = 0; index < STASH_SESSION_BOUND; index += 1) await evictStashSession(hooks, index)
 
@@ -3490,50 +3515,50 @@ test("read_evicted protects a refreshed hot session stash when a ninth session s
   await evictStashSession(hooks, STASH_SESSION_OVERFLOW_COUNT - 1)
 
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(0), stashSessionId(0)),
+    await recallTool(hooks, stashSessionSubject(0), stashSessionId(0)),
     outputOfBytes(MIN_EVICTABLE_BYTES),
   )
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(1), stashSessionId(1)),
+    await recallTool(hooks, stashSessionSubject(1), stashSessionId(1)),
     stashMissFor(stashSessionSubject(1), STASH_EMPTY_OCCUPANCY),
   )
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(STASH_SESSION_OVERFLOW_COUNT - 1), stashSessionId(STASH_SESSION_OVERFLOW_COUNT - 1)),
+    await recallTool(hooks, stashSessionSubject(STASH_SESSION_OVERFLOW_COUNT - 1), stashSessionId(STASH_SESSION_OVERFLOW_COUNT - 1)),
     outputOfBytes(MIN_EVICTABLE_BYTES),
   )
 })
 
-test("read_evicted refreshes a reloading session stash so it survives when a ninth session stashes an eviction", async () => {
+test("recall refreshes a reloading session stash so it survives when a ninth session stashes an eviction", async () => {
   const hooks = await loadPluginHooks()
   for (let index = 0; index < STASH_SESSION_BOUND; index += 1) await evictStashSession(hooks, index)
 
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(0), stashSessionId(0)),
+    await recallTool(hooks, stashSessionSubject(0), stashSessionId(0)),
     outputOfBytes(MIN_EVICTABLE_BYTES),
   )
 
   await evictStashSession(hooks, STASH_SESSION_OVERFLOW_COUNT - 1)
 
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(0), stashSessionId(0)),
+    await recallTool(hooks, stashSessionSubject(0), stashSessionId(0)),
     outputOfBytes(MIN_EVICTABLE_BYTES),
   )
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(1), stashSessionId(1)),
+    await recallTool(hooks, stashSessionSubject(1), stashSessionId(1)),
     stashMissFor(stashSessionSubject(1), STASH_EMPTY_OCCUPANCY),
   )
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(STASH_SESSION_OVERFLOW_COUNT - 1), stashSessionId(STASH_SESSION_OVERFLOW_COUNT - 1)),
+    await recallTool(hooks, stashSessionSubject(STASH_SESSION_OVERFLOW_COUNT - 1), stashSessionId(STASH_SESSION_OVERFLOW_COUNT - 1)),
     outputOfBytes(MIN_EVICTABLE_BYTES),
   )
 })
 
-test("read_evicted does not refresh a session stash on a miss probe so the probing session drops when a ninth session stashes an eviction", async () => {
+test("recall does not refresh a session stash on a miss probe so the probing session drops when a ninth session stashes an eviction", async () => {
   const hooks = await loadPluginHooks()
   for (let index = 0; index < STASH_SESSION_BOUND; index += 1) await evictStashSession(hooks, index)
 
   assert.equal(
-    await readEvicted(hooks, STASH_MISS_PROBE_SUBJECT, stashSessionId(0)),
+    await recallTool(hooks, STASH_MISS_PROBE_SUBJECT, stashSessionId(0)),
     stashMissFor(
       STASH_MISS_PROBE_SUBJECT,
       pageStoreOccupancyLineFor([{ tool: READ_TOOL, subject: stashSessionSubject(0), msgIndex: 0 }]),
@@ -3543,15 +3568,15 @@ test("read_evicted does not refresh a session stash on a miss probe so the probi
   await evictStashSession(hooks, STASH_SESSION_OVERFLOW_COUNT - 1)
 
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(0), stashSessionId(0)),
+    await recallTool(hooks, stashSessionSubject(0), stashSessionId(0)),
     stashMissFor(stashSessionSubject(0), STASH_EMPTY_OCCUPANCY),
   )
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(1), stashSessionId(1)),
+    await recallTool(hooks, stashSessionSubject(1), stashSessionId(1)),
     outputOfBytes(MIN_EVICTABLE_BYTES),
   )
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(STASH_SESSION_OVERFLOW_COUNT - 1), stashSessionId(STASH_SESSION_OVERFLOW_COUNT - 1)),
+    await recallTool(hooks, stashSessionSubject(STASH_SESSION_OVERFLOW_COUNT - 1), stashSessionId(STASH_SESSION_OVERFLOW_COUNT - 1)),
     outputOfBytes(MIN_EVICTABLE_BYTES),
   )
 })
@@ -3622,7 +3647,7 @@ test("transform truncates a multi kilobyte heredoc subject in the tombstone and 
     toolPartAt(bundle.messages[0], 0).state.output,
     `${TOMBSTONE_MARKER} bash ${truncated} (2048 bytes, ~5 messages ago)${TOMBSTONE_SUFFIX}${digestSentenceFor(BASH_TOOL, truncated, outputOfBytes(MIN_EVICTABLE_BYTES))}${reloadPointerFor(truncated)}`,
   )
-  assert.equal(await readEvicted(hooks, truncated, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(await recallTool(hooks, truncated, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
 })
 
 test("chat system transform renders a newline bearing heredoc subject as one truncated single line hint entry", async () => {
@@ -3656,7 +3681,7 @@ test("transform refresh matches a huge multi line subject on its raw value despi
 const COLLISION_SUBJECT_PATH = "/data/collide.txt"
 const COLLISION_ENCODING_KEY = "encoding"
 
-test("read_evicted keeps both same message same subject evictions reloadable instead of overwriting the first stash", async () => {
+test("recall keeps both same message same subject evictions reloadable instead of overwriting the first stash", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -3674,12 +3699,12 @@ test("read_evicted keeps both same message same subject evictions reloadable ins
   await runTransform(hooks, bundle)
 
   assert.equal(
-    await readEvicted(hooks, COLLISION_SUBJECT_PATH, SESSION_ID),
+    await recallTool(hooks, COLLISION_SUBJECT_PATH, SESSION_ID),
     `${outputOfBytes(COLD_OUTPUT_BYTES)}\n${olderMatchesLineFor(COLLISION_SUBJECT_PATH, [pointerFor(READ_TOOL, 0)])}`,
   )
 })
 
-const STATS_TOOL_NAME = "context_stats"
+const DESCRIBE_TOOL_NAME = "describe"
 const METRICS_DIR_SEGMENTS = [".local", "share", "opencode"]
 const METRICS_LOG_BASENAME = "context-metrics.jsonl"
 const DEFAULT_METRICS_PATH = join(homedir(), ...METRICS_DIR_SEGMENTS, METRICS_LOG_BASENAME)
@@ -3795,7 +3820,7 @@ type StatsToolDefinition = { execute: (args: unknown, context: unknown) => Promi
 
 const readStats = async (hooks: HookMap, sessionID: string): Promise<Record<string, unknown>> =>
   JSON.parse(
-    (await (hooks as Record<string, Record<string, StatsToolDefinition>>)[RELOAD_TOOL_MAP_KEY][STATS_TOOL_NAME].execute(
+    (await (hooks as Record<string, Record<string, StatsToolDefinition>>)[TOOL_MAP_KEY][DESCRIBE_TOOL_NAME].execute(
       {},
       { sessionID },
     )) as string,
@@ -3860,7 +3885,7 @@ const metricsRotationPanelSeedLine = (session: string = SESSION_ID): Record<stri
   },
 })
 
-test("context_stats reports zeroed counters unknown budget and empty stash for a session without activity", async () => {
+test("describe reports zeroed counters unknown budget and empty stash for a session without activity", async () => {
   const hooks = await loadPluginHooks()
 
   const stats = await readStats(hooks, SESSION_ID)
@@ -3901,7 +3926,7 @@ test("context_stats reports zeroed counters unknown budget and empty stash for a
   assert.equal(Object.hasOwn(stats, "logWriteError"), false)
 })
 
-test("context_stats reports the explicit defaultContextTokens option as the budget when no limit was captured", async () => {
+test("describe reports the explicit defaultContextTokens option as the budget when no limit was captured", async () => {
   const hooks = await loadPluginHooksWith({ defaultContextTokens: EXPLICIT_DEFAULT_CONTEXT_TOKENS })
 
   const stats = await readStats(hooks, SESSION_ID)
@@ -3911,7 +3936,7 @@ test("context_stats reports the explicit defaultContextTokens option as the budg
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_DEFAULT)
 })
 
-test("context_stats records an unknown budget last run with null watermark and deficit after a skip run", async () => {
+test("describe records an unknown budget last run with null watermark and deficit after a skip run", async () => {
   const hooks = await loadPluginHooks()
 
   const bundle = buildStandardBundle(SESSION_ID, STATS_SKIP_RUN_SUBJECT)
@@ -3927,7 +3952,7 @@ test("context_stats records an unknown budget last run with null watermark and d
   })
 })
 
-test("context_stats counts the eviction reclaimed bytes stash entry and last run deficit after one eviction run", async () => {
+test("describe counts the eviction reclaimed bytes stash entry and last run deficit after one eviction run", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
 
@@ -3942,8 +3967,8 @@ test("context_stats counts the eviction reclaimed bytes stash entry and last run
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
-    processedContextBytes: 482,
-    processedContextTokens: tokensForChars(482),
+    processedContextBytes: 476,
+    processedContextTokens: tokensForChars(476),
   })
   assert.deepEqual(stats.stash, { entries: 1, capacity: STASH_LIMIT })
   assert.deepEqual(stats.lastRun, {
@@ -3953,7 +3978,7 @@ test("context_stats counts the eviction reclaimed bytes stash entry and last run
   })
 })
 
-test("context_stats derives the eviction token-savings estimate from the reclaimed bytes over the default charsPerToken", async () => {
+test("describe derives the eviction token-savings estimate from the reclaimed bytes over the default charsPerToken", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
 
@@ -3965,12 +3990,12 @@ test("context_stats derives the eviction token-savings estimate from the reclaim
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
-    processedContextBytes: 482,
-    processedContextTokens: tokensForChars(482),
+    processedContextBytes: 476,
+    processedContextTokens: tokensForChars(476),
   })
 })
 
-test("context_stats scales the eviction token-savings estimate by the resolved charsPerToken", async () => {
+test("describe scales the eviction token-savings estimate by the resolved charsPerToken", async () => {
   const hooks = await loadPluginHooksWith({ charsPerToken: SAVINGS_CUSTOM_CHARS_PER_TOKEN })
   await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
 
@@ -3983,18 +4008,18 @@ test("context_stats scales the eviction token-savings estimate by the resolved c
   assert.equal(counters.evictionTokensSaved, Math.ceil(MIN_EVICTABLE_BYTES / SAVINGS_CUSTOM_CHARS_PER_TOKEN))
 })
 
-test("context_stats counts stash hits and misses from read_evicted and leaves invalid subject arguments uncounted", async () => {
+test("describe counts stash hits and misses from recall and leaves invalid subject arguments uncounted", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
-  assert.equal(await readEvicted(hooks, STATS_MISS_SUBJECT, SESSION_ID), stashMissFor(STATS_MISS_SUBJECT, STASH_EMPTY_OCCUPANCY))
+  assert.equal(await recallTool(hooks, STATS_MISS_SUBJECT, SESSION_ID), stashMissFor(STATS_MISS_SUBJECT, STASH_EMPTY_OCCUPANCY))
   assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), STATS_ZEROED_COUNTERS)
 
   const bundle = buildStandardBundle(SESSION_ID, STATS_HIT_SUBJECT)
   await runTransform(hooks, bundle)
 
   assert.equal(
-    await readEvicted(hooks, STATS_MISS_SUBJECT, SESSION_ID),
+    await recallTool(hooks, STATS_MISS_SUBJECT, SESSION_ID),
     stashMissFor(
       STATS_MISS_SUBJECT,
       pageStoreOccupancyLineFor([{ tool: READ_TOOL, subject: STATS_HIT_SUBJECT, msgIndex: 0 }]),
@@ -4007,17 +4032,17 @@ test("context_stats counts stash hits and misses from read_evicted and leaves in
     bytesReclaimed: MIN_EVICTABLE_BYTES,
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
     stashMisses: 1,
-    processedContextBytes: 480,
-    processedContextTokens: tokensForChars(480),
+    processedContextBytes: 474,
+    processedContextTokens: tokensForChars(474),
   })
 
-  assert.equal(await readEvicted(hooks, INVALID_SUBJECT_VALUE, SESSION_ID), invalidSubjectMissFor("number"))
-  assert.equal(await readEvicted(hooks, "", SESSION_ID), invalidSubjectMissFor("string"))
+  assert.equal(await recallTool(hooks, INVALID_SUBJECT_VALUE, SESSION_ID), invalidSubjectMissFor("number"))
+  assert.equal(await recallTool(hooks, "", SESSION_ID), invalidSubjectMissFor("string"))
   const afterInvalid = await readStats(hooks, SESSION_ID)
   assert.equal(countersOf(afterInvalid).stashMisses, 1)
   assert.equal(countersOf(afterInvalid).stashHits, 0)
 
-  assert.equal(await readEvicted(hooks, STATS_HIT_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(await recallTool(hooks, STATS_HIT_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
   const afterHit = await readStats(hooks, SESSION_ID)
   assert.deepEqual(countersOf(afterHit), {
     ...STATS_ZEROED_COUNTERS,
@@ -4026,12 +4051,12 @@ test("context_stats counts stash hits and misses from read_evicted and leaves in
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
     stashHits: 1,
     stashMisses: 1,
-    processedContextBytes: 480,
-    processedContextTokens: tokensForChars(480),
+    processedContextBytes: 474,
+    processedContextTokens: tokensForChars(474),
   })
 })
 
-test("context_stats counts a post eviction touch exactly once for a matching later call and never recounts repeated transforms", async () => {
+test("describe counts a post eviction touch exactly once for a matching later call and never recounts repeated transforms", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -4047,7 +4072,7 @@ test("context_stats counts a post eviction touch exactly once for a matching lat
   assert.equal(countersOf(await readStats(hooks, SESSION_ID)).postEvictionTouches, 1)
 })
 
-test("context_stats leaves post eviction touches at zero when a later call matches nothing evicted", async () => {
+test("describe leaves post eviction touches at zero when a later call matches nothing evicted", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -4062,7 +4087,7 @@ test("context_stats leaves post eviction touches at zero when a later call match
   assert.equal(countersOf(await readStats(hooks, SESSION_ID)).postEvictionTouches, 0)
 })
 
-test("context_stats forgets the oldest evicted subject past the hundred subject cap and stops counting its post eviction touches", async () => {
+test("describe forgets the oldest evicted subject past the hundred subject cap and stops counting its post eviction touches", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -4096,7 +4121,7 @@ test("transform credits a subject's fault from both a reload and a post eviction
     ...fillerMessages(),
   ])
   await runTransform(hooks, bundle)
-  assert.equal(await readEvicted(hooks, FAULT_CREDIT_RELOADED_PATH, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(await recallTool(hooks, FAULT_CREDIT_RELOADED_PATH, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
   await evictAndReload(hooks, FAULT_CREDIT_SINGLE_HIT_PATH)
 
   bundle.messages.push(
@@ -4125,7 +4150,7 @@ test("transform credits a subject's fault from both a reload and a post eviction
   assertEntryKept(accumulationContest, 0)
 })
 
-test("context_stats counts one post eviction touch when a single bash appearance matches two evicted subjects", async () => {
+test("describe counts one post eviction touch when a single bash appearance matches two evicted subjects", async () => {
   const metricsDir = makeMetricsDir()
   try {
     const hooks = await loadPluginHooksWith({ metricsLog: true, metricsPath: metricsLogPathIn(metricsDir) })
@@ -4162,7 +4187,7 @@ test("the fault map forgets the least recently faulted subject past its bound an
   // The 257th distinct fault trims subject 0; re-faulting subject 250
   // refreshes its recency, so the 258th fault trims subject 1 instead.
   assert.equal(
-    await readEvicted(hooks, faultMapBoundSubject(FAULT_MAP_REFRESHED_INDEX), SESSION_ID),
+    await recallTool(hooks, faultMapBoundSubject(FAULT_MAP_REFRESHED_INDEX), SESSION_ID),
     outputOfBytes(MIN_EVICTABLE_BYTES),
   )
   await evictAndReloadEach(hooks, [faultMapBoundSubject(FAULT_MAP_NEW_INDEX)])
@@ -4194,7 +4219,7 @@ test("a refresh at the fault map bound preserves bystander subjects' faults so a
   // one fault and defers count-0 subject 0; a refresh that drops bystander
   // counts ties the contest at zero and evicts first-listed subject 1.
   assert.equal(
-    await readEvicted(hooks, faultMapBoundSubject(FAULT_MAP_REFRESHED_INDEX), SESSION_ID),
+    await recallTool(hooks, faultMapBoundSubject(FAULT_MAP_REFRESHED_INDEX), SESSION_ID),
     outputOfBytes(MIN_EVICTABLE_BYTES),
   )
 
@@ -4207,7 +4232,7 @@ test("a refresh at the fault map bound preserves bystander subjects' faults so a
   assertEntryTombstoned(bystanderContest, 1)
 })
 
-test("context_stats counts dedup tombstones without counting evictions and stays incremental across repeated transforms", async () => {
+test("describe counts dedup tombstones without counting evictions and stays incremental across repeated transforms", async () => {
   const hooks = await loadPluginHooks()
 
   const bundle = buildBundle([
@@ -4226,7 +4251,7 @@ test("context_stats counts dedup tombstones without counting evictions and stays
   assert.equal(countersOf(await readStats(hooks, SESSION_ID)).deduped, 1)
 })
 
-test("context_stats accumulates the dedup token-savings estimate from each superseded duplicate's bytes", async () => {
+test("describe accumulates the dedup token-savings estimate from each superseded duplicate's bytes", async () => {
   const hooks = await loadPluginHooks()
   const dedupSavingsParts = (): MessagePart[][] => [
     [pathToolPart(DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
@@ -4261,7 +4286,7 @@ test("context_stats accumulates the dedup token-savings estimate from each super
   assert.equal(counters.dedupTokensSaved, tokensForChars(DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES * REPEATED_STANDING_RUNS))
 })
 
-test("context_stats counts stash drops when a single run evicts fifty one entries past the stash bound", async () => {
+test("describe counts stash drops when a single run evicts fifty one entries past the stash bound", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -4295,10 +4320,10 @@ test("transform drops nothing from a session stash holding exactly the fifty ent
   const stats = await readStats(hooks, SESSION_ID)
   assert.equal(countersOf(stats).stashDropped, 0)
   assert.deepEqual(stats.stash, { entries: STASH_LIMIT, capacity: STASH_LIMIT })
-  assert.equal(await readEvicted(hooks, subjects[0], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(await recallTool(hooks, subjects[0], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
 })
 
-test("read_evicted drops the earliest runs' entries first when later runs push a session stash past the fifty entry bound", async () => {
+test("recall drops the earliest runs' entries first when later runs push a session stash past the fifty entry bound", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -4327,7 +4352,7 @@ test("read_evicted drops the earliest runs' entries first when later runs push a
   assert.equal(countersOf(stats).stashDropped, STASH_CROSS_RUN_DROP_COUNT)
   assert.deepEqual(stats.stash, { entries: STASH_LIMIT, capacity: STASH_LIMIT })
   assert.equal(
-    await readEvicted(hooks, firstRunSubjects[0], SESSION_ID),
+    await recallTool(hooks, firstRunSubjects[0], SESSION_ID),
     stashMissFor(
       firstRunSubjects[0],
       pageStoreOccupancyLineFor([
@@ -4345,10 +4370,10 @@ test("read_evicted drops the earliest runs' entries first when later runs push a
     ),
   )
   assert.equal(
-    await readEvicted(hooks, firstRunSubjects[STASH_CROSS_RUN_DROP_COUNT], SESSION_ID),
+    await recallTool(hooks, firstRunSubjects[STASH_CROSS_RUN_DROP_COUNT], SESSION_ID),
     outputOfBytes(MIN_EVICTABLE_BYTES),
   )
-  assert.equal(await readEvicted(hooks, secondRunSubjects[0], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(await recallTool(hooks, secondRunSubjects[0], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
 })
 
 test("metrics log appends one eventful jsonl line with expected fields and nothing for a quiet repeated run", async () => {
@@ -4382,8 +4407,8 @@ test("metrics log appends one eventful jsonl line with expected fields and nothi
       evictions: 1,
       bytesReclaimed: MIN_EVICTABLE_BYTES,
       evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
-      processedContextBytes: 474,
-      processedContextTokens: tokensForChars(474),
+      processedContextBytes: 468,
+      processedContextTokens: tokensForChars(468),
     })
 
     await runTransform(hooks, bundle)
@@ -4484,7 +4509,7 @@ test("metrics log records stash reads since the last line on the next transform 
 
     const bundle = buildStandardBundle(SESSION_ID, STATS_RELOADED_SUBJECT)
     await runTransform(hooks, bundle)
-    assert.equal(await readEvicted(hooks, STATS_RELOADED_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+    assert.equal(await recallTool(hooks, STATS_RELOADED_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
 
     await runTransform(hooks, bundle)
     const lines = metricsLinesIn(metricsLogPathIn(metricsDir))
@@ -4497,8 +4522,8 @@ test("metrics log records stash reads since the last line on the next transform 
       bytesReclaimed: MIN_EVICTABLE_BYTES,
       evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
       stashHits: 1,
-      processedContextBytes: 976,
-      processedContextTokens: tokensForChars(976),
+      processedContextBytes: 964,
+      processedContextTokens: tokensForChars(964),
     })
 
     await runTransform(hooks, bundle)
@@ -4524,7 +4549,7 @@ test("metrics log writes nothing when metricsLog is false while counters still u
   }
 })
 
-test("metrics log records an unwritable path in logWriteError surfaced through context_stats without throwing", async () => {
+test("metrics log records an unwritable path in logWriteError surfaced through describe without throwing", async () => {
   const metricsDir = makeMetricsDir()
   try {
     const hooks = await loadPluginHooksWithMetricsLog(blockedMetricsPathIn(metricsDir))
@@ -4542,7 +4567,7 @@ test("metrics log records an unwritable path in logWriteError surfaced through c
   }
 })
 
-test("context_stats keeps metrics isolated between two sessions", async () => {
+test("describe keeps metrics isolated between two sessions", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
   await setContextLimit(hooks, SESSION_ID_B, contextForDeficit(THREE_ENTRY_BUNDLE_CHARS, TWO_ENTRY_DEFICIT_TOKENS))
@@ -4565,8 +4590,8 @@ test("context_stats keeps metrics isolated between two sessions", async () => {
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
-    processedContextBytes: 482,
-    processedContextTokens: tokensForChars(482),
+    processedContextBytes: 476,
+    processedContextTokens: tokensForChars(476),
   })
   const statsB = await readStats(hooks, SESSION_ID_B)
   assert.equal(statsB.session, SESSION_ID_B)
@@ -4575,12 +4600,12 @@ test("context_stats keeps metrics isolated between two sessions", async () => {
     evictions: STATS_ISOLATION_B_EVICTED_COUNT,
     bytesReclaimed: STATS_ISOLATION_B_EVICTED_COUNT * THREE_ENTRY_OUTPUT_BYTES,
     evictionTokensSaved: tokensForChars(STATS_ISOLATION_B_EVICTED_COUNT * THREE_ENTRY_OUTPUT_BYTES),
-    processedContextBytes: 3928,
-    processedContextTokens: tokensForChars(3928),
+    processedContextBytes: 3916,
+    processedContextTokens: tokensForChars(3916),
   })
 })
 
-test("context_stats drops the least recently active session metrics when a ninth session transforms", async () => {
+test("describe drops the least recently active session metrics when a ninth session transforms", async () => {
   const hooks = await loadPluginHooks()
   for (let index = 0; index < METRICS_SESSION_BOUND; index += 1) await storeMetricsSession(hooks, index)
 
@@ -4592,12 +4617,12 @@ test("context_stats drops the least recently active session metrics when a ninth
   assert.equal(countersOf(await readStats(hooks, metricsSessionId(METRICS_SESSION_OVERFLOW_COUNT - 1))).evictions, 1)
 })
 
-test("read_evicted leaves live session metrics untouched when a never-transformed session probes a stash miss at the session bound", async () => {
+test("recall leaves live session metrics untouched when a never-transformed session probes a stash miss at the session bound", async () => {
   const hooks = await loadPluginHooks()
   for (let index = 0; index < METRICS_SESSION_BOUND; index += 1) await storeMetricsSession(hooks, index)
 
   assert.equal(
-    await readEvicted(hooks, METRICS_PROBE_MISS_SUBJECT, METRICS_PROBE_SESSION_ID),
+    await recallTool(hooks, METRICS_PROBE_MISS_SUBJECT, METRICS_PROBE_SESSION_ID),
     stashMissFor(METRICS_PROBE_MISS_SUBJECT, STASH_EMPTY_OCCUPANCY),
   )
 
@@ -4606,7 +4631,7 @@ test("read_evicted leaves live session metrics untouched when a never-transforme
   assert.deepEqual(countersOf(await readStats(hooks, METRICS_PROBE_SESSION_ID)), STATS_ZEROED_COUNTERS)
 })
 
-test("context_stats refreshes a probing session's metrics so it survives when a ninth session transforms", async () => {
+test("describe refreshes a probing session's metrics so it survives when a ninth session transforms", async () => {
   const hooks = await loadPluginHooks()
   for (let index = 0; index < METRICS_SESSION_BOUND; index += 1) await storeMetricsSession(hooks, index)
 
@@ -4618,7 +4643,7 @@ test("context_stats refreshes a probing session's metrics so it survives when a 
   assert.equal(countersOf(await readStats(hooks, metricsSessionId(METRICS_SESSION_OVERFLOW_COUNT - 1))).evictions, 1)
 })
 
-test("context_stats leaves live session metrics untouched when a never-transformed session opens the stats tool at the session bound", async () => {
+test("describe leaves live session metrics untouched when a never-transformed session opens the stats tool at the session bound", async () => {
   const hooks = await loadPluginHooks()
   for (let index = 0; index < METRICS_SESSION_BOUND; index += 1) await storeMetricsSession(hooks, index)
 
@@ -4627,7 +4652,7 @@ test("context_stats leaves live session metrics untouched when a never-transform
   assert.equal(countersOf(await readStats(hooks, metricsSessionId(METRICS_SESSION_BOUND - 1))).evictions, 1)
 })
 
-test("context_stats does not refresh a session stash so a stats-only probe leaves it exposed when a ninth session stashes an eviction", async () => {
+test("describe does not refresh a session stash so a stats-only probe leaves it exposed when a ninth session stashes an eviction", async () => {
   const hooks = await loadPluginHooks()
   for (let index = 0; index < STASH_SESSION_BOUND; index += 1) await evictStashSession(hooks, index)
 
@@ -4635,15 +4660,15 @@ test("context_stats does not refresh a session stash so a stats-only probe leave
   await evictStashSession(hooks, STASH_SESSION_OVERFLOW_COUNT - 1)
 
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(0), stashSessionId(0)),
+    await recallTool(hooks, stashSessionSubject(0), stashSessionId(0)),
     stashMissFor(stashSessionSubject(0), STASH_EMPTY_OCCUPANCY),
   )
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(1), stashSessionId(1)),
+    await recallTool(hooks, stashSessionSubject(1), stashSessionId(1)),
     outputOfBytes(MIN_EVICTABLE_BYTES),
   )
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(STASH_SESSION_OVERFLOW_COUNT - 1), stashSessionId(STASH_SESSION_OVERFLOW_COUNT - 1)),
+    await recallTool(hooks, stashSessionSubject(STASH_SESSION_OVERFLOW_COUNT - 1), stashSessionId(STASH_SESSION_OVERFLOW_COUNT - 1)),
     outputOfBytes(MIN_EVICTABLE_BYTES),
   )
 })
@@ -4675,7 +4700,7 @@ test("metrics log clears a recorded write failure once a later write succeeds", 
   }
 })
 
-test("context_stats reports the metrics rotation cap in options defaulting to twenty MiB and falling back on invalid caps", async () => {
+test("describe reports the metrics rotation cap in options defaulting to twenty MiB and falling back on invalid caps", async () => {
   assert.equal(
     ((await readStats(await loadPluginHooks(), SESSION_ID)).options as Record<string, unknown>).metricsRotationMaxBytes,
     DEFAULT_METRICS_ROTATION_MAX_BYTES,
@@ -4696,7 +4721,7 @@ test("context_stats reports the metrics rotation cap in options defaulting to tw
   }
 })
 
-test("context_stats reports metricsMinLineIntervalMs defaulting to sixty seconds and falling back on invalid values", async () => {
+test("describe reports metricsMinLineIntervalMs defaulting to sixty seconds and falling back on invalid values", async () => {
   assert.equal(
     ((await readStats(await loadPluginHooks(), SESSION_ID)).options as Record<string, unknown>).metricsMinLineIntervalMs,
     DEFAULT_METRICS_MIN_LINE_INTERVAL_MS,
@@ -4736,7 +4761,7 @@ test("metrics log stays byte identical at exactly the rotation cap and rotates w
     assert.equal(statSync(metricsPath).size, capBytes)
     assert.equal(metricsLinesIn(metricsPath).length, STATS_LOG_FILE_LINES)
 
-    assert.equal(await readEvicted(hooks, METRICS_ROTATION_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+    assert.equal(await recallTool(hooks, METRICS_ROTATION_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
     await runTransform(hooks, bundle)
 
     const rotatedLines = metricsLinesIn(rotatedMetricsPathIn(metricsDir))
@@ -4755,8 +4780,8 @@ test("metrics log stays byte identical at exactly the rotation cap and rotates w
       bytesReclaimed: MIN_EVICTABLE_BYTES,
       evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
       stashHits: 1,
-      processedContextBytes: 992,
-      processedContextTokens: tokensForChars(992),
+      processedContextBytes: 980,
+      processedContextTokens: tokensForChars(980),
     })
   } finally {
     cleanupMetricsDir(metricsDir)
@@ -4778,7 +4803,7 @@ test("metrics log never rotates when metricsRotationMaxBytes is zero", async () 
 
     const bundle = buildStandardBundle(SESSION_ID, METRICS_ROTATION_DISABLED_SUBJECT)
     await runTransform(hooks, bundle)
-    assert.equal(await readEvicted(hooks, METRICS_ROTATION_DISABLED_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+    assert.equal(await recallTool(hooks, METRICS_ROTATION_DISABLED_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
     await runTransform(hooks, bundle)
 
     assert.equal(existsSync(rotatedMetricsPathIn(metricsDir)), false)
@@ -5030,8 +5055,8 @@ test("live state snapshot records eviction totals stash occupancy and an empty h
       evictions: 1,
       bytesReclaimed: MIN_EVICTABLE_BYTES,
       evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
-      processedContextBytes: 484,
-      processedContextTokens: tokensForChars(484),
+      processedContextBytes: 478,
+      processedContextTokens: tokensForChars(478),
     })
     assert.deepEqual(snapshot.stash, { entries: 1, capacity: STASH_LIMIT })
     assert.deepEqual(snapshot.hotSubjects, [])
@@ -5208,7 +5233,7 @@ test("live state write records stateWriteError and leaves no temp file behind wh
   }
 })
 
-test("live state write failure records stateWriteError through context_stats without interrupting the session", async () => {
+test("live state write failure records stateWriteError through describe without interrupting the session", async () => {
   const stateDir = makeLiveStateDir()
   try {
     writeFileSync(join(stateDir, LIVE_STATE_BLOCKER_FILE), "not a directory")
@@ -5264,7 +5289,7 @@ test("live state snapshot carries an empty hot subject list when hintSubjects is
   }
 })
 
-test("context_stats reports the live state options defaulting beside the metrics log and round tripping custom values", async () => {
+test("describe reports the live state options defaulting beside the metrics log and round tripping custom values", async () => {
   const defaultOptions = ((await readStats(await loadPluginHooks(), SESSION_ID)).options as Record<string, unknown>)
   assert.equal(defaultOptions.liveStateLog, false)
   assert.equal(defaultOptions.liveStatePath, DEFAULT_LIVE_STATE_DIR)
@@ -5304,7 +5329,7 @@ const agedReasoningBundleFor = (sessionID: string): StrictBundle =>
     sessionID,
   )
 
-test("context_stats credits each expired reasoning part once and holds the totals constant across repeated standing runs", async () => {
+test("describe credits each expired reasoning part once and holds the totals constant across repeated standing runs", async () => {
   const hooks = await loadPluginHooks()
 
   await runTransform(hooks, agedReasoningBundleFor(SESSION_ID))
@@ -5353,7 +5378,7 @@ test("sibling reasoning counters stay isolated across interleaved repeated stand
   assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID_B)), SIBLING_REPEATED_STANDING_COUNTERS)
 })
 
-test("context_stats reports only the calling session's reasoning counters", async () => {
+test("describe reports only the calling session's reasoning counters", async () => {
   const hooks = await loadPluginHooks()
 
   await runTransform(hooks, agedReasoningBundleFor(SESSION_ID))
@@ -5371,7 +5396,7 @@ test("context_stats reports only the calling session's reasoning counters", asyn
   })
 })
 
-test("context_stats counts identical-content reasoning parts once in the unique count and credits their bytes once", async () => {
+test("describe counts identical-content reasoning parts once in the unique count and credits their bytes once", async () => {
   const hooks = await loadPluginHooks()
 
   const bundle = buildBundle([
@@ -5388,7 +5413,7 @@ test("context_stats counts identical-content reasoning parts once in the unique 
   assert.equal(counters.reasoningTokensSaved, tokensForChars(REASONING_COLD_TEXT.length))
 })
 
-test("context_stats leaves reasoning counters at zero when a pressured session has no reasoning parts", async () => {
+test("describe leaves reasoning counters at zero when a pressured session has no reasoning parts", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -5401,8 +5426,8 @@ test("context_stats leaves reasoning counters at zero when a pressured session h
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
-    processedContextBytes: 486,
-    processedContextTokens: tokensForChars(486),
+    processedContextBytes: 480,
+    processedContextTokens: tokensForChars(480),
   })
 })
 
@@ -5646,7 +5671,7 @@ test("composition counts zero escape and attachment bytes once an attachment bea
   }
 })
 
-test("composition fields stay off quiet runs and off context_stats before any run", async () => {
+test("composition fields stay off quiet runs and off describe before any run", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
   try {
@@ -5814,13 +5839,13 @@ test("transform ignores a non array attachments field when evicting and leaves t
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES,
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
-    processedContextBytes: 504,
-    processedContextTokens: tokensForChars(504),
+    processedContextBytes: 498,
+    processedContextTokens: tokensForChars(498),
   })
-  assert.equal(await readEvicted(hooks, NON_ARRAY_ATTACHMENTS_PATH, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(await recallTool(hooks, NON_ARRAY_ATTACHMENTS_PATH, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
 })
 
-test("read_evicted returns the original output plus a manifest naming the dropped attachment payload after an attachment bearing eviction", async () => {
+test("recall returns the original output plus a manifest naming the dropped attachment payload after an attachment bearing eviction", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
 
@@ -5828,12 +5853,12 @@ test("read_evicted returns the original output plus a manifest naming the droppe
   await runTransform(hooks, bundle)
 
   assert.equal(
-    await readEvicted(hooks, ATTACHED_PATH, SESSION_ID),
+    await recallTool(hooks, ATTACHED_PATH, SESSION_ID),
     `${outputOfBytes(MIN_EVICTABLE_BYTES)}\n${attachmentManifestLineFor([attachmentSummaryFor(ATTACHMENT_MIME_PNG, ATTACHED_URL_PRIMARY_CHARS)])}`,
   )
 })
 
-test("read_evicted lists every attachment in the manifest when an eviction drops multiple attachments", async () => {
+test("recall lists every attachment in the manifest when an eviction drops multiple attachments", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
 
@@ -5849,7 +5874,7 @@ test("read_evicted lists every attachment in the manifest when an eviction drops
   await runTransform(hooks, bundle)
 
   assert.equal(
-    await readEvicted(hooks, ATTACHED_PATH, SESSION_ID),
+    await recallTool(hooks, ATTACHED_PATH, SESSION_ID),
     `${outputOfBytes(MIN_EVICTABLE_BYTES)}\n${attachmentManifestLineFor([
       attachmentSummaryFor(ATTACHMENT_MIME_PNG, ATTACHED_URL_PRIMARY_CHARS),
       attachmentSummaryFor(ATTACHMENT_MIME_JPEG, ATTACHED_URL_SECONDARY_CHARS),
@@ -5883,7 +5908,7 @@ test("transform strips attachments from a dedup tombstoned older call while the 
   ])
 })
 
-test("context_stats counts a superseded duplicate's attachment payload chars in the dedup token-savings estimate", async () => {
+test("describe counts a superseded duplicate's attachment payload chars in the dedup token-savings estimate", async () => {
   const hooks = await loadPluginHooks()
 
   const bundle = buildBundle([
@@ -5923,7 +5948,7 @@ test("transform ignores a non array attachments field when deduplicating and lea
   assert.equal(toolPartAt(bundle.messages[3], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
 })
 
-test("context_stats counts attachment payload characters in bytesReclaimed for an attachment bearing eviction", async () => {
+test("describe counts attachment payload characters in bytesReclaimed for an attachment bearing eviction", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
 
@@ -5935,8 +5960,8 @@ test("context_stats counts attachment payload characters in bytesReclaimed for a
     evictions: 1,
     bytesReclaimed: MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS,
     evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS),
-    processedContextBytes: 499,
-    processedContextTokens: tokensForChars(499),
+    processedContextBytes: 493,
+    processedContextTokens: tokensForChars(493),
   })
 })
 
@@ -5965,8 +5990,8 @@ test("metrics log records attachmentBytes on each evicted entry and adds the pay
       evictions: 1,
       bytesReclaimed: MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS,
       evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES + ATTACHED_URL_PRIMARY_CHARS),
-      processedContextBytes: 499,
-      processedContextTokens: tokensForChars(499),
+      processedContextBytes: 493,
+      processedContextTokens: tokensForChars(493),
     })
   } finally {
     cleanupMetricsDir(metricsDir)
@@ -6050,7 +6075,7 @@ test("transform never opens a span from a fence opener whose info string contain
     `${FENCE_PROSE_BEFORE}\n${unclosedBacktickBlock}\n${FENCE_PROSE_MIDDLE}\n${fenceTombstoneFor(FENCE_LANGUAGE_TS, FENCE_OVER_LINES, fenceFirstLineOf(FENCE_LINE_TAG_B))}\n${FENCE_PROSE_AFTER}`,
   )
   assert.equal(
-    await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID),
+    await recallTool(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID),
     stashMissFor(
       fenceFirstLineOf(FENCE_LINE_TAG),
       pageStoreOccupancyLineFor([{ tool: FENCE_STASH_TOOL_LABEL, subject: fenceFirstLineOf(FENCE_LINE_TAG_B), msgIndex: 0 }]),
@@ -6066,7 +6091,7 @@ test("transform leaves every user fenced block byte-identical while userFenceEvi
   await runTransform(hooks, bundle)
 
   assert.equal(textAt(bundle, 0), text)
-  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG), STASH_EMPTY_OCCUPANCY))
+  assert.equal(await recallTool(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG), STASH_EMPTY_OCCUPANCY))
 })
 
 test("transform evicts an over threshold fenced block from an old user message into a tombstone naming language line count and first non empty line", async () => {
@@ -6087,12 +6112,12 @@ test("transform evicts an over threshold fenced block from an old user message i
   )
 })
 
-test("read_evicted returns the exact stashed fence block text after a fence eviction", async () => {
+test("recall returns the exact stashed fence block text after a fence eviction", async () => {
   const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
   const block = fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG))
   await runTransform(hooks, userFenceBundle(`${FENCE_PROSE_BEFORE}\n${block}\n${FENCE_PROSE_AFTER}`))
 
-  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), `${block}\n`)
+  assert.equal(await recallTool(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), `${block}\n`)
 })
 
 test("transform keeps a fenced block exactly at minBlockLines and evicts the anonymous block one line over it", async () => {
@@ -6121,8 +6146,8 @@ test("transform evicts every over threshold fence in one user part and keeps the
     textAt(bundle, 0),
     `${FENCE_PROSE_BEFORE}\n${fenceTombstoneFor(FENCE_LANGUAGE_TS, FENCE_OVER_LINES, fenceFirstLineOf(FENCE_LINE_TAG_A))}\n${FENCE_PROSE_MIDDLE}\n${fenceTombstoneFor(FENCE_LANGUAGE_JS, FENCE_OVER_LINES + 1, fenceFirstLineOf(FENCE_LINE_TAG_B))}\n${FENCE_PROSE_AFTER}`,
   )
-  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG_A), SESSION_ID), `${blockA}\n`)
-  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG_B), SESSION_ID), `${blockB}\n`)
+  assert.equal(await recallTool(hooks, fenceFirstLineOf(FENCE_LINE_TAG_A), SESSION_ID), `${blockA}\n`)
+  assert.equal(await recallTool(hooks, fenceFirstLineOf(FENCE_LINE_TAG_B), SESSION_ID), `${blockB}\n`)
 })
 
 test("transform never evicts an unterminated fence however large it grows", async () => {
@@ -6132,7 +6157,7 @@ test("transform never evicts an unterminated fence however large it grows", asyn
   await runTransform(hooks, bundle)
 
   assert.equal(textAt(bundle, 0), text)
-  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG), STASH_EMPTY_OCCUPANCY))
+  assert.equal(await recallTool(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG), STASH_EMPTY_OCCUPANCY))
 })
 
 test("transform keeps an all blank fenced block untouched no matter how many blank lines it holds", async () => {
@@ -6143,7 +6168,7 @@ test("transform keeps an all blank fenced block untouched no matter how many bla
   await runTransform(hooks, bundle)
 
   assert.equal(textAt(bundle, 0), text)
-  assert.equal(await readEvicted(hooks, UNKNOWN_TARGET_LABEL, SESSION_ID), stashMissFor(UNKNOWN_TARGET_LABEL, STASH_EMPTY_OCCUPANCY))
+  assert.equal(await recallTool(hooks, UNKNOWN_TARGET_LABEL, SESSION_ID), stashMissFor(UNKNOWN_TARGET_LABEL, STASH_EMPTY_OCCUPANCY))
 })
 
 test("transform truncates a long fence first line in the tombstone and reload pointer to the same capped subject", async () => {
@@ -6159,10 +6184,10 @@ test("transform truncates a long fence first line in the tombstone and reload po
     textAt(bundle, 0),
     `${FENCE_PROSE_BEFORE}\n${fenceTombstoneFor(FENCE_LANGUAGE_TS, FENCE_OVER_LINES, truncated)}\n${FENCE_PROSE_AFTER}`,
   )
-  assert.equal(await readEvicted(hooks, truncated, SESSION_ID), `${block}\n`)
+  assert.equal(await recallTool(hooks, truncated, SESSION_ID), `${block}\n`)
 })
 
-test("read_evicted evicts the oldest stashed entry when fence evictions push a session stash past the fifty entry bound", async () => {
+test("recall evicts the oldest stashed entry when fence evictions push a session stash past the fifty entry bound", async () => {
   const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
   const fenceCount = STASH_OVERFLOW_COUNT
   const blocks = Array.from({ length: fenceCount }, (_, index) =>
@@ -6176,7 +6201,7 @@ test("read_evicted evicts the oldest stashed entry when fence evictions push a s
   assert.equal(countersOf(stats).stashDropped, 1)
   assert.deepEqual(stats.stash, { entries: STASH_LIMIT, capacity: STASH_LIMIT })
   assert.equal(
-    await readEvicted(hooks, fenceFirstLineOf("block0"), SESSION_ID),
+    await recallTool(hooks, fenceFirstLineOf("block0"), SESSION_ID),
     stashMissFor(
       fenceFirstLineOf("block0"),
       pageStoreOccupancyLineFor(
@@ -6188,7 +6213,7 @@ test("read_evicted evicts the oldest stashed entry when fence evictions push a s
       ),
     ),
   )
-  assert.equal(await readEvicted(hooks, fenceFirstLineOf("block1"), SESSION_ID), `${blocks[1]}\n`)
+  assert.equal(await recallTool(hooks, fenceFirstLineOf("block1"), SESSION_ID), `${blocks[1]}\n`)
 })
 
 test("transform lowers the estimate with fence bytes before the budget decision and lands the block in the shared bounded stash", async () => {
@@ -6213,7 +6238,7 @@ test("transform lowers the estimate with fence bytes before the budget decision 
 
   assert.equal(textAt(bundle, 0), `${FENCE_PROSE_BEFORE}\n${tombstone}\n${FENCE_PROSE_AFTER}`)
   assert.equal(toolPartAt(bundle.messages[1], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
-  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), `${block}\n`)
+  assert.equal(await recallTool(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), `${block}\n`)
 
   const stats = await readStats(hooks, SESSION_ID)
   assert.equal(countersOf(stats).fenceEvicted, 1)
@@ -6232,7 +6257,7 @@ test("transform replaces a fence block whose closer ends the part text without d
     textAt(bundle, 0),
     `${FENCE_PROSE_BEFORE}\n${fenceTombstoneFor(FENCE_LANGUAGE_TS, FENCE_OVER_LINES, fenceFirstLineOf(FENCE_LINE_TAG))}\n`,
   )
-  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), `${block}\n`)
+  assert.equal(await recallTool(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), `${block}\n`)
 })
 
 test("transform keeps an over threshold user fence inside the recent window untouched", async () => {
@@ -6255,19 +6280,19 @@ test("transform keeps fenced blocks in non user messages untouched while userFen
   assert.equal(textAt(bundle, 0), text)
 })
 
-test("read_evicted keeps two same subject fence evictions in one part reloadable instead of overwriting the first stash", async () => {
+test("recall keeps two same subject fence evictions in one part reloadable instead of overwriting the first stash", async () => {
   const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
   const blockA = fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG))
   const blockB = fenceBlockText(FENCE_LANGUAGE_JS, fenceContentLines(FENCE_OVER_LINES + 1, FENCE_LINE_TAG))
   await runTransform(hooks, userFenceBundle(`${FENCE_PROSE_BEFORE}\n${blockA}\n${FENCE_PROSE_MIDDLE}\n${blockB}\n${FENCE_PROSE_AFTER}`))
 
   assert.equal(
-    await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID),
+    await recallTool(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID),
     `${blockB}\n\n${olderMatchesLineFor(fenceFirstLineOf(FENCE_LINE_TAG), [pointerFor(FENCE_STASH_TOOL_LABEL, 0)])}`,
   )
 })
 
-test("context_stats counts fence evictions in a distinct fenceEvicted counter without counting tool evictions", async () => {
+test("describe counts fence evictions in a distinct fenceEvicted counter without counting tool evictions", async () => {
   const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
   const block = fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG))
   await runTransform(hooks, userFenceBundle(`${FENCE_PROSE_BEFORE}\n${block}\n${FENCE_PROSE_AFTER}`))
@@ -6278,8 +6303,8 @@ test("context_stats counts fence evictions in a distinct fenceEvicted counter wi
     fenceEvicted: 1,
     bytesReclaimed: block.length + FENCE_TRAILING_NEWLINE_CHARS,
     evictionTokensSaved: tokensForChars(block.length + FENCE_TRAILING_NEWLINE_CHARS),
-    processedContextBytes: 275,
-    processedContextTokens: tokensForChars(275),
+    processedContextBytes: 269,
+    processedContextTokens: tokensForChars(269),
   })
   assert.deepEqual(stats.options.userFenceEviction, { enabled: true, minBlockLines: FENCE_DEFAULT_MIN_BLOCK_LINES })
   assert.deepEqual(stats.stash, { entries: 1, capacity: STASH_LIMIT })
@@ -6304,8 +6329,8 @@ test("metrics log records a fence only run as eventful with the fenceEvictedThis
       fenceEvicted: 1,
       bytesReclaimed: block.length + FENCE_TRAILING_NEWLINE_CHARS,
       evictionTokensSaved: tokensForChars(block.length + FENCE_TRAILING_NEWLINE_CHARS),
-      processedContextBytes: 275,
-      processedContextTokens: tokensForChars(275),
+      processedContextBytes: 269,
+      processedContextTokens: tokensForChars(269),
     })
   } finally {
     cleanupMetricsDir(metricsDir)
@@ -6477,7 +6502,7 @@ test("metrics log keeps stash read accounting correct across a suppressed then f
     await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
 
     await runTransform(hooks, buildStandardBundle(SESSION_ID, METRICS_COALESCE_RELOAD_SUBJECT))
-    assert.equal(await readEvicted(hooks, METRICS_COALESCE_RELOAD_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+    assert.equal(await recallTool(hooks, METRICS_COALESCE_RELOAD_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
     await runTransform(hooks, reasoningOnlyBundle())
     await runTransform(hooks, reasoningOnlyBundle())
 
@@ -6485,7 +6510,7 @@ test("metrics log keeps stash read accounting correct across a suppressed then f
     assert.equal(lines.length, METRICS_COALESCE_LINES_AFTER_FLUSH)
     assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].stashReadsSinceLastLine, 1)
 
-    assert.equal(await readEvicted(hooks, METRICS_COALESCE_RELOAD_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+    assert.equal(await recallTool(hooks, METRICS_COALESCE_RELOAD_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
     await runTransform(hooks, buildBundle([[textPart(textOfChars(FILLER_TEXT_CHARS))], ...fillerMessages(2)]))
 
     const flushedLines = metricsLinesIn(metricsPath)
@@ -6550,7 +6575,7 @@ test("transform never opens a fence span on a four space indented fence line", a
   await runTransform(hooks, bundle)
 
   assert.equal(textAt(bundle, 0), text)
-  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG), STASH_EMPTY_OCCUPANCY))
+  assert.equal(await recallTool(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG), STASH_EMPTY_OCCUPANCY))
 })
 
 test("transform never closes a fence span on a four space indented fence line", async () => {
@@ -6562,7 +6587,7 @@ test("transform never closes a fence span on a four space indented fence line", 
   await runTransform(hooks, bundle)
 
   assert.equal(textAt(bundle, 0), text)
-  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG), STASH_EMPTY_OCCUPANCY))
+  assert.equal(await recallTool(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG), STASH_EMPTY_OCCUPANCY))
 })
 
 test("transform evicts a four backtick fence holding three backtick lines as content", async () => {
@@ -6578,7 +6603,7 @@ test("transform evicts a four backtick fence holding three backtick lines as con
     textAt(bundle, 0),
     `${FENCE_PROSE_BEFORE}\n${fenceTombstoneFor(FENCE_LANGUAGE_TS, FENCE_OVER_LINES, fenceFirstLineOf(FENCE_LINE_TAG))}\n${FENCE_PROSE_AFTER}`,
   )
-  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), `${block}\n`)
+  assert.equal(await recallTool(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), `${block}\n`)
 })
 
 test("transform evicts a fence indented up to three spaces and stashes its exact indented text", async () => {
@@ -6592,7 +6617,7 @@ test("transform evicts a fence indented up to three spaces and stashes its exact
     textAt(bundle, 0),
     `${FENCE_PROSE_BEFORE}\n${fenceTombstoneFor(FENCE_LANGUAGE_TS, FENCE_OVER_LINES, fenceFirstLineOf(FENCE_LINE_TAG))}\n${FENCE_PROSE_AFTER}`,
   )
-  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), `${block}\n`)
+  assert.equal(await recallTool(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), `${block}\n`)
 })
 
 test("transform keeps the user message sitting exactly at hotFromIndex untouched while userFenceEviction is enabled", async () => {
@@ -6609,7 +6634,7 @@ test("transform keeps the user message sitting exactly at hotFromIndex untouched
   await runTransform(hooks, bundle)
 
   assert.equal(textAt(bundle, 1), text)
-  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG), STASH_EMPTY_OCCUPANCY))
+  assert.equal(await recallTool(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG), STASH_EMPTY_OCCUPANCY))
 })
 
 const MANUAL_MODE_INVALID_VALUE = "yes"
@@ -6736,7 +6761,7 @@ test("the compacting hook appends hot subjects and the stash note for a session 
   assert.equal(output.context.length, 2)
   assert.equal(output.context[0], hintLineFor([HINT_RENDERED_SUBJECT]))
   assert.ok(output.context[1].startsWith(COMPACTION_BLOCK_MARKER))
-  assert.ok(output.context[1].includes(RELOAD_TOOL_NAME))
+  assert.ok(output.context[1].includes(RECALL_TOOL_NAME))
   assert.ok(output.context[1].includes(HINT_RENDERED_SUBJECT))
 })
 
@@ -6811,7 +6836,7 @@ test("the compacting hook attaches only the stash note when the session remember
 
   assert.equal(output.context.length, 1)
   assert.ok(output.context[0].startsWith(COMPACTION_BLOCK_MARKER))
-  assert.ok(output.context[0].includes(RELOAD_TOOL_NAME))
+  assert.ok(output.context[0].includes(RECALL_TOOL_NAME))
 })
 
 test("the stash note dedupes repeated subjects and caps at the subject bound, newest first", async () => {
@@ -7099,7 +7124,7 @@ test("an aged read older than the threshold evicts with no budget captured and c
   await runTransform(hooks, bundle)
 
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
-  assert.equal(await readEvicted(hooks, AGED_READ_PATH, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(await recallTool(hooks, AGED_READ_PATH, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
   const stats = await readStats(hooks, SESSION_ID)
   assert.equal(countersOf(stats).evictions, 1)
   assert.equal(countersOf(stats).bytesReclaimed, MIN_EVICTABLE_BYTES)
@@ -7121,7 +7146,7 @@ test("a re-touched aged read survives aged eviction while its message index is a
 
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
   assert.equal(toolPartAt(bundle.messages[6], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
-  assert.equal(await readEvicted(hooks, AGED_RETOUCHED_PATH, SESSION_ID), stashMissFor(AGED_RETOUCHED_PATH, STASH_EMPTY_OCCUPANCY))
+  assert.equal(await recallTool(hooks, AGED_RETOUCHED_PATH, SESSION_ID), stashMissFor(AGED_RETOUCHED_PATH, STASH_EMPTY_OCCUPANCY))
 })
 
 test("a read inside the recent window survives aged eviction despite passing the age threshold", async () => {
@@ -7145,7 +7170,7 @@ test("an aged read below minEvictableBytes survives aged eviction", async () => 
   await runTransform(hooks, bundle)
 
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES - 1))
-  assert.equal(await readEvicted(hooks, AGED_READ_PATH, SESSION_ID), stashMissFor(AGED_READ_PATH, STASH_EMPTY_OCCUPANCY))
+  assert.equal(await recallTool(hooks, AGED_READ_PATH, SESSION_ID), stashMissFor(AGED_READ_PATH, STASH_EMPTY_OCCUPANCY))
 })
 
 test("an aged read matching a protected pattern survives aged eviction", async () => {
@@ -7362,7 +7387,7 @@ test("a throwing tool returns the structured error shape instead of throwing", a
   // property getter throws mid-read: the boundary must convert the throw
   // into the structured error string.
   const hostileArgs = Object.create(null, { subject: { get: () => { throw new Error(TOOL_FAULT_MESSAGE) } } })
-  const result = await (hooks as Record<string, Record<string, { execute: (args: unknown, context: unknown) => Promise<string> }>>)[RELOAD_TOOL_MAP_KEY][RELOAD_TOOL_NAME].execute(
+  const result = await (hooks as Record<string, Record<string, { execute: (args: unknown, context: unknown) => Promise<string> }>>)[TOOL_MAP_KEY][RECALL_TOOL_NAME].execute(
     hostileArgs,
     { sessionID: SESSION_ID },
   )
@@ -7497,7 +7522,7 @@ test("manual mode previews the fault adjusted candidate order in the dry run whe
     ...fenceContentLines(FENCE_TEST_THRESHOLD, "faultfence"),
   ])
   await runTransform(hooks, userFenceBundle(`${FENCE_PROSE_BEFORE}\n${faultFenceBlock}\n${FENCE_PROSE_AFTER}`))
-  assert.equal(await readEvicted(hooks, FAULT_DRY_RUN_RELOADED_PATH, SESSION_ID), `${faultFenceBlock}\n`)
+  assert.equal(await recallTool(hooks, FAULT_DRY_RUN_RELOADED_PATH, SESSION_ID), `${faultFenceBlock}\n`)
 
   const bundle = buildBundle([
     [pathToolPart(FAULT_DRY_RUN_RELOADED_PATH, MIN_EVICTABLE_BYTES)],
@@ -7665,7 +7690,7 @@ test("chat system transform delivers a hint under pressure while manualMode is e
   assert.deepEqual(hintBlocksIn(await runSystemTransform(hooks, SESSION_ID)), [hintLineFor([MANUAL_HINT_SUBJECT])])
 })
 
-test("transform keeps fence eviction the stash and read_evicted active while manualMode is enabled", async () => {
+test("transform keeps fence eviction the stash and recall active while manualMode is enabled", async () => {
   const hooks = await loadPluginHooksWith({ manualMode: true, userFenceEviction: { enabled: true } })
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -7677,10 +7702,10 @@ test("transform keeps fence eviction the stash and read_evicted active while man
     textAt(bundle, 0),
     `${FENCE_PROSE_BEFORE}\n${fenceTombstoneFor(FENCE_LANGUAGE_TS, FENCE_OVER_LINES, fenceFirstLineOf(FENCE_LINE_TAG))}\n${FENCE_PROSE_AFTER}`,
   )
-  assert.equal(await readEvicted(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), `${block}\n`)
+  assert.equal(await recallTool(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), `${block}\n`)
 })
 
-test("context_stats reports the manual state the captured budget and the armed watermark last run", async () => {
+test("describe reports the manual state the captured budget and the armed watermark last run", async () => {
   const hooks = await loadPluginHooksWith({ manualMode: true })
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -7698,7 +7723,7 @@ test("context_stats reports the manual state the captured budget and the armed w
   })
 })
 
-test("context_stats keeps a null watermark and deficit for a manual session with no budget and no watermarkTokens", async () => {
+test("describe keeps a null watermark and deficit for a manual session with no budget and no watermarkTokens", async () => {
   const hooks = await loadPluginHooksWith({ manualMode: true })
 
   const bundle = buildStandardBundle(SESSION_ID, MANUAL_UNWATERMARKED_SUBJECT)
@@ -7742,13 +7767,13 @@ const SUBSTRING_FLOOR_ZERO = 0
 const SUBSTRING_FLOOR_INVALID = -1
 const STASH_LIMIT_OVERRIDE_SUBJECT_PREFIX = "/data/slim-stash"
 
-test("context_stats reports the default stash capacity of fifty entries when stashLimit is unset", async () => {
+test("describe reports the default stash capacity of fifty entries when stashLimit is unset", async () => {
   const stats = await readStats(await loadPluginHooks(), SESSION_ID)
 
   assert.deepEqual(stats.stash, { entries: 0, capacity: STASH_LIMIT })
 })
 
-test("read_evicted applies a custom stashLimit dropping the oldest stashed entry past the bound", async () => {
+test("recall applies a custom stashLimit dropping the oldest stashed entry past the bound", async () => {
   const hooks = await loadPluginHooksWith({ stashLimit: STASH_LIMIT_OVERRIDE })
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -7764,17 +7789,17 @@ test("read_evicted applies a custom stashLimit dropping the oldest stashed entry
     capacity: STASH_LIMIT_OVERRIDE,
   })
   assert.equal(
-    await readEvicted(hooks, subjects[0], SESSION_ID),
+    await recallTool(hooks, subjects[0], SESSION_ID),
     stashMissFor(
       subjects[0],
       pageStoreOccupancyLineFor(subjects.slice(1).map((subject, index) => ({ tool: READ_TOOL, subject, msgIndex: index + 1 }))),
     ),
   )
-  assert.equal(await readEvicted(hooks, subjects[1], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
-  assert.equal(await readEvicted(hooks, subjects[2], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(await recallTool(hooks, subjects[1], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(await recallTool(hooks, subjects[2], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
 })
 
-test("context_stats keeps the default stash capacity when stashLimit is invalid", async () => {
+test("describe keeps the default stash capacity when stashLimit is invalid", async () => {
   for (const invalidLimit of STASH_LIMIT_INVALID_VALUES) {
     const hooks = await loadPluginHooksWith({ stashLimit: invalidLimit })
     const stats = await readStats(hooks, SESSION_ID)
@@ -7783,40 +7808,40 @@ test("context_stats keeps the default stash capacity when stashLimit is invalid"
   }
 })
 
-test("read_evicted drops the least recently active session stash when the stashSessions bound is exceeded", async () => {
+test("recall drops the least recently active session stash when the stashSessions bound is exceeded", async () => {
   const hooks = await loadPluginHooksWith({ stashSessions: SESSION_BOUND_OVERRIDE })
   for (let index = 0; index < SESSION_BOUND_OVERRIDE; index += 1) await evictStashSession(hooks, index)
 
   await evictStashSession(hooks, SESSION_BOUND_OVERRIDE)
 
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(0), stashSessionId(0)),
+    await recallTool(hooks, stashSessionSubject(0), stashSessionId(0)),
     stashMissFor(stashSessionSubject(0), STASH_EMPTY_OCCUPANCY),
   )
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(1), stashSessionId(1)),
+    await recallTool(hooks, stashSessionSubject(1), stashSessionId(1)),
     outputOfBytes(MIN_EVICTABLE_BYTES),
   )
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(SESSION_BOUND_OVERRIDE), stashSessionId(SESSION_BOUND_OVERRIDE)),
+    await recallTool(hooks, stashSessionSubject(SESSION_BOUND_OVERRIDE), stashSessionId(SESSION_BOUND_OVERRIDE)),
     outputOfBytes(MIN_EVICTABLE_BYTES),
   )
 })
 
-test("read_evicted keeps early session stashes when an invalid stashSessions falls back to the default bound", async () => {
+test("recall keeps early session stashes when an invalid stashSessions falls back to the default bound", async () => {
   const hooks = await loadPluginHooksWith({ stashSessions: SESSION_BOUND_INVALID_ZERO })
   for (let index = 0; index < STASH_SESSION_OVERFLOW_COUNT; index += 1) await evictStashSession(hooks, index)
 
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(0), stashSessionId(0)),
+    await recallTool(hooks, stashSessionSubject(0), stashSessionId(0)),
     stashMissFor(stashSessionSubject(0), STASH_EMPTY_OCCUPANCY),
   )
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(1), stashSessionId(1)),
+    await recallTool(hooks, stashSessionSubject(1), stashSessionId(1)),
     outputOfBytes(MIN_EVICTABLE_BYTES),
   )
   assert.equal(
-    await readEvicted(hooks, stashSessionSubject(STASH_SESSION_OVERFLOW_COUNT - 1), stashSessionId(STASH_SESSION_OVERFLOW_COUNT - 1)),
+    await recallTool(hooks, stashSessionSubject(STASH_SESSION_OVERFLOW_COUNT - 1), stashSessionId(STASH_SESSION_OVERFLOW_COUNT - 1)),
     outputOfBytes(MIN_EVICTABLE_BYTES),
   )
 })
@@ -7871,7 +7896,7 @@ test("chat system transform keeps session hints when an invalid hintSessions fal
   assert.equal(hintBlocksIn(await runSystemTransform(hooks, hintSessionId(HINT_SESSION_OVERFLOW_COUNT - 1))).length, 1)
 })
 
-test("context_stats drops the least recently active session metrics when the metricsSessions bound is exceeded", async () => {
+test("describe drops the least recently active session metrics when the metricsSessions bound is exceeded", async () => {
   const hooks = await loadPluginHooksWith({ metricsSessions: SESSION_BOUND_OVERRIDE })
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
   await setContextLimit(hooks, SESSION_ID_B, WATERMARK_PROBE_CONTEXT_LIMIT)
@@ -7884,7 +7909,7 @@ test("context_stats drops the least recently active session metrics when the met
   assert.deepEqual(countersOf(await readStats(hooks, SESSION_ID)), STATS_ZEROED_COUNTERS)
 })
 
-test("context_stats keeps session metrics when an invalid metricsSessions falls back to the default bound", async () => {
+test("describe keeps session metrics when an invalid metricsSessions falls back to the default bound", async () => {
   const hooks = await loadPluginHooksWith({ metricsSessions: SESSION_BOUND_INVALID_ZERO })
   for (let index = 0; index < METRICS_SESSION_OVERFLOW_COUNT; index += 1) await storeMetricsSession(hooks, index)
 
@@ -7911,11 +7936,11 @@ const rememberedSubjectsTouchCountFor = async (optionValue: number): Promise<num
   return countersOf(await readStats(hooks, SESSION_ID)).postEvictionTouches
 }
 
-test("context_stats forgets the oldest evicted subject at the rememberedEvictedSubjects bound so its touch goes uncounted", async () => {
+test("describe forgets the oldest evicted subject at the rememberedEvictedSubjects bound so its touch goes uncounted", async () => {
   assert.equal(await rememberedSubjectsTouchCountFor(REMEMBERED_SUBJECTS_OVERRIDE), 1)
 })
 
-test("context_stats keeps both evicted subjects remembered when rememberedEvictedSubjects is invalid", async () => {
+test("describe keeps both evicted subjects remembered when rememberedEvictedSubjects is invalid", async () => {
   assert.equal(await rememberedSubjectsTouchCountFor(REMEMBERED_SUBJECTS_INVALID), 2)
 })
 
@@ -8115,7 +8140,7 @@ const withCounterDeltas = (baseline: Record<string, number>, deltas: Record<stri
 // The second sitting reruns the first sitting's five transforms with
 // same-shaped bundles, so its processed-context accumulation repeats the
 // first sitting's figure; withCounterDeltas derives the token total.
-const REHYDRA_SITTING_PROCESSED_CHARS = 4036
+const REHYDRA_SITTING_PROCESSED_CHARS = 4024
 
 const SECOND_SITTING_COUNTER_DELTAS = {
   evictions: 1,
@@ -8133,9 +8158,9 @@ const SECOND_SITTING_COUNTER_DELTAS = {
 
 const runFirstSitting = async (hooks: HookMap): Promise<void> => {
   await runEvictionTransform(hooks, SESSION_ID, REHYDRA_EVICTION_SUBJECT_A)
-  assert.equal(await readEvicted(hooks, REHYDRA_EVICTION_SUBJECT_A, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(await recallTool(hooks, REHYDRA_EVICTION_SUBJECT_A, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
   assert.equal(
-    await readEvicted(hooks, REHYDRA_MISS_SUBJECT, SESSION_ID),
+    await recallTool(hooks, REHYDRA_MISS_SUBJECT, SESSION_ID),
     stashMissFor(
       REHYDRA_MISS_SUBJECT,
       pageStoreOccupancyLineFor([{ tool: READ_TOOL, subject: REHYDRA_EVICTION_SUBJECT_A, msgIndex: 0 }]),
@@ -8149,12 +8174,12 @@ const runFirstSitting = async (hooks: HookMap): Promise<void> => {
 
 const runSecondSitting = async (hooks: HookMap): Promise<void> => {
   await runEvictionTransform(hooks, SESSION_ID, REHYDRA_EVICTION_SUBJECT_B)
-  assert.equal(await readEvicted(hooks, REHYDRA_EVICTION_SUBJECT_B, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(await recallTool(hooks, REHYDRA_EVICTION_SUBJECT_B, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
   await runDedupTransform(hooks, SESSION_ID)
   await runReasoningTransform(hooks, SESSION_ID)
   await runFenceTransform(hooks)
   assert.equal(
-    await readEvicted(hooks, REHYDRA_MISS_SUBJECT, SESSION_ID),
+    await recallTool(hooks, REHYDRA_MISS_SUBJECT, SESSION_ID),
     stashMissFor(
       REHYDRA_MISS_SUBJECT,
       pageStoreOccupancyLineFor([
@@ -8252,7 +8277,7 @@ test("resumed session falls back to the metrics log tail when its snapshot is mi
     const secondSittingHooks = await loadPluginHooksWithLiveState(emptyStateDir, { metricsLog: true, metricsPath })
     await runEvictionTransform(secondSittingHooks, SESSION_ID, REHYDRA_EVICTION_SUBJECT_B)
 
-    const expected = withCounterDeltas(baseline, { evictions: 1, bytesReclaimed: MIN_EVICTABLE_BYTES, processedContextBytes: 502 })
+    const expected = withCounterDeltas(baseline, { evictions: 1, bytesReclaimed: MIN_EVICTABLE_BYTES, processedContextBytes: 496 })
     const lines = metricsLinesForSession(metricsPath, SESSION_ID)
     assert.deepEqual(lines[lines.length - 1].totals, expected)
     assert.deepEqual(snapshotBodyOf(emptyStateDir, SESSION_ID).snapshot.totals, expected)
@@ -8276,8 +8301,8 @@ test("resumed session with neither snapshot nor metrics log seeds zeroed counter
       evictions: 1,
       bytesReclaimed: MIN_EVICTABLE_BYTES,
       evictionTokensSaved: tokensForChars(MIN_EVICTABLE_BYTES),
-      processedContextBytes: 502,
-      processedContextTokens: tokensForChars(502),
+      processedContextBytes: 496,
+      processedContextTokens: tokensForChars(496),
     })
   } finally {
     cleanupMetricsDir(metricsDir)
@@ -8292,9 +8317,9 @@ test("a quiet post restart run writes no metrics line because seeded stash reads
     const metricsPath = metricsLogPathIn(metricsDir)
     const firstSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
     await runEvictionTransform(firstSittingHooks, SESSION_ID, REHYDRA_EVICTION_SUBJECT_A)
-    assert.equal(await readEvicted(firstSittingHooks, REHYDRA_EVICTION_SUBJECT_A, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+    assert.equal(await recallTool(firstSittingHooks, REHYDRA_EVICTION_SUBJECT_A, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
     assert.equal(
-      await readEvicted(firstSittingHooks, REHYDRA_MISS_SUBJECT, SESSION_ID),
+      await recallTool(firstSittingHooks, REHYDRA_MISS_SUBJECT, SESSION_ID),
       stashMissFor(
         REHYDRA_MISS_SUBJECT,
         pageStoreOccupancyLineFor([{ tool: READ_TOOL, subject: REHYDRA_EVICTION_SUBJECT_A, msgIndex: 0 }]),
@@ -8633,7 +8658,7 @@ test("a hostile model key in the persisted record rejects the whole seed", async
   }
 })
 
-test("context_stats resolves the rehydrated budget once the session entry is hydrated", async () => {
+test("describe resolves the rehydrated budget once the session entry is hydrated", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
   try {
@@ -8776,7 +8801,7 @@ test("recreated metrics entry re-seeds lifetime counters after the metricsSessio
   }
 })
 
-test("context_stats re-counts the standing reasoning set when the metrics store evicts and re-seeds the session entry within one process", async () => {
+test("describe re-counts the standing reasoning set when the metrics store evicts and re-seeds the session entry within one process", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
   try {
@@ -8844,7 +8869,7 @@ test("a stash miss issued while the session's first hydration is in flight count
     const firstSittingHooks = await loadPluginHooksWithPersistence(metricsPath, stateDir)
     await runEvictionTransform(firstSittingHooks, SESSION_ID, REHYDRA_EVICTION_SUBJECT_A)
     assert.equal(
-      await readEvicted(firstSittingHooks, REHYDRA_MISS_SUBJECT, SESSION_ID),
+      await recallTool(firstSittingHooks, REHYDRA_MISS_SUBJECT, SESSION_ID),
       stashMissFor(
         REHYDRA_MISS_SUBJECT,
         pageStoreOccupancyLineFor([{ tool: READ_TOOL, subject: REHYDRA_EVICTION_SUBJECT_A, msgIndex: 0 }]),
@@ -8856,7 +8881,7 @@ test("a stash miss issued while the session's first hydration is in flight count
     await setContextLimit(secondSittingHooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
     const resumeTransform = runTransform(secondSittingHooks, buildStandardBundle(SESSION_ID, REHYDRA_EVICTION_SUBJECT_B))
     assert.equal(
-      await readEvicted(secondSittingHooks, REHYDRA_MISS_SUBJECT, SESSION_ID),
+      await recallTool(secondSittingHooks, REHYDRA_MISS_SUBJECT, SESSION_ID),
       stashMissFor(REHYDRA_MISS_SUBJECT, STASH_EMPTY_OCCUPANCY),
     )
     await resumeTransform
@@ -9136,10 +9161,10 @@ test("an unwritable legacy location leaves the old metrics log in place and stil
   })
 })
 
-test("context_stats is callable and the legacy lru_stats name is no longer registered", async () => {
+test("describe is callable and the legacy lru_stats name is no longer registered", async () => {
   const hooks = await loadPluginHooks()
 
-  assert.equal((hooks as Record<string, Record<string, unknown>>)[RELOAD_TOOL_MAP_KEY]["lru_stats"], undefined)
+  assert.equal((hooks as Record<string, Record<string, unknown>>)[TOOL_MAP_KEY]["lru_stats"], undefined)
   const stats = await readStats(hooks, SESSION_ID)
   assert.equal(typeof stats.options, "object")
 })
@@ -9362,7 +9387,7 @@ test("a fresh plugin instance reloads a prior session's evicted original through
 
     const secondSittingHooks = await loadPluginHooksWithPageStore(storePath)
     assert.equal(
-      await readEvicted(secondSittingHooks, PAGE_STORE_ROUNDTRIP_SUBJECT, SESSION_ID_B),
+      await recallTool(secondSittingHooks, PAGE_STORE_ROUNDTRIP_SUBJECT, SESSION_ID_B),
       `${outputOfBytes(MIN_EVICTABLE_BYTES)}\n${PAGE_STORE_RESTORED_LINE}`,
     )
     assert.equal(countersOf(await readStats(secondSittingHooks, SESSION_ID_B)).stashHits, 1)
@@ -9379,7 +9404,7 @@ test("a page store hit returns the newest page in full and counts the older page
     seedPageStore(storePath, PAGE_STORE_OLDER_OUTPUTS.map((output) => pageLineOf(PAGE_STORE_OLDER_SUBJECT, output)))
 
     assert.equal(
-      await readEvicted(hooks, PAGE_STORE_OLDER_SUBJECT, SESSION_ID),
+      await recallTool(hooks, PAGE_STORE_OLDER_SUBJECT, SESSION_ID),
       `${PAGE_STORE_OLDER_OUTPUTS[2]}\n${PAGE_STORE_RESTORED_LINE}\n${pageStoreOlderLineFor(PAGE_STORE_OLDER_SUBJECT, 2)}`,
     )
   } finally {
@@ -9399,7 +9424,7 @@ test("a page store hit appends the attachments manifest when the page carries at
     ])
 
     assert.equal(
-      await readEvicted(hooks, PAGE_STORE_ATTACHED_SUBJECT, SESSION_ID),
+      await recallTool(hooks, PAGE_STORE_ATTACHED_SUBJECT, SESSION_ID),
       `${outputOfBytes(MIN_EVICTABLE_BYTES)}\n${PAGE_STORE_RESTORED_LINE}\n${attachmentManifestLineFor([
         attachmentSummaryFor(ATTACHMENT_MIME_PNG, ATTACHED_URL_PRIMARY_CHARS),
       ])}`,
@@ -9417,7 +9442,7 @@ test("a page store hit fault-protects the reading session like an in-session rel
     await runPageStoreEviction(firstSittingHooks, SESSION_ID, PAGE_STORE_FAULT_RELOADED)
 
     const secondSittingHooks = await loadPluginHooksWithPageStore(storePath)
-    assert.ok((await readEvicted(secondSittingHooks, PAGE_STORE_FAULT_RELOADED, SESSION_ID)).startsWith(outputOfBytes(MIN_EVICTABLE_BYTES)))
+    assert.ok((await recallTool(secondSittingHooks, PAGE_STORE_FAULT_RELOADED, SESSION_ID)).startsWith(outputOfBytes(MIN_EVICTABLE_BYTES)))
 
     const bundle = await runFaultContest(secondSittingHooks, [PAGE_STORE_FAULT_RELOADED, PAGE_STORE_FAULT_SIBLING], OVER_BY_ONE_TOKENS)
     assertEntryTombstoned(bundle, 1)
@@ -9435,7 +9460,7 @@ test("an in-session stash hit keeps precedence over the page store and stays byt
 
     await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
 
-    assert.equal(await readEvicted(hooks, PAGE_STORE_EVICTED_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+    assert.equal(await recallTool(hooks, PAGE_STORE_EVICTED_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
   } finally {
     cleanupMetricsDir(pagesDir)
   }
@@ -9454,7 +9479,7 @@ test("a page store holding corrupt lines skips them and still serves the well-fo
     )
 
     assert.equal(
-      await readEvicted(hooks, PAGE_STORE_CORRUPT_SUBJECT, SESSION_ID),
+      await recallTool(hooks, PAGE_STORE_CORRUPT_SUBJECT, SESSION_ID),
       `${PAGE_STORE_CORRUPT_GOOD_OUTPUT}\n${PAGE_STORE_RESTORED_LINE}`,
     )
   } finally {
@@ -9469,13 +9494,13 @@ test("an absent or empty page store degrades to the composed miss naming the no 
     const hooks = await loadPluginHooksWithPageStore(storePath)
 
     assert.equal(
-      await readEvicted(hooks, PAGE_STORE_ABSENT_MISS_SUBJECT, SESSION_ID),
+      await recallTool(hooks, PAGE_STORE_ABSENT_MISS_SUBJECT, SESSION_ID),
       stashMissFor(PAGE_STORE_ABSENT_MISS_SUBJECT, STASH_EMPTY_OCCUPANCY),
     )
 
     writeFileSync(storePath, "")
     assert.equal(
-      await readEvicted(hooks, PAGE_STORE_ABSENT_MISS_SUBJECT, SESSION_ID),
+      await recallTool(hooks, PAGE_STORE_ABSENT_MISS_SUBJECT, SESSION_ID),
       stashMissFor(PAGE_STORE_ABSENT_MISS_SUBJECT, STASH_EMPTY_OCCUPANCY),
     )
   } finally {
@@ -9488,7 +9513,7 @@ test("an unreadable page store degrades to the composed miss instead of a tool e
   try {
     const hooks = await loadPluginHooksWithPageStore(blockedPageStorePathIn(pagesDir))
 
-    const result = await readEvicted(hooks, PAGE_STORE_ABSENT_MISS_SUBJECT, SESSION_ID)
+    const result = await recallTool(hooks, PAGE_STORE_ABSENT_MISS_SUBJECT, SESSION_ID)
 
     assert.equal(result, stashMissFor(PAGE_STORE_ABSENT_MISS_SUBJECT, STASH_EMPTY_OCCUPANCY))
   } finally {
@@ -9504,7 +9529,7 @@ test("a page store path pointing at a directory degrades to the composed miss in
     const hooks = await loadPluginHooksWithPageStore(storeDir)
 
     assert.equal(
-      await readEvicted(hooks, PAGE_STORE_ABSENT_MISS_SUBJECT, SESSION_ID),
+      await recallTool(hooks, PAGE_STORE_ABSENT_MISS_SUBJECT, SESSION_ID),
       stashMissFor(PAGE_STORE_ABSENT_MISS_SUBJECT, STASH_EMPTY_OCCUPANCY),
     )
   } finally {

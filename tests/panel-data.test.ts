@@ -797,7 +797,7 @@ type StatsTool = { execute: (args: unknown, context: unknown) => Promise<unknown
 
 test("the panel's default metrics path matches the plugin core's resolved metrics path", async () => {
   const hooks = (await contextManagerFactory({}, { metricsLog: false, liveStateLog: false, ingestionHygieneCopy: false })) as Record<string, Record<string, StatsTool>>
-  const stats = JSON.parse((await hooks["tool"]["context_stats"].execute({}, { sessionID: SESSION_A })) as string) as {
+  const stats = JSON.parse((await hooks["tool"]["describe"].execute({}, { sessionID: SESSION_A })) as string) as {
     options: { metricsPath: string }
   }
 
@@ -1096,7 +1096,7 @@ test("loadPanelData ignores a snapshot file whose recorded session does not matc
 
 test("the default live state dir matches the plugin core's resolved state path", async () => {
   const hooks = (await contextManagerFactory({}, { metricsLog: false, liveStateLog: false, ingestionHygieneCopy: false })) as Record<string, Record<string, StatsTool>>
-  const stats = JSON.parse((await hooks["tool"]["context_stats"].execute({}, { sessionID: SESSION_A })) as string) as {
+  const stats = JSON.parse((await hooks["tool"]["describe"].execute({}, { sessionID: SESSION_A })) as string) as {
     options: { liveStatePath: string }
   }
 
