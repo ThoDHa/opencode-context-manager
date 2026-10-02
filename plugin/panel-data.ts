@@ -222,11 +222,6 @@ export const PANEL_COMMAND_CATEGORY = "Context"
 export const PANEL_COMMAND_SLASH_NAME = "context"
 const COUNTERS_ROW_LABEL = "counters:"
 const LAST_EVICTION_ROW_LABEL = "last evicted:"
-const STALENESS_ROW_TONE: PanelRowTone = "info"
-const AGE_JUST_NOW_TEXT = "just now"
-const AGE_MINUTE_UNIT = "minute"
-const AGE_HOUR_UNIT = "hour"
-const AGE_DAY_UNIT = "day"
 const NO_SESSION_ROW_TEXT = "no active session"
 const NO_RUNS_ROW_TEXT = "no metrics recorded for this session yet"
 const METRICS_UNREADABLE_PREFIX = "metrics log unreadable: "
@@ -290,8 +285,8 @@ export type SessionPanel = {
   manualMode?: boolean
   pageStore?: PanelCheckpointPageStore
   hotSubjects?: string[]
-  lastTransformAtMs?: number | undefined
-  lastMetricsLineAtMs?: number | undefined
+  lastTransformAtMs?: number
+  lastMetricsLineAtMs?: number
 }
 
 export type GlobalTotals = {
@@ -313,7 +308,7 @@ export type PanelData = {
   global: GlobalTotals
   error: string | undefined
   subagentPanels?: SubagentPanelEntry[]
-  nowMs?: number | undefined
+  nowMs?: number
 }
 
 export type LoadPanelDataOptions = {
@@ -757,7 +752,6 @@ export const sessionPanelData = (
     totals: last.totals,
     recalls: last.totals.recallHits + last.totals.recallMisses,
     recentEvictions,
-    lastTransformAtMs: undefined,
     lastMetricsLineAtMs: timestampMsOf(last.ts),
   }
 }
@@ -865,10 +859,10 @@ const ageUnitText = (count: number, unit: string): string => `${count} ${unit}${
 // machinery: it formats ages already parsed to ms by timestampMsOf.
 export const formatAgeText = (nowMs: number, thenMs: number): string => {
   const ageMs = nowMs - thenMs
-  if (ageMs < AGE_JUST_NOW_MAX_MS) return AGE_JUST_NOW_TEXT
-  if (ageMs < AGE_HOUR_MS) return ageUnitText(Math.floor(ageMs / AGE_MINUTE_MS), AGE_MINUTE_UNIT)
-  if (ageMs < AGE_DAY_MS) return ageUnitText(Math.floor(ageMs / AGE_HOUR_MS), AGE_HOUR_UNIT)
-  return ageUnitText(Math.floor(ageMs / AGE_DAY_MS), AGE_DAY_UNIT)
+  if (ageMs < AGE_JUST_NOW_MAX_MS) return "just now"
+  if (ageMs < AGE_HOUR_MS) return ageUnitText(Math.floor(ageMs / AGE_MINUTE_MS), "minute")
+  if (ageMs < AGE_DAY_MS) return ageUnitText(Math.floor(ageMs / AGE_HOUR_MS), "hour")
+  return ageUnitText(Math.floor(ageMs / AGE_DAY_MS), "day")
 }
 
 export type PanelRowTone = "header" | "normal" | "warning" | "success" | "info"
@@ -950,18 +944,13 @@ const headerText = (current: SessionPanel | undefined): string =>
 const emptyStateText = (data: PanelData): string =>
   data.activeSession === undefined ? NO_SESSION_ROW_TEXT : NO_RUNS_ROW_TEXT
 
-const STALENESS_TRANSFORM_CLAUSE = "last transform"
-const STALENESS_METRICS_CLAUSE = "metrics last written"
-const STALENESS_CLAUSE_SEPARATOR = "; "
-
-// The panel's one staleness sentence: the two clause texts the ages feed,
-// composed only from the timestamps availability actually resolved.
+// The panel's one staleness sentence, composed only from the timestamps
+// availability actually resolved; no timestamp means no row.
 const stalenessText = (current: SessionPanel, nowMs: number): string | undefined => {
   const clauses: string[] = []
-  if (current.lastTransformAtMs !== undefined) clauses.push(`${STALENESS_TRANSFORM_CLAUSE} ${formatAgeText(nowMs, current.lastTransformAtMs)}`)
-  if (current.lastMetricsLineAtMs !== undefined) clauses.push(`${STALENESS_METRICS_CLAUSE} ${formatAgeText(nowMs, current.lastMetricsLineAtMs)}`)
-  if (clauses.length === 0) return undefined
-  return clauses.join(STALENESS_CLAUSE_SEPARATOR)
+  if (current.lastTransformAtMs !== undefined) clauses.push(`last transform ${formatAgeText(nowMs, current.lastTransformAtMs)}`)
+  if (current.lastMetricsLineAtMs !== undefined) clauses.push(`metrics last written ${formatAgeText(nowMs, current.lastMetricsLineAtMs)}`)
+  return clauses.length === 0 ? undefined : clauses.join("; ")
 }
 
 export type PanelRowsOptions = {
@@ -992,7 +981,7 @@ export const panelRows = (data: PanelData, options: PanelRowsOptions = {}): Pane
   }
   const staleness = stalenessText(current, options.nowMs ?? data.nowMs ?? Date.now())
   if (staleness !== undefined) {
-    rows.push({ text: staleness, tone: STALENESS_ROW_TONE })
+    rows.push({ text: staleness, tone: "info" })
   }
   return rows
 }

@@ -36,8 +36,6 @@ import {
 
 const COLLECTED_EVICTION_COUNT = 2
 const STALENESS_NOW_MS = Date.parse("2026-09-18T09:30:00.000Z")
-const STALENESS_TRANSFORM_CLAUSE = "last transform"
-const STALENESS_METRICS_CLAUSE = "metrics last written"
 
 const panelDataWithAdvisory = () => ({
   source: "/tmp/metrics.jsonl",
@@ -317,7 +315,7 @@ test("panelRows renders only the metrics age for a log-fallback session and omit
   }
   const noTimestampRows = panelRows(noTimestampData, { nowMs: STALENESS_NOW_MS })
 
-  assert.ok(!noTimestampRows.some((row) => row.text.startsWith(STALENESS_TRANSFORM_CLAUSE)))
-  assert.ok(!noTimestampRows.some((row) => row.text.startsWith(STALENESS_METRICS_CLAUSE)))
+  assert.ok(!noTimestampRows.some((row) => row.text.startsWith("last transform")))
+  assert.ok(!noTimestampRows.some((row) => row.text.startsWith("metrics last written")))
   assert.ok(noTimestampRows[noTimestampRows.length - 1].text.startsWith("last evicted:"))
 })
