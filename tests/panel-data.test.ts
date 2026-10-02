@@ -189,10 +189,12 @@ test("parseMetricsLine and parseCheckpoint drop pre-upgrade records whose totals
 })
 
 // The pre-rename shape the 2026-10-02 reset retired: old totals key
-// spellings (recallHits and siblings), the old budget field names
-// (contextLimit and siblings), and the old pageStore checkpoint block.
+// spellings (stashHits and siblings), the old budget field names
+// (modelContextTokens and siblings), and the old stash checkpoint block.
 // Both parsers reject these wholesale, so a session with only pre-rename
 // records goes dark until its next eventful run writes a current record.
+// The renamed spellings (recallHits, contextLimit, pageStore) are what
+// the fixtures deliberately omit.
 const makePreRenameTotals = (): Record<string, number> => ({
   evictions: 2,
   bytesReclaimed: 6000,

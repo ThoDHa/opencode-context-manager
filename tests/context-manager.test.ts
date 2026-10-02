@@ -8368,11 +8368,12 @@ test("resumed session with neither snapshot nor metrics log seeds zeroed counter
 })
 
 // The 2026-10-02 reset: a record written before the key renames carries
-// totals spellings (recallHits and siblings) the renamed schema does not
-// admit, and every renamed key sits in UPGRADE_REQUIRED_COUNTER_KEYS, so
-// the seeder rejects the record wholesale: the session restarts at zero
-// instead of rehydrating half-old figures, and the pre-rename budget
-// fields (modelContextTokens and siblings) stop rehydrating too.
+// the retired totals spellings (stashHits and siblings, now recallHits
+// and siblings) the renamed schema does not admit, and every renamed key
+// sits in UPGRADE_REQUIRED_COUNTER_KEYS, so the seeder rejects the
+// record wholesale: the session restarts at zero instead of rehydrating
+// half-old figures, and the pre-rename budget fields (modelContextTokens
+// and siblings) stop rehydrating too.
 test("a pre-rename record is rejected by the seeder so the session restarts at zero with an unknown context limit", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
