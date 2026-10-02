@@ -3917,9 +3917,14 @@ test("describe reports zeroed counters unknown budget and empty stash for a sess
     liveStatePruneMinIntervalMs: DEFAULT_LIVE_STATE_PRUNE_MIN_INTERVAL_MS,
     userFenceEviction: { enabled: false, minBlockLines: FENCE_DEFAULT_MIN_BLOCK_LINES },
     manualMode: false,
+    charsPerToken: CHARS_PER_TOKEN,
+    rememberedEvictedSubjects: 100,
+    protectedTools: ["task", "todowrite"],
+    protectedPatterns: [],
   })
   assert.equal(stats.modelContextTokens, null)
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_UNKNOWN)
+  assert.equal(stats.headroomTokens, null)
   assert.deepEqual(stats.stash, { entries: 0, capacity: STASH_LIMIT })
   assert.deepEqual(countersOf(stats), STATS_ZEROED_COUNTERS)
   assert.equal(stats.lastRun, null)
@@ -3934,6 +3939,29 @@ test("describe reports the explicit defaultContextTokens option as the budget wh
   assert.equal(stats.options.defaultContextTokens, EXPLICIT_DEFAULT_CONTEXT_TOKENS)
   assert.equal(stats.modelContextTokens, EXPLICIT_DEFAULT_CONTEXT_TOKENS)
   assert.equal(stats.modelContextTokensSource, CONTEXT_TOKENS_SOURCE_DEFAULT)
+  assert.equal(stats.headroomTokens, null)
+})
+
+test("describe reports headroomTokens as the context limit minus the newest run's estimate", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+  const bundle = buildStandardBundle(SESSION_ID, STATS_SINGLE_EVICTION_SUBJECT)
+  await runTransform(hooks, bundle)
+
+  const stats = await readStats(hooks, SESSION_ID)
+  const estimated = (stats.lastRun as Record<string, unknown>).estimatedTokens
+  assert.equal(stats.headroomTokens, WATERMARK_PROBE_CONTEXT_LIMIT - estimated)
+})
+
+test("describe reports headroomTokens as null when the context limit is unknown", async () => {
+  const hooks = await loadPluginHooks()
+  const bundle = buildStandardBundle(SESSION_ID, STATS_SKIP_RUN_SUBJECT)
+  await runTransform(hooks, bundle)
+
+  const stats = await readStats(hooks, SESSION_ID)
+  assert.equal(stats.modelContextTokens, null)
+  assert.ok(stats.lastRun !== null)
+  assert.equal(stats.headroomTokens, null)
 })
 
 test("describe records an unknown budget last run with null watermark and deficit after a skip run", async () => {

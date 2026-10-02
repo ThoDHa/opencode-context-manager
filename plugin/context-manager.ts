@@ -177,7 +177,7 @@ const DEFAULT_METRICS_MIN_LINE_INTERVAL_MS = SECONDS_PER_MINUTE * MS_PER_SECOND
 const METRICS_COALESCING_DISABLED_MS = 0
 const DESCRIBE_TOOL_NAME = "describe"
 const DESCRIBE_TOOL_DESCRIPTION =
-  "Return live metrics for the Context Manager in this session: eviction counters, expired reasoning counts, post-eviction touches, stash occupancy, the effective context budget, and the most recent transform run's token estimate; also the newest run's post-transform composition (tool outputs, text, retained reasoning), the manual-mode dry run when armed, and the last transform fault when one occurred."
+  "Return live metrics for the Context Manager in this session: eviction counters, expired reasoning counts, faults (post-eviction re-references of evicted subjects), session page store occupancy, the effective context limit and its headroom, and the most recent transform run's token estimate; also the newest run's post-transform composition (tool outputs, text, retained reasoning), the manual-mode dry run when armed, the echoed option surface including charsPerToken, the remembered-evicted-subjects bound, and the protected tools and patterns, and the last transform error when one occurred."
 const JSON_INDENT_SPACES = 2
 const CONTEXT_TOKENS_SOURCE_OVERRIDE = "override"
 const CONTEXT_TOKENS_SOURCE_MODEL = "model"
@@ -277,6 +277,7 @@ type ResolvedOptions = Omit<
   watermarkTokens?: number
   modelContextTokens: Record<string, number>
   protectedPatterns: CompiledGlob[]
+  protectedPatternSources: string[]
   userFenceEviction: UserFenceEvictionOptions
 }
 
@@ -584,6 +585,7 @@ const resolveOptions = (raw: ContextManagerOptions = {}): ResolvedOptions => {
       const compiled = compiledGlobOf(pattern)
       return compiled === undefined ? [] : [compiled]
     }),
+    protectedPatternSources: protectedPatterns,
     stashLimit: boundedIntegerOr(raw.stashLimit, DEFAULT_STASH_LIMIT, 0),
     stashSessions: boundedIntegerOr(raw.stashSessions, DEFAULT_STASH_SESSIONS, 1),
     limitSessions: boundedIntegerOr(raw.limitSessions, DEFAULT_LIMIT_SESSIONS, 1),
@@ -2316,9 +2318,14 @@ const executeStatsTool = (source: StatsSource, toolContext: unknown): string => 
         minBlockLines: source.options.userFenceEviction.minBlockLines,
       },
       manualMode: source.options.manualMode,
+      charsPerToken: source.options.charsPerToken,
+      rememberedEvictedSubjects: source.options.rememberedEvictedSubjects,
+      protectedTools: source.options.protectedTools,
+      protectedPatterns: source.options.protectedPatternSources,
     },
     modelContextTokens: budget.tokens,
     modelContextTokensSource: budget.source,
+    headroomTokens: budget.tokens !== null && metrics.lastRun !== undefined ? budget.tokens - metrics.lastRun.estimatedTokens : null,
     stash: { entries: pageStore === undefined ? 0 : pageStore.size, capacity: source.options.stashLimit },
     counters: totalsOf(metrics, source.options.charsPerToken),
     lastRun: metrics.lastRun ?? null,
