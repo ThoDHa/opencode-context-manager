@@ -252,17 +252,17 @@ type ContextManagerOptions = {
   // Test-only fault injection for the compaction hook: when the injected
   // function throws, the compacting hook's fault boundary exercises its
   // degradation path. Never documented as a user option.
-  faultCompaction?: () => never
+  errorCompaction?: () => never
   // Test-only fault injection for the hygiene hook: when the injected
   // function throws, the tool.execute.after fault boundary exercises its
   // degradation path. Never documented as a user option.
-  faultHygiene?: () => never
+  errorHygiene?: () => never
   // Test-only fault injection: when the injected function returns a
   // message, the transform hook's fault boundary treats the run as if the
-  // body threw that message (identity behavior plus lastFault). Never
+  // body threw that message (identity behavior plus lastError). Never
   // documented as a user option; exists so the fault path is testable
   // without monkey-patching internals.
-  faultTransform?: () => string | undefined
+  errorTransform?: () => string | undefined
 }
 
 type CompiledGlob = { regexp: RegExp; matchesSegments: boolean }
@@ -413,7 +413,7 @@ type SessionMetrics = {
   // The newest fault-isolated failure on this session's transform: set by
   // the transform boundary when the body throws, surfaced through
   // describe, never persisted, replaced by the next run's outcome.
-  lastFault?: LastFault
+  lastError?: LastError
   lastRun?: LastRunMetrics
   logWriteError?: string
   stateWriteError?: string
@@ -421,7 +421,7 @@ type SessionMetrics = {
   pageStoreWriteError?: string
 }
 
-type LastFault = { message: string; atMs: number }
+type LastError = { message: string; atMs: number }
 
 type MetricsStore = Map<string, SessionMetrics>
 
@@ -641,9 +641,9 @@ const resolveOptions = (raw: ContextManagerOptions = {}): ResolvedOptions => {
     // source. The default is real time; only tests override it, so it is
     // deliberately absent from the README's option surface and describe.
     now: typeof raw.now === "function" ? raw.now : DEFAULT_NOW,
-    faultTransform: typeof raw.faultTransform === "function" ? raw.faultTransform : undefined,
-    faultCompaction: typeof raw.faultCompaction === "function" ? raw.faultCompaction : undefined,
-    faultHygiene: typeof raw.faultHygiene === "function" ? raw.faultHygiene : undefined,
+    errorTransform: typeof raw.errorTransform === "function" ? raw.errorTransform : undefined,
+    errorCompaction: typeof raw.errorCompaction === "function" ? raw.errorCompaction : undefined,
+    errorHygiene: typeof raw.errorHygiene === "function" ? raw.errorHygiene : undefined,
   }
 }
 
@@ -2343,9 +2343,9 @@ const executeStatsTool = (source: StatsSource, toolContext: unknown): string => 
             attachmentBytes: metrics.lastComposition.attachmentBytes,
           },
         }),
-    ...(metrics.lastFault === undefined
+    ...(metrics.lastError === undefined
       ? {}
-      : { lastFault: { message: metrics.lastFault.message, at: new Date(metrics.lastFault.atMs).toISOString() } }),
+      : { lastError: { message: metrics.lastError.message, at: new Date(metrics.lastError.atMs).toISOString() } }),
     ...(metrics.logWriteError === undefined ? {} : { logWriteError: metrics.logWriteError }),
     ...(metrics.stateWriteError === undefined ? {} : { stateWriteError: metrics.stateWriteError }),
     ...(metrics.hygieneWriteError === undefined ? {} : { hygieneWriteError: metrics.hygieneWriteError }),
@@ -2761,7 +2761,7 @@ const guardTool = (tool: (args: unknown, toolContext: unknown) => Promise<string
 }
 
 // Create-or-update on the session metrics store: the shared shape behind
-// rememberFault and the hygiene copy's error surfacing, so a diagnostic
+// rememberError and the hygiene copy's error surfacing, so a diagnostic
 // recorded for a session with no entry yet (a fault, compaction event, or
 // hygiene write error before the first transform) still lands on a
 // created entry that respects the session bound. An existing entry is
@@ -2786,9 +2786,9 @@ const withSessionMetricsEntry = (
   metrics.set(sessionKey, entry)
 }
 
-const rememberFault = (metrics: MetricsStore, sessionKey: string, fault: LastFault, sessionBound: number): void =>
+const rememberError = (metrics: MetricsStore, sessionKey: string, lastError: LastError, sessionBound: number): void =>
   withSessionMetricsEntry(metrics, sessionKey, sessionBound, (entry) => {
-    entry.lastFault = fault
+    entry.lastError = lastError
   })
 
 const chatParamsHookBody = (
@@ -2960,8 +2960,8 @@ const server = (async (_input, rawOptions) => {
       let sessionKey = FALLBACK_SESSION_KEY
       try {
         sessionKey = sessionKeyFromContext(messages[0]?.info)
-        const injectedFault = options.faultTransform?.()
-        if (typeof injectedFault === "string") throw new Error(injectedFault)
+        const injectedError = options.errorTransform?.()
+        if (typeof injectedError === "string") throw new Error(injectedError)
         await transformHookBody(messages, transformHookDeps)
       } catch (error) {
         // Fault isolation: a plugin bug must never corrupt or block the
@@ -2970,8 +2970,8 @@ const server = (async (_input, rawOptions) => {
         // normal edits (same references, subset of healthy edits) —
         // either way never a corrupted structure — and the failure
         // surfaces through describe.
-        const fault = { message: error instanceof Error ? error.message : String(error), atMs: options.now() }
-        rememberFault(metricsBySession, sessionKey, fault, options.metricsSessions)
+        const lastError = { message: error instanceof Error ? error.message : String(error), atMs: options.now() }
+        rememberError(metricsBySession, sessionKey, lastError, options.metricsSessions)
       }
     },
     "experimental.session.compacting": async (input: { sessionID?: string }, output: { context?: string[] }) => {
@@ -2979,7 +2979,7 @@ const server = (async (_input, rawOptions) => {
       try {
         if (!Array.isArray(output.context)) return
         sessionKey = sessionKeyFromContext(input)
-        if (options.faultCompaction !== undefined) options.faultCompaction()
+        if (options.errorCompaction !== undefined) options.errorCompaction()
         const context = compactionContextFor(
           touchMapEntry(metricsBySession, sessionKey),
           pageStoreBySession.get(sessionKey),
@@ -2991,8 +2991,8 @@ const server = (async (_input, rawOptions) => {
         // Fault isolation: compaction proceeds with the native prompt
         // unmodified and the failure surfaces through the diagnostics
         // channel.
-        const fault = { message: error instanceof Error ? error.message : String(error), atMs: options.now() }
-        rememberFault(metricsBySession, sessionKey, fault, options.metricsSessions)
+        const lastError = { message: error instanceof Error ? error.message : String(error), atMs: options.now() }
+        rememberError(metricsBySession, sessionKey, lastError, options.metricsSessions)
       }
     },
     "experimental.chat.system.transform": async (input: { sessionID?: string }, output: { system: string[] }) => {
@@ -3012,7 +3012,7 @@ const server = (async (_input, rawOptions) => {
         if (!options.ingestionHygiene) return
         if (typeof output.output !== "string") return
         sessionKey = sessionKeyFromContext(input)
-        if (options.faultHygiene !== undefined) options.faultHygiene()
+        if (options.errorHygiene !== undefined) options.errorHygiene()
         const original = output.output
         const stripped = stripTerminalNoiseFrom(original)
         if (stripped === original) return
@@ -3030,8 +3030,8 @@ const server = (async (_input, rawOptions) => {
       } catch (error) {
         // Fault isolation: the tool result proceeds with its original text
         // and the failure surfaces through the diagnostics channel.
-        const fault = { message: error instanceof Error ? error.message : String(error), atMs: options.now() }
-        rememberFault(metricsBySession, sessionKey, fault, options.metricsSessions)
+        const lastError = { message: error instanceof Error ? error.message : String(error), atMs: options.now() }
+        rememberError(metricsBySession, sessionKey, lastError, options.metricsSessions)
       }
     },
     tool: {

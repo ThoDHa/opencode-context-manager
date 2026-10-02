@@ -6784,9 +6784,9 @@ test("the compacting hook attaches nothing when the metrics entry carries no sub
   assert.equal(output.context.length, 0)
 })
 
-test("a throwing compaction enrichment degrades to an unmodified prompt with lastFault set", async () => {
+test("a throwing compaction enrichment degrades to an unmodified prompt with lastError set", async () => {
   const hooks = await loadPluginHooksWith({
-    faultCompaction: () => { throw new Error(COMPACTION_FAULT_MESSAGE) },
+    errorCompaction: () => { throw new Error(COMPACTION_FAULT_MESSAGE) },
   })
   await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
   await runTransform(hooks, buildStandardBundle(SESSION_ID, HINT_RENDERED_SUBJECT))
@@ -6796,7 +6796,7 @@ test("a throwing compaction enrichment degrades to an unmodified prompt with las
 
   assert.deepEqual(output.context, ["keep me"])
   const stats = await readStats(hooks, SESSION_ID)
-  assert.equal((stats.lastFault as Record<string, unknown>).message, COMPACTION_FAULT_MESSAGE)
+  assert.equal((stats.lastError as Record<string, unknown>).message, COMPACTION_FAULT_MESSAGE)
 })
 
 test("the compaction block respects the subject bound", async () => {
@@ -6872,9 +6872,9 @@ test("a frozen context array degrades through the fault boundary with the native
 
   assert.equal(output.context.length, 0)
   const stats = await readStats(hooks, SESSION_ID)
-  const lastFault = stats.lastFault as Record<string, unknown>
-  assert.equal(typeof lastFault.message, "string")
-  assert.ok((lastFault.message as string).length > 0)
+  const lastError = stats.lastError as Record<string, unknown>
+  assert.equal(typeof lastError.message, "string")
+  assert.ok((lastError.message as string).length > 0)
 })
 
 test("the compacting hook returns silently when the output carries no context array", async () => {
@@ -6886,7 +6886,7 @@ test("the compacting hook returns silently when the output carries no context ar
   await hooks["experimental.session.compacting"]({ sessionID: SESSION_ID }, { context: "not an array" })
 
   const stats = await readStats(hooks, SESSION_ID)
-  assert.equal(stats.lastFault, undefined)
+  assert.equal(stats.lastError, undefined)
 })
 
 const HYGIENE_HOOK = "tool.execute.after"
@@ -6970,11 +6970,11 @@ test("a hygiene copy write failure degrades to hygieneWriteError with the strip 
   cleanupMetricsDir(hygieneDir)
 })
 
-test("a throwing hygiene hook degrades to the original output with lastFault set", async () => {
+test("a throwing hygiene hook degrades to the original output with lastError set", async () => {
   const hygieneDir = makeMetricsDir()
   const hygienePath = join(hygieneDir, HYGIENE_LOG_BASENAME)
   const hooks = await loadPluginHooksWith({
-    faultHygiene: () => {
+    errorHygiene: () => {
       throw new Error(HYGIENE_FAULT_MESSAGE)
     },
     ingestionHygienePath: hygienePath,
@@ -6985,7 +6985,7 @@ test("a throwing hygiene hook degrades to the original output with lastFault set
   assert.equal(output.output, HYGIENE_DIRTY_OUTPUT)
   assert.equal(existsSync(hygienePath), false)
   const stats = await readStats(hooks, SESSION_ID)
-  assert.equal((stats.lastFault as Record<string, unknown>).message, HYGIENE_FAULT_MESSAGE)
+  assert.equal((stats.lastError as Record<string, unknown>).message, HYGIENE_FAULT_MESSAGE)
   cleanupMetricsDir(hygieneDir)
 })
 
@@ -7109,9 +7109,9 @@ test("a frozen hygiene output object degrades through the fault boundary with th
 
   assert.equal(output.output, HYGIENE_DIRTY_OUTPUT)
   const stats = await readStats(hooks, SESSION_ID)
-  const lastFault = stats.lastFault as Record<string, unknown>
-  assert.equal(typeof lastFault.message, "string")
-  assert.ok((lastFault.message as string).length > 0)
+  const lastError = stats.lastError as Record<string, unknown>
+  assert.equal(typeof lastError.message, "string")
+  assert.ok((lastError.message as string).length > 0)
   cleanupMetricsDir(hygieneDir)
 })
 
@@ -7311,8 +7311,8 @@ test("transform keeps dedup active under pressure while manualMode is enabled", 
 const FAULT_MESSAGE = "injected transform fault"
 const SECOND_SESSION_FAULT = "second session fault"
 
-test("a faulting transform run degrades to identity behavior and surfaces lastFault", async () => {
-  const hooks = await loadPluginHooksWith({ faultTransform: () => FAULT_MESSAGE })
+test("a faulting transform run degrades to identity behavior and surfaces lastError", async () => {
+  const hooks = await loadPluginHooksWith({ errorTransform: () => FAULT_MESSAGE })
   await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
 
   const bundle = buildStandardBundle(SESSION_ID, FAULT_SUBJECT)
@@ -7322,15 +7322,15 @@ test("a faulting transform run degrades to identity behavior and surfaces lastFa
   // with no tombstone, dedup marker, or other plugin edit.
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
   const stats = await readStats(hooks, SESSION_ID)
-  const lastFault = stats.lastFault as Record<string, unknown>
-  assert.ok(lastFault !== undefined)
-  assert.equal(lastFault.message, FAULT_MESSAGE)
-  assert.equal(typeof lastFault.at, "string")
+  const lastError = stats.lastError as Record<string, unknown>
+  assert.ok(lastError !== undefined)
+  assert.equal(lastError.message, FAULT_MESSAGE)
+  assert.equal(typeof lastError.at, "string")
 })
 
 test("a fault on one session does not leak into another session's run", async () => {
   const hooks = await loadPluginHooksWith({
-    faultTransform: ((): (() => string | undefined) => {
+    errorTransform: ((): (() => string | undefined) => {
       let calls = 0
       return () => {
         calls += 1
@@ -7356,13 +7356,13 @@ test("a fault on one session does not leak into another session's run", async ()
 
   assert.ok(toolPartAt(healthy.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
   const faultedStats = await readStats(hooks, SESSION_ID)
-  assert.equal((faultedStats.lastFault as Record<string, unknown>).message, FAULT_MESSAGE)
+  assert.equal((faultedStats.lastError as Record<string, unknown>).message, FAULT_MESSAGE)
   const healthyStats = await readStats(hooks, SESSION_ID_B)
-  assert.equal(Object.hasOwn(healthyStats, "lastFault"), false)
+  assert.equal(Object.hasOwn(healthyStats, "lastError"), false)
 })
 
-test("a second fault replaces the session's lastFault message", async () => {
-  const hooks = await loadPluginHooksWith({ faultTransform: ((): (() => string | undefined) => {
+test("a second fault replaces the session's lastError message", async () => {
+  const hooks = await loadPluginHooksWith({ errorTransform: ((): (() => string | undefined) => {
     let calls = 0
     return () => {
       calls += 1
@@ -7376,7 +7376,7 @@ test("a second fault replaces the session's lastFault message", async () => {
   await runTransform(hooks, second)
 
   const stats = await readStats(hooks, SESSION_ID)
-  assert.equal((stats.lastFault as Record<string, unknown>).message, SECOND_SESSION_FAULT)
+  assert.equal((stats.lastError as Record<string, unknown>).message, SECOND_SESSION_FAULT)
 })
 
 test("a throwing tool returns the structured error shape instead of throwing", async () => {
