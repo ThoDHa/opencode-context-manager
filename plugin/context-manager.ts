@@ -399,7 +399,7 @@ type SessionMetrics = {
   // of the session's last flushed line and the budget source it carried.
   // Never persisted; a restart simply writes on its next eventful run.
   lastLineAtMs?: number
-  lastLineBudgetSource?: ContextTokensSource
+  lastLineContextLimitSource?: ContextTokensSource
   // The budget resolved at this session's previous sitting, rehydrated
   // with the counters so a restart does not flicker the budget to
   // unknown; a live chat.params capture always wins over it.
@@ -438,7 +438,7 @@ type RawCounterKey = SchemaRawCounterKey
 // other than the per-process cursors must appear in RawCounterKey, so a
 // newly added counter fails to compile until it is added to the seeded set.
 // Cursor inventory beyond the two number cursors in MetricsCursorKey: the
-// optional coalesce-gate fields lastLineAtMs and lastLineBudgetSource escape
+// optional coalesce-gate fields lastLineAtMs and lastLineContextLimitSource escape
 // this check through optionality and are seeded implicitly (undefined means
 // never written, so a restart writes on its next eventful run), the
 // persistedBudget fallback is seeded from the record's budget fields
@@ -1999,7 +1999,7 @@ const recordMetricsLine = async (
   options: ResolvedOptions,
   metrics: SessionMetrics,
   sessionKey: string,
-  budget: ContextLimit,
+  contextLimit: ContextLimit,
   run: RunOutcome,
 ): Promise<void> => {
   const { eviction, deduped: dedupedThisRun, faults: faultsThisRun, reasoningExpired: reasoningExpiredThisRun, fenceEvicted: fenceEvictedThisRun } = run
@@ -2025,15 +2025,15 @@ const recordMetricsLine = async (
     stashReadsSinceLastLine > 0
   const isEventful = hasRecordedEvent || reasoningExpiredThisRun.parts > 0
   if (options.metricsLog === false || isEventful === false) return
-  const hasSignificantEvent = hasRecordedEvent || budget.source !== metrics.lastLineBudgetSource
+  const hasSignificantEvent = hasRecordedEvent || contextLimit.source !== metrics.lastLineContextLimitSource
   const withinCoalesceWindow = metrics.lastLineAtMs !== undefined && nowMs - metrics.lastLineAtMs < options.metricsMinLineIntervalMs
   if (options.metricsMinLineIntervalMs > METRICS_COALESCING_DISABLED_MS && hasSignificantEvent === false && withinCoalesceWindow) return
   const line = {
     ts: new Date(nowMs).toISOString(),
     session: sessionKey,
-    modelContextTokens: budget.tokens,
-    modelContextTokensSource: budget.source,
-    modelContextTokensModelKey: budget.modelKey ?? null,
+    modelContextTokens: contextLimit.tokens,
+    modelContextTokensSource: contextLimit.source,
+    modelContextTokensModelKey: contextLimit.modelKey ?? null,
     estimatedTokens: eviction.estimatedTokens,
     toolPoolBytes: run.composition.toolPoolBytes,
     textChars: run.composition.textChars,
@@ -2069,7 +2069,7 @@ const recordMetricsLine = async (
     await appendFile(options.metricsPath, metricsJsonLine)
     metrics.recallsLoggedThrough = metrics.stashHits + metrics.stashMisses
     metrics.lastLineAtMs = nowMs
-    metrics.lastLineBudgetSource = budget.source
+    metrics.lastLineContextLimitSource = contextLimit.source
     delete metrics.logWriteError
   } catch (error) {
     metrics.logWriteError = error instanceof Error ? error.message : String(error)
@@ -2100,7 +2100,7 @@ const totalsOf = (metrics: SessionMetrics, charsPerToken: number): CumulativeCou
 
 const sessionCheckpointOf = (
   sessionKey: string,
-  budget: ContextLimit,
+  contextLimit: ContextLimit,
   options: ResolvedOptions,
   metrics: SessionMetrics,
   lastRun: LastRunMetrics,
@@ -2110,9 +2110,9 @@ const sessionCheckpointOf = (
   ts: new Date(options.now()).toISOString(),
   session: sessionKey,
   manualMode: options.manualMode,
-  modelContextTokens: budget.tokens,
-  modelContextTokensSource: budget.source,
-  modelContextTokensModelKey: budget.modelKey ?? null,
+  modelContextTokens: contextLimit.tokens,
+  modelContextTokensSource: contextLimit.source,
+  modelContextTokensModelKey: contextLimit.modelKey ?? null,
   lastRun,
   totals: totalsOf(metrics, options.charsPerToken),
   stash: { entries: pageStore.size, capacity: options.stashLimit },
@@ -2174,7 +2174,7 @@ const isSafeSessionFileStem = (sessionKey: string): boolean =>
 const recordSessionCheckpoint = async (
   options: ResolvedOptions,
   sessionKey: string,
-  budget: ContextLimit,
+  contextLimit: ContextLimit,
   metrics: SessionMetrics,
   pageStore: SessionPageStore,
   hotSubjects: HotSubject[],
@@ -2184,7 +2184,7 @@ const recordSessionCheckpoint = async (
   const lastRun = metrics.lastRun
   if (lastRun === undefined) return
   if (!isSafeSessionFileStem(sessionKey)) return
-  const snapshot = sessionCheckpointOf(sessionKey, budget, options, metrics, lastRun, pageStore, hotSubjects)
+  const snapshot = sessionCheckpointOf(sessionKey, contextLimit, options, metrics, lastRun, pageStore, hotSubjects)
   const stateFile = join(options.liveStatePath, `${sessionKey}${LIVE_STATE_FILE_SUFFIX}`)
   const tempFile = `${stateFile}${LIVE_STATE_TEMP_FILE_SUFFIX}`
   try {
@@ -2215,15 +2215,15 @@ const modelKeyOf = (model: ChatParamsModel | undefined): string | undefined => {
 // watermark. The budget drives the fractional path only, so an absolute
 // watermark can engage even where no budget was captured (unknown-budget
 // runs otherwise stand eviction down entirely).
-const effectiveWatermarkTokensOf = (budgetTokens: number | null, options: ResolvedOptions): number | null => {
+const effectiveWatermarkTokensOf = (contextLimitTokens: number | null, options: ResolvedOptions): number | null => {
   if (options.watermarkTokens !== undefined) return options.watermarkTokens
-  if (budgetTokens === null) return null
-  return budgetTokens * options.watermark
+  if (contextLimitTokens === null) return null
+  return contextLimitTokens * options.watermark
 }
 
 // An entry without an identity (a limit-only chat params event) is never
 // reset: nothing ties it to a model, so any later event retains it.
-const storedBudgetBelongsToAnotherModel = (stored: ContextLimitEntry | undefined, modelKey: string | undefined): boolean =>
+const storedContextLimitBelongsToAnotherModel = (stored: ContextLimitEntry | undefined, modelKey: string | undefined): boolean =>
   modelKey !== undefined && stored !== undefined && stored.modelKey !== undefined && stored.modelKey !== modelKey
 
 const captureContextLimitOf = (model: ChatParamsModel | undefined, overrides: Record<string, number>): ContextLimitEntry | undefined => {
@@ -2242,7 +2242,7 @@ const resolveContextLimit = (sessionEntry: ContextLimitEntry | undefined, explic
   return { tokens: null, source: CONTEXT_TOKENS_SOURCE_UNKNOWN, modelKey: undefined }
 }
 
-type ContextLimitResolution = { budget: ContextLimit; fallbackSuppressed: boolean }
+type ContextLimitResolution = { contextLimit: ContextLimit; fallbackSuppressed: boolean }
 
 // Shared by the transform hook and describe so the two surfaces resolve
 // identically. Precedence: a live chat.params capture, the explicit
@@ -2261,8 +2261,8 @@ const contextLimitForRun = (
   resolvedOptions: Pick<ResolvedOptions, "modelContextTokens" | "defaultContextTokens">,
 ): ContextLimitResolution => {
   const resolved = resolveContextLimit(sessionEntry, resolvedOptions.defaultContextTokens)
-  if (resolved.tokens !== null) return { budget: resolved, fallbackSuppressed: false }
-  if (persistedBudget === undefined) return { budget: resolved, fallbackSuppressed: false }
+  if (resolved.tokens !== null) return { contextLimit: resolved, fallbackSuppressed: false }
+  if (persistedBudget === undefined) return { contextLimit: resolved, fallbackSuppressed: false }
   // A budget sourced from config that config no longer carries must not
   // refill: an override survives only while its model key stays in
   // modelContextTokens, a default only while defaultContextTokens is set.
@@ -2270,12 +2270,12 @@ const contextLimitForRun = (
     (persistedBudget.source === CONTEXT_TOKENS_SOURCE_OVERRIDE &&
       (persistedBudget.modelKey === undefined || resolvedOptions.modelContextTokens[persistedBudget.modelKey] === undefined)) ||
     (persistedBudget.source === CONTEXT_TOKENS_SOURCE_DEFAULT && resolvedOptions.defaultContextTokens === undefined)
-  if (configRemoved) return { budget: resolved, fallbackSuppressed: true }
+  if (configRemoved) return { contextLimit: resolved, fallbackSuppressed: true }
   if (persistedBudget.modelKey !== undefined && sittingModelKey !== undefined && persistedBudget.modelKey !== sittingModelKey) {
-    return { budget: resolved, fallbackSuppressed: true }
+    return { contextLimit: resolved, fallbackSuppressed: true }
   }
   return {
-    budget: { tokens: persistedBudget.tokens, source: persistedBudget.source, modelKey: persistedBudget.modelKey },
+    contextLimit: { tokens: persistedBudget.tokens, source: persistedBudget.source, modelKey: persistedBudget.modelKey },
     fallbackSuppressed: false,
   }
 }
@@ -2285,7 +2285,7 @@ const executeStatsTool = (source: StatsSource, toolContext: unknown): string => 
   const sessionID = sessionIDFromContext(toolContext)
   const sessionLimit = sessionID === undefined ? undefined : touchMapEntry(source.limits, sessionID)
   const metrics = touchMapEntry(source.metrics, sessionKey) ?? createSessionMetrics()
-  const { budget } = contextLimitForRun(sessionLimit, metrics.persistedBudget, sessionID === undefined ? undefined : source.modelKeys.get(sessionID), source.options)
+  const { contextLimit } = contextLimitForRun(sessionLimit, metrics.persistedBudget, sessionID === undefined ? undefined : source.modelKeys.get(sessionID), source.options)
   const pageStore = source.pageStores.get(sessionKey)
   const report = {
     session: sessionKey,
@@ -2323,9 +2323,9 @@ const executeStatsTool = (source: StatsSource, toolContext: unknown): string => 
       protectedTools: source.options.protectedTools,
       protectedPatterns: source.options.protectedPatternSources,
     },
-    modelContextTokens: budget.tokens,
-    modelContextTokensSource: budget.source,
-    headroomTokens: budget.tokens !== null && metrics.lastRun !== undefined ? budget.tokens - metrics.lastRun.estimatedTokens : null,
+    modelContextTokens: contextLimit.tokens,
+    modelContextTokensSource: contextLimit.source,
+    headroomTokens: contextLimit.tokens !== null && metrics.lastRun !== undefined ? contextLimit.tokens - metrics.lastRun.estimatedTokens : null,
     stash: { entries: pageStore === undefined ? 0 : pageStore.size, capacity: source.options.stashLimit },
     counters: totalsOf(metrics, source.options.charsPerToken),
     lastRun: metrics.lastRun ?? null,
@@ -2688,9 +2688,9 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
   const sessionMetrics = await metricsForSession(deps.metricsBySession, deps.metricsHydrationBySession, deps.persistedTotalsForSession, sessionKey, options.metricsSessions)
   const sessionLimit = sessionID !== undefined ? touchMapEntry(deps.contextLimits, sessionID) : undefined
   const sittingModelKey = sessionID === undefined ? undefined : deps.modelKeyBySession.get(sessionID)
-  const { budget, fallbackSuppressed } = contextLimitForRun(sessionLimit, sessionMetrics.persistedBudget, sittingModelKey, options)
+  const { contextLimit, fallbackSuppressed } = contextLimitForRun(sessionLimit, sessionMetrics.persistedBudget, sittingModelKey, options)
   if (fallbackSuppressed) sessionMetrics.persistedBudget = undefined
-  else if (budget.source !== CONTEXT_TOKENS_SOURCE_UNKNOWN) sessionMetrics.persistedBudget = { tokens: budget.tokens, source: budget.source, modelKey: budget.modelKey }
+  else if (contextLimit.source !== CONTEXT_TOKENS_SOURCE_UNKNOWN) sessionMetrics.persistedBudget = { tokens: contextLimit.tokens, source: contextLimit.source, modelKey: contextLimit.modelKey }
   const sessionPageStore = pagesForSession(deps.pageStoreBySession, sessionKey, options.stashSessions)
   // The run's stashed entries, gathered at the two stash sites so the write
   // below lands them eagerly in the same run as the eviction that built them.
@@ -2707,7 +2707,7 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
   purgeErroredToolInputs(messages, options)
   const reasoningExpiredThisRun = expireAgedReasoning(sessionMetrics, messages, options)
   const fenceEvictedThisRun = evictLargeUserFences(messages, options, sessionPageStore, pageStoreEntries)
-  const effectiveWatermarkTokens = effectiveWatermarkTokensOf(budget.tokens, options)
+  const effectiveWatermarkTokens = effectiveWatermarkTokensOf(contextLimit.tokens, options)
   // One scan and one candidate walk feed whichever path runs: the
   // stand-downs (manual mode, or no watermark with the aged read tier
   // disarmed) share this candidates computation with the real evictor.
@@ -2750,8 +2750,8 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
   sessionMetrics.lastComposition = runOutcome.composition
   storeHint(deps.hintBySession, sessionKey, eviction.hotSubjects, options.hintSubjects, options.hintSessions)
   await recordPageStoreLines(options, deps.metricsBySession, sessionKey, pageStoreEntries)
-  await recordMetricsLine(options, sessionMetrics, sessionKey, budget, runOutcome)
-  await recordSessionCheckpoint(options, sessionKey, budget, sessionMetrics, sessionPageStore, eviction.hotSubjects, deps.pruneThrottle)
+  await recordMetricsLine(options, sessionMetrics, sessionKey, contextLimit, runOutcome)
+  await recordSessionCheckpoint(options, sessionKey, contextLimit, sessionMetrics, sessionPageStore, eviction.hotSubjects, deps.pruneThrottle)
 }
 
 // A throwing tool degrades to a structured error string the TUI can
@@ -2816,7 +2816,7 @@ const chatParamsHookBody = (
     return
   }
   const stored = contextLimits.get(input.sessionID)
-  if (!storedBudgetBelongsToAnotherModel(stored, modelKey)) return
+  if (!storedContextLimitBelongsToAnotherModel(stored, modelKey)) return
   contextLimits.delete(input.sessionID)
   // A model change also invalidates the persisted-budget fallback:
   // without this, the deleted live capture would refill from the

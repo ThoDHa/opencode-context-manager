@@ -7,7 +7,7 @@ import { test } from "node:test"
 import {
   DEFAULT_LIVE_STATE_DIR,
   DEFAULT_METRICS_PATH,
-  budgetSourceLabel,
+  contextLimitSourceLabel,
   canRegisterKeymap,
   canRegisterSidebar,
   createMetricsLogReader,
@@ -37,8 +37,8 @@ import {
   HUGE_RECLAIMED_BYTES,
   LOG_LINE_ONLY_EVICTIONS,
   LOG_LINE_TS_STALE,
-  MODEL_BUDGET_SOURCE,
-  OVERRIDE_BUDGET_SOURCE,
+  MODEL_CONTEXT_LIMIT_SOURCE,
+  OVERRIDE_CONTEXT_LIMIT_SOURCE,
   SECOND_LINE_ESTIMATED,
   SESSION_A,
   SESSION_B,
@@ -55,7 +55,7 @@ import {
   TOTALS_REASONING_EXPIRED_UNIQUE,
   TOTALS_STASH_HITS,
   TOTALS_STASH_MISSES,
-  UNKNOWN_BUDGET_SOURCE,
+  UNKNOWN_CONTEXT_LIMIT_SOURCE,
   WATERMARK_TOKENS,
   logLineAgainstSnapshot,
   logLineStaleAgainstSnapshot,
@@ -92,7 +92,7 @@ const KILOBYTE_FRACTIONAL_BYTES = 1536
 const MEGABYTE_BYTES = 1500000
 const GIGABYTE_BYTES = 3 * 1024 ** 3
 const SUBJECT_TAIL = "-tail"
-const DEFAULT_BUDGET_SOURCE = "default"
+const DEFAULT_CONTEXT_LIMIT_SOURCE = "default"
 
 const LOG_LINE_TS_NEWER = "2026-09-18T10:00:00.000Z"
 const SESSION_A_LOG_LINE_COUNT = 1
@@ -108,7 +108,7 @@ test("parseMetricsLine parses a line carrying exactly the fields the panel consu
   assert.equal(line.session, SESSION_A)
   assert.equal(line.ts, LOG_LINE_TS_STALE)
   assert.equal(line.modelContextTokens, BUDGET_TOKENS_MODEL)
-  assert.equal(line.modelContextTokensSource, MODEL_BUDGET_SOURCE)
+  assert.equal(line.modelContextTokensSource, MODEL_CONTEXT_LIMIT_SOURCE)
   assert.equal(line.estimatedTokens, ESTIMATED_TOKENS)
   assert.equal(line.totals.evictions, TOTALS_EVICTIONS)
   assert.equal(line.evictedThisRun.length, 1)
@@ -646,14 +646,14 @@ test("sessionPanelData returns undefined when the session has no lines", () => {
 test("sessionPanelData reports the budget, source, and last run from the session's most recent line", () => {
   const lines = [
     makeLine({ modelContextTokens: BUDGET_TOKENS_SMALL, estimatedTokens: SECOND_LINE_ESTIMATED }),
-    makeLine({ modelContextTokensSource: DEFAULT_BUDGET_SOURCE }),
+    makeLine({ modelContextTokensSource: DEFAULT_CONTEXT_LIMIT_SOURCE }),
   ]
 
   const panel = sessionPanelData(lines, SESSION_A)
 
   assert.ok(panel !== undefined)
   assert.equal(panel.contextLimitTokens, BUDGET_TOKENS_MODEL)
-  assert.equal(panel.contextLimitSource, DEFAULT_BUDGET_SOURCE)
+  assert.equal(panel.contextLimitSource, DEFAULT_CONTEXT_LIMIT_SOURCE)
   assert.equal(panel.runs, PARSED_LINE_COUNT)
   assert.equal(panel.lastRun.estimatedTokens, ESTIMATED_TOKENS)
   assert.equal(panel.lastRun.deficitTokens, DEFICIT_TOKENS)
@@ -746,12 +746,12 @@ test("formatBytes renders sub-kilobyte counts as-is and larger sizes in kB, MB, 
   assert.equal(formatBytes(HUGE_RECLAIMED_BYTES), "115 GB")
 })
 
-test("budgetSourceLabel maps the plugin's source ids to panel labels", () => {
-  assert.equal(budgetSourceLabel(OVERRIDE_BUDGET_SOURCE), "per-model override")
-  assert.equal(budgetSourceLabel(MODEL_BUDGET_SOURCE), "per-model limit")
-  assert.equal(budgetSourceLabel(DEFAULT_BUDGET_SOURCE), "plugin default")
-  assert.equal(budgetSourceLabel(UNKNOWN_BUDGET_SOURCE), "inactive (no context limit)")
-  assert.equal(budgetSourceLabel("anything-else"), "inactive (no context limit)")
+test("contextLimitSourceLabel maps the plugin's source ids to panel labels", () => {
+  assert.equal(contextLimitSourceLabel(OVERRIDE_CONTEXT_LIMIT_SOURCE), "per-model override")
+  assert.equal(contextLimitSourceLabel(MODEL_CONTEXT_LIMIT_SOURCE), "per-model limit")
+  assert.equal(contextLimitSourceLabel(DEFAULT_CONTEXT_LIMIT_SOURCE), "plugin default")
+  assert.equal(contextLimitSourceLabel(UNKNOWN_CONTEXT_LIMIT_SOURCE), "inactive (no context limit)")
+  assert.equal(contextLimitSourceLabel("anything-else"), "inactive (no context limit)")
 })
 
 test("canRegisterSidebar accepts only an api object whose slots.register is callable", () => {
@@ -812,7 +812,7 @@ test("parseCheckpoint parses a snapshot carrying exactly the fields the panel co
   assert.equal(snapshot.session, SESSION_A)
   assert.equal(snapshot.manualMode, true)
   assert.equal(snapshot.modelContextTokens, BUDGET_TOKENS_MODEL)
-  assert.equal(snapshot.modelContextTokensSource, MODEL_BUDGET_SOURCE)
+  assert.equal(snapshot.modelContextTokensSource, MODEL_CONTEXT_LIMIT_SOURCE)
   assert.deepEqual(snapshot.lastRun, {
     estimatedTokens: ESTIMATED_TOKENS,
     watermarkTokens: WATERMARK_TOKENS,
@@ -872,7 +872,7 @@ test("loadPanelData prefers the live snapshot for the session block and keeps lo
     assert.ok(data.current !== undefined)
     assert.equal(data.current.session, SESSION_A)
     assert.equal(data.current.contextLimitTokens, BUDGET_TOKENS_MODEL)
-    assert.equal(data.current.contextLimitSource, MODEL_BUDGET_SOURCE)
+    assert.equal(data.current.contextLimitSource, MODEL_CONTEXT_LIMIT_SOURCE)
     assert.equal(data.current.manualMode, true)
     assert.deepEqual(data.current.lastRun, {
       estimatedTokens: ESTIMATED_TOKENS,

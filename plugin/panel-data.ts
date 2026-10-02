@@ -197,14 +197,14 @@ const GIGABYTE_DECIMALS = 1
 const KILOTOKEN_DECIMALS = 1
 const MEGATOKEN_DECIMALS = 2
 
-const BUDGET_SOURCE_OVERRIDE = "override"
-const BUDGET_SOURCE_MODEL = "model"
-const BUDGET_SOURCE_DEFAULT = "default"
-const BUDGET_SOURCE_UNKNOWN = "unknown"
-const BUDGET_SOURCE_LABEL_OVERRIDE = "per-model override"
-const BUDGET_SOURCE_LABEL_MODEL = "per-model limit"
-const BUDGET_SOURCE_LABEL_DEFAULT = "plugin default"
-const BUDGET_SOURCE_LABEL_UNKNOWN = "inactive (no context limit)"
+const CONTEXT_LIMIT_SOURCE_OVERRIDE = "override"
+const CONTEXT_LIMIT_SOURCE_MODEL = "model"
+const CONTEXT_LIMIT_SOURCE_DEFAULT = "default"
+const CONTEXT_LIMIT_SOURCE_UNKNOWN = "unknown"
+const CONTEXT_LIMIT_SOURCE_LABEL_OVERRIDE = "per-model override"
+const CONTEXT_LIMIT_SOURCE_LABEL_MODEL = "per-model limit"
+const CONTEXT_LIMIT_SOURCE_LABEL_DEFAULT = "plugin default"
+const CONTEXT_LIMIT_SOURCE_LABEL_UNKNOWN = "inactive (no context limit)"
 const PANEL_TITLE = "Context Manager"
 const MANUAL_MODE_TITLE_SUFFIX = " (manual)"
 // The /context panel command's registration identity, declared here so the
@@ -780,11 +780,11 @@ export const loadPanelData = async (options: LoadPanelDataOptions = {}): Promise
   return { source: path, activeSession: sessionID, current, global: globalTotals(lines), error: undefined, subagentPanels: childPanels(lines) }
 }
 
-export const budgetSourceLabel = (source: string): string => {
-  if (source === BUDGET_SOURCE_OVERRIDE) return BUDGET_SOURCE_LABEL_OVERRIDE
-  if (source === BUDGET_SOURCE_MODEL) return BUDGET_SOURCE_LABEL_MODEL
-  if (source === BUDGET_SOURCE_DEFAULT) return BUDGET_SOURCE_LABEL_DEFAULT
-  return BUDGET_SOURCE_LABEL_UNKNOWN
+export const contextLimitSourceLabel = (source: string): string => {
+  if (source === CONTEXT_LIMIT_SOURCE_OVERRIDE) return CONTEXT_LIMIT_SOURCE_LABEL_OVERRIDE
+  if (source === CONTEXT_LIMIT_SOURCE_MODEL) return CONTEXT_LIMIT_SOURCE_LABEL_MODEL
+  if (source === CONTEXT_LIMIT_SOURCE_DEFAULT) return CONTEXT_LIMIT_SOURCE_LABEL_DEFAULT
+  return CONTEXT_LIMIT_SOURCE_LABEL_UNKNOWN
 }
 
 const compactNumber = (value: number, divisor: number, decimals: number, suffix: string): string =>
@@ -840,8 +840,8 @@ export const splitRowText = (text: string): SplitRowText | undefined => {
 const capitalizeLabel = (label: string): string =>
   label.length === 0 ? label : `${label[0].toUpperCase()}${label.slice(1)}`
 
-const budgetText = (current: SessionPanel): string => {
-  const label = budgetSourceLabel(current.contextLimitSource)
+const contextLimitText = (current: SessionPanel): string => {
+  const label = contextLimitSourceLabel(current.contextLimitSource)
   return current.contextLimitTokens === null
     ? `context limit: ${label}`
     : `context limit: ${formatTokenCount(current.contextLimitTokens)} tokens (${label})`
@@ -880,7 +880,7 @@ export const panelRows = (data: PanelData): PanelRow[] => {
     rows.push({ text: emptyStateText(data), tone: "normal" })
     return rows
   }
-  rows.push({ text: budgetText(current), tone: "normal" })
+  rows.push({ text: contextLimitText(current), tone: "normal" })
   rows.push({ text: lastRunText(current), tone: "normal" })
   rows.push({ text: countersText(current), tone: "normal" })
   const newestEviction = current.recentEvictions[0]

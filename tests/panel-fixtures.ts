@@ -41,9 +41,9 @@ const EXPECTED_TOKENS_PROCESSED_STAT = "Tokens processed: 19.5k tokens"
 
 const HUGE_RECLAIMED_BYTES = 123456789012
 
-const UNKNOWN_BUDGET_SOURCE = "unknown"
-const OVERRIDE_BUDGET_SOURCE = "override"
-const MODEL_BUDGET_SOURCE = "model"
+const UNKNOWN_CONTEXT_LIMIT_SOURCE = "unknown"
+const OVERRIDE_CONTEXT_LIMIT_SOURCE = "override"
+const MODEL_CONTEXT_LIMIT_SOURCE = "model"
 
 const SNAPSHOT_SUFFIX = ".json"
 const SNAPSHOT_STASH_ENTRIES = 2
@@ -119,7 +119,7 @@ const makeLine = (overrides: Partial<PanelMetricsLine> = {}): PanelMetricsLine =
   session: SESSION_A,
   ts: LOG_LINE_TS_STALE,
   modelContextTokens: BUDGET_TOKENS_MODEL,
-  modelContextTokensSource: MODEL_BUDGET_SOURCE,
+  modelContextTokensSource: MODEL_CONTEXT_LIMIT_SOURCE,
   estimatedTokens: ESTIMATED_TOKENS,
   watermarkTokens: WATERMARK_TOKENS,
   deficitTokens: DEFICIT_TOKENS,
@@ -144,7 +144,7 @@ const makeSnapshot = (overrides: Record<string, unknown> = {}): Record<string, u
   session: SESSION_A,
   manualMode: true,
   modelContextTokens: BUDGET_TOKENS_MODEL,
-  modelContextTokensSource: MODEL_BUDGET_SOURCE,
+  modelContextTokensSource: MODEL_CONTEXT_LIMIT_SOURCE,
   lastRun: { estimatedTokens: ESTIMATED_TOKENS, watermarkTokens: WATERMARK_TOKENS, deficitTokens: DEFICIT_TOKENS },
   totals: makeTotals(),
   stash: { entries: SNAPSHOT_STASH_ENTRIES, capacity: SNAPSHOT_STASH_CAPACITY },
@@ -197,9 +197,9 @@ export {
   TOTALS_FENCE_EVICTED,
   TOTALS_PROCESSED_CONTEXT_BYTES,
   TOTALS_PROCESSED_CONTEXT_TOKENS,
-  UNKNOWN_BUDGET_SOURCE,
-  OVERRIDE_BUDGET_SOURCE,
-  MODEL_BUDGET_SOURCE,
+  UNKNOWN_CONTEXT_LIMIT_SOURCE,
+  OVERRIDE_CONTEXT_LIMIT_SOURCE,
+  MODEL_CONTEXT_LIMIT_SOURCE,
   HUGE_RECLAIMED_BYTES,
   SNAPSHOT_SUFFIX,
   SNAPSHOT_STASH_ENTRIES,

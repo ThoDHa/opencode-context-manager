@@ -10,7 +10,7 @@ import {
 import {
   EVICTED_BYTES,
   EVICTED_MESSAGES_AGO,
-  OVERRIDE_BUDGET_SOURCE,
+  OVERRIDE_CONTEXT_LIMIT_SOURCE,
   SESSION_A,
   SESSION_B,
   TOTALS_DEDUPED_UNIQUE,
@@ -19,7 +19,7 @@ import {
   TOTALS_REASONING_EXPIRED,
   TOTALS_STASH_HITS,
   TOTALS_STASH_MISSES,
-  UNKNOWN_BUDGET_SOURCE,
+  UNKNOWN_CONTEXT_LIMIT_SOURCE,
   makeLine,
 } from "./panel-fixtures.ts"
 
@@ -143,7 +143,7 @@ test("panelRows marks an unknown budget inactive and omits watermark fields when
     source: "/tmp/metrics.jsonl",
     activeSession: SESSION_A,
     current: sessionPanelData(
-      [makeLine({ modelContextTokens: null, modelContextTokensSource: UNKNOWN_BUDGET_SOURCE, watermarkTokens: null, deficitTokens: null })],
+      [makeLine({ modelContextTokens: null, modelContextTokensSource: UNKNOWN_CONTEXT_LIMIT_SOURCE, watermarkTokens: null, deficitTokens: null })],
       SESSION_A,
     ),
     global: globalTotals([]),
@@ -160,7 +160,7 @@ test("panelRows labels an override-sourced budget as a per-model override", () =
   const data = {
     source: "/tmp/metrics.jsonl",
     activeSession: SESSION_A,
-    current: sessionPanelData([makeLine({ modelContextTokensSource: OVERRIDE_BUDGET_SOURCE })], SESSION_A),
+    current: sessionPanelData([makeLine({ modelContextTokensSource: OVERRIDE_CONTEXT_LIMIT_SOURCE })], SESSION_A),
     global: globalTotals([]),
     error: undefined,
   }

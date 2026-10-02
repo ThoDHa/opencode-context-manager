@@ -25,13 +25,13 @@ import {
   EXPECTED_TOKENS_PROCESSED_STAT,
   HUGE_RECLAIMED_BYTES,
   LOG_LINE_ONLY_EVICTIONS,
-  OVERRIDE_BUDGET_SOURCE,
+  OVERRIDE_CONTEXT_LIMIT_SOURCE,
   SESSION_A,
   SESSION_B,
   TOTALS_EVICTIONS,
   TOTALS_STASH_HITS,
   TOTALS_STASH_MISSES,
-  UNKNOWN_BUDGET_SOURCE,
+  UNKNOWN_CONTEXT_LIMIT_SOURCE,
   logLineStaleAgainstSnapshot,
   makeLine,
   makeSnapshot,
@@ -277,7 +277,7 @@ test("sidebarRows restyles a null budget and a missing watermark into the colon 
       [
         makeLine({
           modelContextTokens: null,
-          modelContextTokensSource: UNKNOWN_BUDGET_SOURCE,
+          modelContextTokensSource: UNKNOWN_CONTEXT_LIMIT_SOURCE,
           watermarkTokens: null,
           deficitTokens: null,
           evictedThisRun: [],
@@ -421,7 +421,7 @@ test("sidebarRows drops the budget source label while the panel keeps it", () =>
   const data = {
     source: "/tmp/metrics.jsonl",
     activeSession: SESSION_A,
-    current: sessionPanelData([makeLine({ modelContextTokensSource: OVERRIDE_BUDGET_SOURCE, evictedThisRun: [] })], SESSION_A),
+    current: sessionPanelData([makeLine({ modelContextTokensSource: OVERRIDE_CONTEXT_LIMIT_SOURCE, evictedThisRun: [] })], SESSION_A),
     global: globalTotals([]),
     error: undefined,
   }
