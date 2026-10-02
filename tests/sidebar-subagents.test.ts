@@ -104,14 +104,14 @@ test("sidebarSubagentsGroup renders the type's agent count on its row and the to
     { text: "Evictions: 2, 900 tokens", tone: "normal" },
     { text: "Deduped: 10, 4.5k tokens", tone: "normal" },
     { text: "Reasoning expired: 12, 1.3k tokens", tone: "normal" },
-    { text: "Stash reads: 20, 8 hits", tone: "normal" },
+    { text: "Recalls: 20, 8 hits", tone: "normal" },
     { text: " ", tone: "normal" },
     { text: "Scout: 2 agents", tone: "normal", labelTone: "info", labelBold: true },
     { text: "Tokens processed: 39k tokens", tone: "normal" },
     { text: "Evictions: 2, 900 tokens", tone: "normal" },
     { text: "Deduped: 10, 4.5k tokens", tone: "normal" },
     { text: "Reasoning expired: 12, 1.3k tokens", tone: "normal" },
-    { text: "Stash reads: 20, 8 hits", tone: "normal" },
+    { text: "Recalls: 20, 8 hits", tone: "normal" },
   ])
 })
 
@@ -127,14 +127,14 @@ test("sidebarSubagentsGroup uses the singular agent unit for a single-child type
     { text: "Evictions: 1, 900 tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
-    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+    { text: "Recalls: 10, 4 hits", tone: "normal" },
     { text: " ", tone: "normal" },
     { text: "Scout: 1 agent", tone: "normal", labelTone: "info", labelBold: true },
     { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "normal" },
     { text: "Evictions: 1, 900 tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
-    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+    { text: "Recalls: 10, 4 hits", tone: "normal" },
   ])
 })
 
@@ -163,14 +163,14 @@ test("sidebarSubagentsGroup sums the landed panels of a type and keeps the agent
     { text: "Evictions: 2, 900 tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
-    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+    { text: "Recalls: 10, 4 hits", tone: "normal" },
     { text: " ", tone: "normal" },
     { text: "Scout: 2 agents", tone: "normal", labelTone: "info", labelBold: true },
     { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "normal" },
     { text: "Evictions: 2, 900 tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
-    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+    { text: "Recalls: 10, 4 hits", tone: "normal" },
   ])
 })
 
@@ -190,21 +190,21 @@ test("sidebarSubagentsGroup renders the cumulative token-first block directly un
     { text: "Evictions: 3, 1.5k tokens", tone: "normal" },
     { text: "Deduped: 8, 4.5k tokens", tone: "normal" },
     { text: "Reasoning expired: 6, 1.3k tokens", tone: "normal" },
-    { text: "Stash reads: 20, 8 hits", tone: "normal" },
+    { text: "Recalls: 20, 8 hits", tone: "normal" },
     { text: " ", tone: "normal" },
     { text: "Worker: 1 agent", tone: "normal", labelTone: "info", labelBold: true },
     { text: "Tokens processed: 400 tokens", tone: "normal" },
     { text: "Evictions: 1, 600 tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
-    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+    { text: "Recalls: 10, 4 hits", tone: "normal" },
     { text: " ", tone: "normal" },
     { text: "Scout: 1 agent", tone: "normal", labelTone: "info", labelBold: true },
     { text: "Tokens processed: 700 tokens", tone: "normal" },
     { text: "Evictions: 2, 900 tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
-    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+    { text: "Recalls: 10, 4 hits", tone: "normal" },
   ])
 })
 
@@ -263,7 +263,7 @@ test("sidebarSubagentsGroup orders type blocks alphabetically regardless of the 
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
-    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+    { text: "Recalls: 10, 4 hits", tone: "normal" },
     { text: " ", tone: "normal" },
     { text: "Probe: no data yet", tone: "normal", labelTone: "info", labelBold: true },
     { text: " ", tone: "normal" },
@@ -272,7 +272,7 @@ test("sidebarSubagentsGroup orders type blocks alphabetically regardless of the 
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
-    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+    { text: "Recalls: 10, 4 hits", tone: "normal" },
   ])
 })
 
@@ -293,7 +293,7 @@ test("sidebarSubagentsGroup places the fleet agent types first in the canonical 
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
-    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+    { text: "Recalls: 10, 4 hits", tone: "normal" },
     { text: " ", tone: "normal" },
     { text: "Worker: no data yet", tone: "normal", labelTone: "info", labelBold: true },
     { text: " ", tone: "normal" },
@@ -310,7 +310,7 @@ test("sidebarSubagentsGroup places the fleet agent types first in the canonical 
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
-    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+    { text: "Recalls: 10, 4 hits", tone: "normal" },
   ])
 })
 
@@ -343,7 +343,7 @@ test("sidebarSubagentsGroup compares non-fleet types locale-free so an uppercase
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
-    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+    { text: "Recalls: 10, 4 hits", tone: "normal" },
     { text: " ", tone: "normal" },
     { text: "Summarizer: no data yet", tone: "normal", labelTone: "info", labelBold: true },
     { text: " ", tone: "normal" },
@@ -352,7 +352,7 @@ test("sidebarSubagentsGroup compares non-fleet types locale-free so an uppercase
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
-    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+    { text: "Recalls: 10, 4 hits", tone: "normal" },
   ])
 })
 
@@ -380,14 +380,14 @@ test("sidebarSubagentsGroup excludes an archived child from the count and the ty
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
-    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+    { text: "Recalls: 10, 4 hits", tone: "normal" },
     { text: " ", tone: "normal" },
     { text: "Probe: 1 agent", tone: "normal", labelTone: "info", labelBold: true },
     { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "normal" },
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
-    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+    { text: "Recalls: 10, 4 hits", tone: "normal" },
   ])
 })
 
@@ -414,14 +414,14 @@ test("sidebarSubagentsGroup capitalizes only the first letter of an already-capi
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
-    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+    { text: "Recalls: 10, 4 hits", tone: "normal" },
     { text: " ", tone: "normal" },
     { text: "Scout: 1 agent", tone: "normal", labelTone: "info", labelBold: true },
     { text: EXPECTED_TOKENS_PROCESSED_STAT, tone: "normal" },
     { text: "Evictions: 5, 3.1k tokens", tone: "normal" },
     { text: EXPECTED_DEDUPED_STAT, tone: "normal" },
     { text: EXPECTED_REASONING_STAT, tone: "normal" },
-    { text: "Stash reads: 10, 4 hits", tone: "normal" },
+    { text: "Recalls: 10, 4 hits", tone: "normal" },
     { text: " ", tone: "normal" },
     { text: "Code-reviewer: no data yet", tone: "normal", labelTone: "info", labelBold: true },
   ])
@@ -440,7 +440,7 @@ test("sidebarSubagentsGroup caps an over-long type label's row at the sidebar co
   assert.equal(rows[9].text, "Evictions: 5, 3.1k tokens")
   assert.equal(rows[10].text, EXPECTED_DEDUPED_STAT)
   assert.equal(rows[11].text, EXPECTED_REASONING_STAT)
-  assert.equal(rows[12].text, "Stash reads: 10, 4 hits")
+  assert.equal(rows[12].text, "Recalls: 10, 4 hits")
 })
 
 test("sidebarSubagentsGroup returns no rows for an empty child list", () => {

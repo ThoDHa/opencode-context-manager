@@ -149,7 +149,7 @@ test("SidebarEntry renders, polls, and disposes against the temp HOME fixtures",
 
       st.mock.timers.tick(POLL_INTERVAL_MS)
       await settleUntil(() => nodeText(sidebar.root).includes("Context Manager"))
-      assert.ok(nodeText(sidebar.root).includes("Budget: 200k"))
+      assert.ok(nodeText(sidebar.root).includes("Context limit: 200k"))
     })
   })
 
@@ -160,8 +160,8 @@ test("SidebarEntry renders, polls, and disposes against the temp HOME fixtures",
       await settleUntil(() => nodeText(sidebar.root).includes("Context Manager"))
       const text = nodeText(sidebar.root)
       assert.ok(text.includes("Context Manager (manual)"))
-      assert.ok(text.includes("Budget: 300k"), `snapshot budget should win: ${text}`)
-      assert.ok(!text.includes("Budget: 200k"))
+      assert.ok(text.includes("Context limit: 300k"), `snapshot budget should win: ${text}`)
+      assert.ok(!text.includes("Context limit: 200k"))
       assert.ok(text.includes("Watermark: 100k"))
       assert.ok(text.includes("Over by: 23.5k"))
       assert.ok(text.includes("Window: 123.5k"))
@@ -238,7 +238,7 @@ test("SidebarEntry renders, polls, and disposes against the temp HOME fixtures",
       st.mock.timers.tick(POLL_INTERVAL_MS)
       await waitRealMs(GUARD_WINDOW_MS)
       assert.equal(sidebar.calls.children.length, 0)
-      assert.ok(nodeText(sidebar.root).includes("Budget: 200k"))
+      assert.ok(nodeText(sidebar.root).includes("Context limit: 200k"))
     })
   })
 

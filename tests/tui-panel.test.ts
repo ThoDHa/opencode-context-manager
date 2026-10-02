@@ -28,7 +28,7 @@ const NO_SESSION_ROW_TEXT = "no active session"
 const UNREADABLE_ROW_MARKER = "metrics log unreadable:"
 const EVICTION_ROW_MARKER = "last evicted:"
 const MANUAL_MODE_HEADER_SUFFIX = " (manual)"
-const BUDGET_LABEL_SPAN = "budget: "
+const BUDGET_LABEL_SPAN = "context limit: "
 const TOAST_TRIGGER_FAILURE = "setSize exploded"
 const SUBAGENT_ROW_MARKER = "General:"
 const SUBAGENT_STRONG_LABEL = "General: "
@@ -40,7 +40,7 @@ const CHILD_UPDATED_MS = 1000
 // Expected row text derived from the panel-fixtures values: the snapshot's
 // 200000-token model budget formats as 200k and the "model" source labels
 // as per-model limit; the log fixture's eviction reads /data/a.txt.
-const SNAPSHOT_BUDGET_ROW = "budget: 200k tokens (per-model limit)"
+const SNAPSHOT_BUDGET_ROW = "context limit: 200k tokens (per-model limit)"
 const EVICTIONS_SUCCESS_MARKER = "5, 3.1k tokens"
 const STASH_SUCCESS_MARKER = "10, 4 hits"
 

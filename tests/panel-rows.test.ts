@@ -26,7 +26,7 @@ import {
 const COLLECTED_EVICTION_COUNT = 2
 
 test("splitRowText splits a label value row at the first colon-space", () => {
-  assert.deepEqual(splitRowText("budget: 200k tokens"), { label: "budget", value: "200k tokens" })
+  assert.deepEqual(splitRowText("context limit: 200k tokens"), { label: "context limit", value: "200k tokens" })
 })
 
 test("splitRowText splits at the first colon-space only and keeps later colons in the value", () => {
@@ -45,7 +45,7 @@ test("splitRowText returns undefined when the colon has no trailing space", () =
 })
 
 test("splitRowText returns undefined when the value after the colon-space is empty", () => {
-  assert.equal(splitRowText("budget: "), undefined)
+  assert.equal(splitRowText("context limit: "), undefined)
 })
 
 test("splitRowText returns undefined for a row whose label before the colon-space is empty", () => {
@@ -72,13 +72,13 @@ test("panelRows renders the session's budget, last run, compact counters, and ne
 
   assert.equal(rows[0].text, "Context Manager")
   assert.equal(rows[0].tone, "header")
-  assert.ok(rows.some((row) => row.text === `budget: 200k tokens (per-model limit)`))
+  assert.ok(rows.some((row) => row.text === `context limit: 200k tokens (per-model limit)`))
   assert.ok(rows.some((row) => row.text === "last run: 123.5k estimated vs 100k watermark (over by 23.5k)"))
   assert.ok(
     rows.some(
       (row) =>
         row.text ===
-        `counters: ${TOTALS_EVICTIONS} evictions (12 kB reclaimed, 3.1k tokens saved), ${TOTALS_DEDUPED_UNIQUE} dedup (2.3k tokens saved), ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} stash reads (${TOTALS_STASH_HITS} hits)`,
+        `counters: ${TOTALS_EVICTIONS} evictions (12 kB reclaimed, 3.1k tokens saved), ${TOTALS_DEDUPED_UNIQUE} dedup (2.3k tokens saved), ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} recalls (${TOTALS_STASH_HITS} hits)`,
     ),
   )
   assert.ok(rows.some((row) => row.text === `last evicted: read /data/a.txt (3 kB, ${EVICTED_MESSAGES_AGO} msgs ago)`))
@@ -152,7 +152,7 @@ test("panelRows marks an unknown budget inactive and omits watermark fields when
 
   const rows = panelRows(data)
 
-  assert.ok(rows.some((row) => row.text === "budget: inactive (no budget)"))
+  assert.ok(rows.some((row) => row.text === "context limit: inactive (no context limit)"))
   assert.ok(rows.some((row) => row.text === "last run: 123.5k estimated, no watermark"))
 })
 
@@ -167,7 +167,7 @@ test("panelRows labels an override-sourced budget as a per-model override", () =
 
   const rows = panelRows(data)
 
-  assert.ok(rows.some((row) => row.text === "budget: 200k tokens (per-model override)"))
+  assert.ok(rows.some((row) => row.text === "context limit: 200k tokens (per-model override)"))
 })
 
 test("panelRows reports a session without recorded runs distinctly from a panel opened outside any session", () => {
@@ -183,7 +183,7 @@ test("panelRows reports a session without recorded runs distinctly from a panel 
 
   assert.ok(noMetricsRows.some((row) => row.text === "no metrics recorded for this session yet"))
   assert.ok(!noMetricsRows.some((row) => row.text === "no active session"))
-  assert.ok(!noMetricsRows.some((row) => row.text.startsWith("budget:")))
+  assert.ok(!noMetricsRows.some((row) => row.text.startsWith("context limit:")))
   assert.deepEqual(noMetricsRows, [
     { text: "Context Manager", tone: "header" },
     { text: "no metrics recorded for this session yet", tone: "normal" },

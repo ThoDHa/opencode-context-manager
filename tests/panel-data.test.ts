@@ -750,8 +750,8 @@ test("budgetSourceLabel maps the plugin's source ids to panel labels", () => {
   assert.equal(budgetSourceLabel(OVERRIDE_BUDGET_SOURCE), "per-model override")
   assert.equal(budgetSourceLabel(MODEL_BUDGET_SOURCE), "per-model limit")
   assert.equal(budgetSourceLabel(DEFAULT_BUDGET_SOURCE), "plugin default")
-  assert.equal(budgetSourceLabel(UNKNOWN_BUDGET_SOURCE), "inactive (no budget)")
-  assert.equal(budgetSourceLabel("anything-else"), "inactive (no budget)")
+  assert.equal(budgetSourceLabel(UNKNOWN_BUDGET_SOURCE), "inactive (no context limit)")
+  assert.equal(budgetSourceLabel("anything-else"), "inactive (no context limit)")
 })
 
 test("canRegisterSidebar accepts only an api object whose slots.register is callable", () => {
@@ -894,7 +894,7 @@ test("loadPanelData prefers the live snapshot for the session block and keeps lo
       rows.some(
         (row) =>
           row.text ===
-          `counters: ${TOTALS_EVICTIONS} evictions (12 kB reclaimed, 3.1k tokens saved), ${TOTALS_DEDUPED_UNIQUE} dedup (2.3k tokens saved), ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} stash reads (${TOTALS_STASH_HITS} hits)`,
+          `counters: ${TOTALS_EVICTIONS} evictions (12 kB reclaimed, 3.1k tokens saved), ${TOTALS_DEDUPED_UNIQUE} dedup (2.3k tokens saved), ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} recalls (${TOTALS_STASH_HITS} hits)`,
       ),
     )
     assert.ok(!rows.some((row) => row.text.includes("occupancy:")))
@@ -1008,7 +1008,7 @@ test("loadPanelData falls back to the metrics log when no snapshot exists for th
       rows.some(
         (row) =>
           row.text ===
-          `counters: ${LOG_LINE_ONLY_EVICTIONS} evictions (12 kB reclaimed, 3.1k tokens saved), ${TOTALS_DEDUPED_UNIQUE} dedup (2.3k tokens saved), ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} stash reads (${TOTALS_STASH_HITS} hits)`,
+          `counters: ${LOG_LINE_ONLY_EVICTIONS} evictions (12 kB reclaimed, 3.1k tokens saved), ${TOTALS_DEDUPED_UNIQUE} dedup (2.3k tokens saved), ${TOTALS_STASH_HITS + TOTALS_STASH_MISSES} recalls (${TOTALS_STASH_HITS} hits)`,
       ),
     )
   })
@@ -1072,7 +1072,7 @@ test("loadPanelData serves the snapshot block alongside the log warning when the
     const rows = panelRows(data)
     assert.ok(rows.some((row) => row.text.startsWith("metrics log unreadable:")))
     assert.equal(rows[0].text, "Context Manager (manual)")
-    assert.ok(rows.some((row) => row.text === "budget: 200k tokens (per-model limit)"))
+    assert.ok(rows.some((row) => row.text === "context limit: 200k tokens (per-model limit)"))
     assert.ok(!rows.some((row) => row.text.startsWith("history:")))
   })
 })

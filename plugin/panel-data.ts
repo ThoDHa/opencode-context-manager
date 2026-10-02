@@ -204,7 +204,7 @@ const BUDGET_SOURCE_UNKNOWN = "unknown"
 const BUDGET_SOURCE_LABEL_OVERRIDE = "per-model override"
 const BUDGET_SOURCE_LABEL_MODEL = "per-model limit"
 const BUDGET_SOURCE_LABEL_DEFAULT = "plugin default"
-const BUDGET_SOURCE_LABEL_UNKNOWN = "inactive (no budget)"
+const BUDGET_SOURCE_LABEL_UNKNOWN = "inactive (no context limit)"
 const PANEL_TITLE = "Context Manager"
 const MANUAL_MODE_TITLE_SUFFIX = " (manual)"
 // The /context panel command's registration identity, declared here so the
@@ -843,8 +843,8 @@ const capitalizeLabel = (label: string): string =>
 const budgetText = (current: SessionPanel): string => {
   const label = budgetSourceLabel(current.contextLimitSource)
   return current.contextLimitTokens === null
-    ? `budget: ${label}`
-    : `budget: ${formatTokenCount(current.contextLimitTokens)} tokens (${label})`
+    ? `context limit: ${label}`
+    : `context limit: ${formatTokenCount(current.contextLimitTokens)} tokens (${label})`
 }
 
 const lastRunText = (current: SessionPanel): string => {
@@ -858,7 +858,7 @@ const lastRunText = (current: SessionPanel): string => {
 }
 
 const countersText = (current: SessionPanel): string =>
-  `${COUNTERS_ROW_LABEL} ${current.totals.evictions} evictions (${formatBytes(current.totals.bytesReclaimed)} reclaimed, ${formatTokenCount(current.totals.evictionTokensSaved)} tokens saved), ${current.totals.dedupedUnique} dedup (${formatTokenCount(current.totals.dedupTokensSaved)} tokens saved), ${current.stashReads} stash reads (${current.totals.stashHits} hits)`
+  `${COUNTERS_ROW_LABEL} ${current.totals.evictions} evictions (${formatBytes(current.totals.bytesReclaimed)} reclaimed, ${formatTokenCount(current.totals.evictionTokensSaved)} tokens saved), ${current.totals.dedupedUnique} dedup (${formatTokenCount(current.totals.dedupTokensSaved)} tokens saved), ${current.stashReads} recalls (${current.totals.stashHits} hits)`
 
 const evictionText = (entry: PanelEvictedEntry): string =>
   `${entry.tool} ${entry.subject} (${formatBytes(entry.bytes)}, ${entry.messagesAgo} msgs ago)`
@@ -901,18 +901,18 @@ const ELLIPSIS_MARKER = "…"
 const truncateToWidth = (text: string, maxWidth: number): string =>
   text.length > maxWidth ? `${text.slice(0, maxWidth - ELLIPSIS_MARKER.length)}${ELLIPSIS_MARKER}` : text
 
-const SIDEBAR_BUDGET_LABEL = "Budget"
+const SIDEBAR_BUDGET_LABEL = "Context limit"
 const SIDEBAR_WATERMARK_LABEL = "Watermark"
 const SIDEBAR_OVER_BY_LABEL = "Over by"
 const SIDEBAR_WINDOW_LABEL = "Window"
 const SIDEBAR_EVICTIONS_LABEL = "Evictions"
 const SIDEBAR_DEDUPED_LABEL = "Deduped"
 const SIDEBAR_REASONING_LABEL = "Reasoning expired"
-const SIDEBAR_STASH_READS_LABEL = "Stash reads"
+const SIDEBAR_STASH_READS_LABEL = "Recalls"
 const SIDEBAR_TOKENS_PROCESSED_LABEL = "Tokens processed"
 const SIDEBAR_TOKENS_UNIT = "tokens"
 const SIDEBAR_HITS_UNIT = "hits"
-const SIDEBAR_BUDGET_INACTIVE_TEXT = `${SIDEBAR_BUDGET_LABEL}: inactive (no budget)`
+const SIDEBAR_BUDGET_INACTIVE_TEXT = `${SIDEBAR_BUDGET_LABEL}: inactive (no context limit)`
 const SIDEBAR_WATERMARK_MISSING_TEXT = `${SIDEBAR_WATERMARK_LABEL}: none`
 const SIDEBAR_SUBAGENTS_LEAD_LABEL = "Subagents"
 // Fixed positions, not recency: a delegation burst would otherwise reshuffle the type blocks on every tick.
