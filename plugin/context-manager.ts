@@ -68,14 +68,29 @@ const DEFAULT_LIMIT_SESSIONS = 8
 const DEFAULT_HINT_SESSIONS = 8
 const RECALL_TOOL_NAME = "recall"
 const RECALL_ARG_NAME = "subject"
+const RECALL_PROBE_ARG_NAME = "countsOnly"
+const RECALL_PROBE_ARG_SCHEMA_TYPE = "boolean"
+const RECALL_PROBE_ARG_DESCRIPTION =
+  "Set true to price the reload before paying for it: match counts return instead of any content and nothing is counted"
 const RECALL_TOOL_DESCRIPTION =
-  "Return the full original content of anything the Context Manager evicted and stored in the page store: a tool call output or a fenced code block from an old user message. Pass the subject exactly as it appears in the eviction notice."
+  "Return the full original content of anything the Context Manager evicted and stored in the page store: a tool call output or a fenced code block from an old user message. Pass the subject exactly as it appears in the eviction notice. Pass countsOnly true to price the reload first: a counts-only summary (match counts, newest-match bytes, attachments-present flag) returns instead of any content, with no counter or fault side effects."
 const RECALL_ARG_DESCRIPTION = "The subject exactly as named in the eviction notice"
 const RECALL_ARG_SCHEMA_TYPE = "string"
 const RECALL_ARG_SCHEMA: Record<string, string> = {
   type: RECALL_ARG_SCHEMA_TYPE,
   description: RECALL_ARG_DESCRIPTION,
 }
+const RECALL_PROBE_ARG_SCHEMA: Record<string, string> = {
+  type: RECALL_PROBE_ARG_SCHEMA_TYPE,
+  description: RECALL_PROBE_ARG_DESCRIPTION,
+}
+const RECALL_PROBE_LEAD = "counts-only probe for"
+const RECALL_PROBE_IN_SESSION_LABEL = "in-session matches"
+const RECALL_PROBE_PAGE_STORE_LABEL = "page-store matches"
+const RECALL_PROBE_NEWEST_LABEL = "newest match"
+const RECALL_PROBE_BYTES_UNIT = "bytes"
+const RECALL_PROBE_OLDER_LABEL = "older matches"
+const RECALL_PROBE_ATTACHMENTS_LABEL = "attachments present"
 const RECALL_POINTER_LEAD = " Evicted output stored in the page store; recall it with"
 const DIGEST_POINTER_LEAD = " Output digest: "
 const DIGEST_POINTER_TAIL = "."
@@ -177,7 +192,17 @@ const DEFAULT_METRICS_MIN_LINE_INTERVAL_MS = SECONDS_PER_MINUTE * MS_PER_SECOND
 const METRICS_COALESCING_DISABLED_MS = 0
 const DESCRIBE_TOOL_NAME = "describe"
 const DESCRIBE_TOOL_DESCRIPTION =
-  "Return live metrics for the Context Manager in this session: eviction counters, expired reasoning counts, faults (post-eviction re-references of evicted subjects), session page store occupancy, the effective context limit and its headroom, and the most recent transform run's token estimate; also the newest run's post-transform composition (tool outputs, text, retained reasoning), the manual-mode dry run when armed, the echoed option surface including charsPerToken, the remembered-evicted-subjects bound, and the protected tools and patterns, and the last transform error when one occurred."
+  "Return live metrics for the Context Manager in this session: eviction counters, expired reasoning counts, faults (post-eviction re-references of evicted subjects), session page store occupancy, the effective context limit and its headroom, and the most recent transform run's token estimate; also the newest run's post-transform composition (tool outputs, text, retained reasoning), the newest run's declared omissions (tool evictions, expired reasoning parts, evicted fenced blocks) with the recall reload pointer when one exists, the manual-mode dry run when armed, the echoed option surface including charsPerToken, the remembered-evicted-subjects bound, and the protected tools and patterns, and the last transform error when one occurred."
+const OMISSIONS_REPORT_KEY = "omissions"
+const OMISSIONS_TOOL_EVICTIONS_FIELD = "toolEvictions"
+const OMISSIONS_REASONING_PARTS_FIELD = "reasoningParts"
+const OMISSIONS_FENCE_BLOCKS_FIELD = "fenceBlocks"
+const OMISSIONS_RELOAD_TOOL_FIELD = "reloadTool"
+const OMISSIONS_LINE_LEAD = "standing omissions: "
+const OMISSIONS_TOOL_OUTPUTS_LABEL = "tool outputs"
+const OMISSIONS_REASONING_BLOCKS_LABEL = "reasoning blocks"
+const OMISSIONS_FENCED_BLOCKS_LABEL = "fenced blocks"
+const OMISSIONS_RELOAD_LEAD = "; reload via "
 const JSON_INDENT_SPACES = 2
 const CONTEXT_TOKENS_SOURCE_OVERRIDE = "override"
 const CONTEXT_TOKENS_SOURCE_MODEL = "model"
@@ -411,6 +436,11 @@ type SessionMetrics = {
   // reasoningInWindowBytes): run-scoped diagnostic state for describe,
   // never persisted, replaced every run.
   lastComposition?: RunComposition
+  // The newest run's declared omissions (tool evictions, expired reasoning
+  // parts, evicted fenced blocks): run-scoped diagnostic state for describe
+  // and the compaction footer, never persisted, replaced every run.
+  // Wave-A field order: 63's lastOmissions precedes 65's lastAdvisory.
+  lastOmissions?: LastOmissions
   // The newest fault-isolated failure on this session's transform: set by
   // the transform boundary when the body throws, surfaced through
   // describe, never persisted, replaced by the next run's outcome.
@@ -1018,6 +1048,15 @@ type RunComposition = {
   attachmentBytes: number
 }
 
+// The newest run's declared omissions by category, recorded when the run
+// outcome lands: the tombstoned outputs no longer carry their pre-eviction
+// shape, so run time is the last point these facts exist whole.
+type LastOmissions = {
+  toolEvictions: number
+  reasoningParts: number
+  fenceBlocks: number
+}
+
 // Terminal escape sequences counted for escapeBytes and stripped by
 // ingestion hygiene: CSI sequences (ESC [ ... final byte) and OSC
 // sequences (ESC ] ... BEL or ST terminator). Matched spans count their
@@ -1545,6 +1584,18 @@ const pageStoreOlderLineFor = (subject: string, count: number): string =>
 
 const pageStoreMissLineFor = (subject: string): string => `${STASH_MARKER} ${PAGE_STORE_MISS_LEAD} "${subject}".`
 
+const missResponseFor = (subject: string, pageStore: SessionPageStore | undefined): string =>
+  `${pageMissTextFor(subject)}\n${pageStoreOccupancyLineFor(pageStore ?? new Map())}\n${pageStoreMissLineFor(subject)}`
+
+// The counts-only summary a probe hit returns: match counts and sizes read
+// straight off the matches the full reload would walk, no content copied.
+const probeCountsLineFor = (subject: string, inSessionMatches: PageEntry[], pageStoreMatches: PageEntry[]): string => {
+  const matches = inSessionMatches.length > 0 ? inSessionMatches : pageStoreMatches
+  const newest = matches[matches.length - 1]
+  const olderMatches = matches.length - 1
+  return `${STASH_MARKER} ${RECALL_PROBE_LEAD} "${subject}": ${RECALL_PROBE_IN_SESSION_LABEL} ${inSessionMatches.length}, ${RECALL_PROBE_PAGE_STORE_LABEL} ${pageStoreMatches.length}, ${RECALL_PROBE_NEWEST_LABEL} ${newest.output.length} ${RECALL_PROBE_BYTES_UNIT}, ${RECALL_PROBE_OLDER_LABEL} ${olderMatches}, ${RECALL_PROBE_ATTACHMENTS_LABEL}: ${newest.attachments !== undefined}.`
+}
+
 const executeReadEvicted = async (
   pageStores: PageStoreBySession,
   metrics: MetricsStore,
@@ -1555,14 +1606,19 @@ const executeReadEvicted = async (
   args: unknown,
   toolContext: unknown,
 ): Promise<string> => {
-  const subject = typeof args === "object" && args !== null ? (args as { subject?: unknown }).subject : undefined
+  const source = typeof args === "object" && args !== null ? (args as Record<string, unknown>) : undefined
+  const subject = source?.[RECALL_ARG_NAME]
   if (typeof subject !== "string" || subject.length === 0) return invalidSubjectTextFor(typeof subject)
+  const countsOnly = source?.[RECALL_PROBE_ARG_NAME] === true
   const sessionKey = sessionKeyFromContext(toolContext)
   const pageStore = pageStores.get(sessionKey)
   const matches = pageStore === undefined ? [] : pageMatchesFor(pageStore, subject)
   if (matches.length === 0) {
     const pages = await pageStoreMatchesFor(options, subject)
     if (pages.length === 0) {
+      // The probe's miss answers exactly today's miss text without the
+      // hydration await or the recallMisses increment: zero side effects.
+      if (countsOnly) return missResponseFor(subject, pageStore)
       // A first-touch hydration may still be seeding this session: await it
       // so the miss lands on the settled entry instead of vanishing with the
       // entry the seed replaces.
@@ -1570,8 +1626,13 @@ const executeReadEvicted = async (
       if (inFlight !== undefined) await inFlight.promise
       const existing = metrics.get(sessionKey)
       if (existing !== undefined) existing.recallMisses += 1
-      return `${pageMissTextFor(subject)}\n${pageStoreOccupancyLineFor(pageStore ?? new Map())}\n${pageStoreMissLineFor(subject)}`
+      return missResponseFor(subject, pageStore)
     }
+    // The probe returns before the recall hit increment and the fault
+    // record: fault counts feed the eviction sort key through
+    // faultAdjustedLastTouchOf, so probe side effects would leak into
+    // eviction ordering.
+    if (countsOnly) return probeCountsLineFor(subject, [], pages)
     // A page-store hit counts and fault-protects exactly like an in-session
     // hit: the reload is the same event to the eviction policy.
     const sessionMetrics = await metricsForSession(metrics, hydrations, persistedTotalsForSession, sessionKey, metricsSessionBound)
@@ -1583,6 +1644,7 @@ const executeReadEvicted = async (
     const withOlder = olderCount === 0 ? restored : `${restored}\n${pageStoreOlderLineFor(subject, olderCount)}`
     return newest.attachments === undefined ? withOlder : `${withOlder}\n${pageAttachmentsLineFor(newest.attachments)}`
   }
+  if (countsOnly) return probeCountsLineFor(subject, matches, [])
   // Refreshed before the await so the hit counts even if stash churn during
   // the hydration read evicts this session's stash entry.
   touchMapEntry(pageStores, sessionKey)
@@ -2343,6 +2405,16 @@ const executeStatsTool = (source: StatsSource, toolContext: unknown): string => 
     pageStore: { entries: pageStore === undefined ? 0 : pageStore.size, capacity: source.options.stashLimit },
     counters: totalsOf(metrics, source.options.charsPerToken),
     lastRun: metrics.lastRun ?? null,
+    ...(metrics.lastOmissions === undefined
+      ? {}
+      : {
+          [OMISSIONS_REPORT_KEY]: {
+            [OMISSIONS_TOOL_EVICTIONS_FIELD]: metrics.lastOmissions.toolEvictions,
+            [OMISSIONS_REASONING_PARTS_FIELD]: metrics.lastOmissions.reasoningParts,
+            [OMISSIONS_FENCE_BLOCKS_FIELD]: metrics.lastOmissions.fenceBlocks,
+            [OMISSIONS_RELOAD_TOOL_FIELD]: RECALL_TOOL_NAME,
+          },
+        }),
     ...(metrics.lastDryRun === undefined
       ? {}
       : {
@@ -2661,6 +2733,11 @@ const compactionContextFor = (metricsEntry: SessionMetrics | undefined, pageStor
     }
     context.push(`${COMPACTION_BLOCK_MARKER} tombstoned outputs remain reloadable via the ${RECALL_TOOL_NAME} tool; newest subjects: ${newestSubjects.join(SUBJECT_SEPARATOR)}`)
   }
+  if (metricsEntry.lastOmissions !== undefined && (metricsEntry.lastOmissions.toolEvictions > 0 || metricsEntry.lastOmissions.reasoningParts > 0 || metricsEntry.lastOmissions.fenceBlocks > 0)) {
+    context.push(
+      `${COMPACTION_BLOCK_MARKER} ${OMISSIONS_LINE_LEAD}${metricsEntry.lastOmissions.toolEvictions} ${OMISSIONS_TOOL_OUTPUTS_LABEL}, ${metricsEntry.lastOmissions.reasoningParts} ${OMISSIONS_REASONING_BLOCKS_LABEL}, ${metricsEntry.lastOmissions.fenceBlocks} ${OMISSIONS_FENCED_BLOCKS_LABEL}${OMISSIONS_RELOAD_LEAD}${RECALL_TOOL_NAME}`,
+    )
+  }
   return context
 }
 
@@ -2765,6 +2842,11 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
   recordRunOutcome(sessionMetrics, runOutcome, options.rememberedEvictedSubjects)
   sessionMetrics.lastDryRun = runOutcome.dryRun
   sessionMetrics.lastComposition = runOutcome.composition
+  sessionMetrics.lastOmissions = {
+    toolEvictions: runOutcome.eviction.evicted.length,
+    reasoningParts: runOutcome.reasoningExpired.parts,
+    fenceBlocks: runOutcome.fenceEvicted.blocks,
+  }
   storeHint(deps.hintBySession, sessionKey, eviction.hotSubjects, options.hintSubjects, options.hintSessions)
   await recordPageStoreLines(options, deps.metricsBySession, sessionKey, pageStoreEntries)
   await recordMetricsLine(options, sessionMetrics, sessionKey, contextLimit, runOutcome)
@@ -3061,7 +3143,7 @@ const server = (async (_input, rawOptions) => {
     tool: {
       [RECALL_TOOL_NAME]: {
         description: RECALL_TOOL_DESCRIPTION,
-        args: { [RECALL_ARG_NAME]: RECALL_ARG_SCHEMA },
+        args: { [RECALL_ARG_NAME]: RECALL_ARG_SCHEMA, [RECALL_PROBE_ARG_NAME]: RECALL_PROBE_ARG_SCHEMA },
         execute: guardTool(recallTool),
       },
       [DESCRIBE_TOOL_NAME]: {

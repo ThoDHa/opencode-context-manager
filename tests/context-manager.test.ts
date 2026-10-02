@@ -141,6 +141,20 @@ const STASH_OCCUPANCY_RANGE_OLDEST_LABEL = "oldest"
 const STASH_OCCUPANCY_RANGE_NEWEST_LABEL = "newest"
 const MAX_OCCUPANCY_CATEGORIES = 5
 const STASH_EMPTY_OCCUPANCY = `${STASH_MARKER} ${STASH_OCCUPANCY_LEAD} ${STASH_OCCUPANCY_EMPTY_TAIL}.`
+const RECALL_ARG_NAME = "subject"
+const RECALL_PROBE_ARG_NAME = "countsOnly"
+const RECALL_PROBE_LEAD = "counts-only probe for"
+const RECALL_PROBE_IN_SESSION_LABEL = "in-session matches"
+const RECALL_PROBE_PAGE_STORE_LABEL = "page-store matches"
+const RECALL_PROBE_NEWEST_LABEL = "newest match"
+const RECALL_PROBE_BYTES_UNIT = "bytes"
+const RECALL_PROBE_OLDER_LABEL = "older matches"
+const RECALL_PROBE_ATTACHMENTS_LABEL = "attachments present"
+const PROBE_HIT_SUBJECT = "/data/probe-hit.txt"
+const PROBE_SIBLING_SUBJECT = "/data/probe-sibling.txt"
+const PROBE_MISS_SUBJECT = "/data/probe-miss.txt"
+const PROBE_REGRESSION_SUBJECT = "/data/probe-regression.txt"
+const PROBE_REGRESSION_MISS_SUBJECT = "/data/probe-regression-miss.txt"
 const OCCUPANCY_MISS_SUBJECT = "/data/occupancy-miss.txt"
 const OCCUPANCY_PATH_A = "/data/occupancy-a.txt"
 const OCCUPANCY_PATH_B = "/data/occupancy-b.txt"
@@ -650,6 +664,19 @@ const recallTool = async (hooks: HookMap, subject: unknown, sessionID: string): 
     { subject },
     { sessionID },
   )
+
+const recallToolArgs = async (hooks: HookMap, args: Record<string, unknown>, sessionID: string): Promise<unknown> =>
+  (hooks as Record<string, Record<string, RecallToolDefinition>>)[TOOL_MAP_KEY][RECALL_TOOL_NAME].execute(args, { sessionID })
+
+const probeCountsLineFor = (
+  subject: string,
+  inSessionMatches: number,
+  pageStoreMatches: number,
+  newestMatchBytes: number,
+  olderMatches: number,
+  attachmentsPresent: boolean,
+): string =>
+  `${STASH_MARKER} ${RECALL_PROBE_LEAD} "${subject}": ${RECALL_PROBE_IN_SESSION_LABEL} ${inSessionMatches}, ${RECALL_PROBE_PAGE_STORE_LABEL} ${pageStoreMatches}, ${RECALL_PROBE_NEWEST_LABEL} ${newestMatchBytes} ${RECALL_PROBE_BYTES_UNIT}, ${RECALL_PROBE_OLDER_LABEL} ${olderMatches}, ${RECALL_PROBE_ATTACHMENTS_LABEL}: ${attachmentsPresent ? "true" : "false"}.`
 
 const faultMapBoundSubject = (index: number): string => `${FAULT_MAP_SUBJECT_PREFIX}${index}.txt`
 
@@ -2286,6 +2313,82 @@ test("recall returns an error-style miss when the subject is not a non-empty str
 
   assert.equal(await recallTool(hooks, INVALID_SUBJECT_VALUE, SESSION_ID), invalidSubjectMissFor("number"))
   assert.equal(await recallTool(hooks, "", SESSION_ID), invalidSubjectMissFor("string"))
+})
+
+test("recall with countsOnly true prices a stored subject with counts alone and leaves counters and eviction ordering untouched", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+  await runTransform(hooks, buildStandardBundle(SESSION_ID, PROBE_HIT_SUBJECT))
+
+  assert.equal(
+    await recallToolArgs(hooks, { [RECALL_ARG_NAME]: PROBE_HIT_SUBJECT, [RECALL_PROBE_ARG_NAME]: true }, SESSION_ID),
+    probeCountsLineFor(PROBE_HIT_SUBJECT, 1, 0, MIN_EVICTABLE_BYTES, 0, false),
+  )
+
+  const counters = countersOf(await readStats(hooks, SESSION_ID))
+  assert.equal(counters.recallHits, 0)
+  assert.equal(counters.recallMisses, 0)
+  assert.equal(counters.faults, 0)
+
+  const bundle = await runFaultContest(hooks, [PROBE_HIT_SUBJECT, PROBE_SIBLING_SUBJECT], OVER_BY_ONE_TOKENS)
+  assertEntryTombstoned(bundle, 0)
+  assertEntryKept(bundle, 1)
+})
+
+test("recall with countsOnly true returns the standard miss and invalid-subject texts verbatim and counts neither", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(
+    hooks,
+    SESSION_ID,
+    contextForWatermarkTokens(tokensForChars(STANDARD_BUNDLE_CHARS) + HEADROOM_TOKENS),
+  )
+  await runTransform(hooks, buildStandardBundle(SESSION_ID, PROBE_MISS_SUBJECT))
+
+  assert.equal(
+    await recallToolArgs(hooks, { [RECALL_ARG_NAME]: PROBE_MISS_SUBJECT, [RECALL_PROBE_ARG_NAME]: true }, SESSION_ID),
+    stashMissFor(PROBE_MISS_SUBJECT, STASH_EMPTY_OCCUPANCY),
+  )
+  assert.equal(
+    await recallToolArgs(hooks, { [RECALL_ARG_NAME]: INVALID_SUBJECT_VALUE, [RECALL_PROBE_ARG_NAME]: true }, SESSION_ID),
+    invalidSubjectMissFor("number"),
+  )
+  assert.equal(
+    await recallToolArgs(hooks, { [RECALL_ARG_NAME]: "", [RECALL_PROBE_ARG_NAME]: true }, SESSION_ID),
+    invalidSubjectMissFor("string"),
+  )
+
+  const counters = countersOf(await readStats(hooks, SESSION_ID))
+  assert.equal(counters.recallMisses, 0)
+  assert.equal(counters.recallHits, 0)
+})
+
+test("recall without countsOnly or with false returns today's byte-identical responses and the registration carries both argument schemas", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const bundle = buildStandardBundle(SESSION_ID, PROBE_REGRESSION_SUBJECT)
+  await runTransform(hooks, bundle)
+
+  assert.equal(await recallTool(hooks, PROBE_REGRESSION_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(
+    await recallToolArgs(hooks, { [RECALL_ARG_NAME]: PROBE_REGRESSION_SUBJECT, [RECALL_PROBE_ARG_NAME]: false }, SESSION_ID),
+    outputOfBytes(MIN_EVICTABLE_BYTES),
+  )
+  assert.equal(
+    await recallTool(hooks, PROBE_REGRESSION_MISS_SUBJECT, SESSION_ID),
+    stashMissFor(
+      PROBE_REGRESSION_MISS_SUBJECT,
+      pageStoreOccupancyLineFor([{ tool: READ_TOOL, subject: PROBE_REGRESSION_SUBJECT, msgIndex: 0 }]),
+    ),
+  )
+  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).recallHits, 2)
+
+  const recallDefinition = (
+    hooks as Record<string, Record<string, { args: Record<string, { type: string }> }>>
+  )[TOOL_MAP_KEY][RECALL_TOOL_NAME]
+  assert.deepEqual(Object.keys(recallDefinition.args), [RECALL_ARG_NAME, RECALL_PROBE_ARG_NAME])
+  assert.equal(recallDefinition.args[RECALL_ARG_NAME].type, "string")
+  assert.equal(recallDefinition.args[RECALL_PROBE_ARG_NAME].type, "boolean")
 })
 
 test("transform tombstones an older identical call with the dedup marker and keeps the newest output verbatim", async () => {
@@ -4082,6 +4185,54 @@ test("describe counts recall hits and misses from recall and leaves invalid subj
     processedContextBytes: 491,
     processedContextTokens: tokensForChars(491),
   })
+})
+
+const OMISSIONS_TOOL_SUBJECT = "/data/omissions-tool.txt"
+const OMISSIONS_FENCE_TAG = "omissions"
+const OMISSIONS_QUIET_SUBJECT = "/data/omissions-quiet.txt"
+
+const omissionsCompositeBundle = (): StrictBundle => ({
+  messages: [
+    {
+      info: { sessionID: SESSION_ID, role: USER_ROLE },
+      parts: [
+        reasoningPart(REASONING_COLD_TEXT),
+        textPart(fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, OMISSIONS_FENCE_TAG))),
+        pathToolPart(OMISSIONS_TOOL_SUBJECT, MIN_EVICTABLE_BYTES),
+      ],
+    },
+    ...fillerMessages().map((parts) => syntheticMessageFor(SESSION_ID, parts)),
+  ],
+})
+
+const omissionsFooterFor = (toolEvictions: number, reasoningParts: number, fenceBlocks: number): string =>
+  `${COMPACTION_BLOCK_MARKER} standing omissions: ${toolEvictions} tool outputs, ${reasoningParts} reasoning blocks, ${fenceBlocks} fenced blocks; reload via ${RECALL_TOOL_NAME}`
+
+test("describe reports the newest run's declared omissions by category with the recall reload pointer", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const bundle = omissionsCompositeBundle()
+  await runTransform(hooks, bundle)
+
+  assert.equal(bundle.messages[0].parts.length, 2)
+  assert.ok((bundle.messages[0].parts[1] as { state?: { output?: string } }).state?.output?.startsWith(TOMBSTONE_MARKER))
+
+  const stats = await readStats(hooks, SESSION_ID)
+  assert.deepEqual(stats.omissions, {
+    toolEvictions: 1,
+    reasoningParts: 1,
+    fenceBlocks: 1,
+    reloadTool: RECALL_TOOL_NAME,
+  })
+})
+
+test("describe carries no omissions block for a session before any transform run", async () => {
+  const hooks = await loadPluginHooks()
+
+  const stats = await readStats(hooks, SESSION_ID)
+
+  assert.equal(Object.hasOwn(stats, "omissions"), false)
 })
 
 test("describe counts a post eviction touch exactly once for a matching later call and never recounts repeated transforms", async () => {
@@ -6917,6 +7068,31 @@ test("the store note dedupes repeated subjects and caps at the subject bound, ne
   const listedSubjects = note.slice(note.indexOf(`${STASH_NOTE_SUBJECTS_LEAD}: `) + STASH_NOTE_SUBJECTS_LEAD.length + 2).split(HINT_SUBJECT_SEPARATOR)
   assert.deepEqual(listedSubjects, [COMPACTION_STASH_NEWEST_SUBJECT, COMPACTION_STASH_DUP_SUBJECT])
   assert.equal(toolPartAt(bundle.messages[3], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
+})
+
+test("the compacting hook appends the standing-omissions footer exactly when the newest run omitted anything", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+  await runTransform(hooks, omissionsCompositeBundle())
+
+  const output = { context: [] as string[] }
+  await hooks["experimental.session.compacting"]({ sessionID: SESSION_ID }, output)
+
+  assert.equal(output.context.length, 3)
+  assert.equal(output.context[2], omissionsFooterFor(1, 1, 1))
+
+  const quietHooks = await loadPluginHooks()
+  await setContextLimit(
+    quietHooks,
+    SESSION_ID,
+    contextForWatermarkTokens(tokensForChars(STANDARD_BUNDLE_CHARS) + HEADROOM_TOKENS),
+  )
+  await runTransform(quietHooks, buildStandardBundle(SESSION_ID, OMISSIONS_QUIET_SUBJECT))
+
+  const quietOutput = { context: [] as string[] }
+  await quietHooks["experimental.session.compacting"]({ sessionID: SESSION_ID }, quietOutput)
+
+  assert.equal(quietOutput.context.length, 0)
 })
 
 test("a frozen context array degrades through the fault boundary with the native prompt left unmodified", async () => {
