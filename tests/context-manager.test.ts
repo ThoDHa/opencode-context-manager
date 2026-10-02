@@ -7747,7 +7747,7 @@ test("chat system transform delivers a hint under pressure while manualMode is e
   assert.deepEqual(hintBlocksIn(await runSystemTransform(hooks, SESSION_ID)), [hintLineFor([MANUAL_HINT_SUBJECT])])
 })
 
-test("transform keeps fence eviction the page stores and recall active while manualMode is enabled", async () => {
+test("transform keeps fence eviction, the page stores, and recall active while manualMode is enabled", async () => {
   const hooks = await loadPluginHooksWith({ manualMode: true, userFenceEviction: { enabled: true } })
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 

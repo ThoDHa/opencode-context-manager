@@ -340,18 +340,17 @@ const parseEvictedEntries = (value: unknown): PanelEvictedEntry[] | undefined =>
 }
 
 // Every totals key is required and must be a finite number, with one
-// narrow defaulting exception that mirrors the producer's seeder: the
-// parser reads an absent `processedContextBytes` or `processedContextTokens`
-// as 0 exactly when the seeder's own `persistedCounterOf` does (the two
-// absent-as-zero lists are the same two keys, so both sides accept and
-// reject the same records), while a present non-finite value rejects the
-// record on both sides alike. Every other absent key rejects the record
-// here because the seeder rejects it there: the 2026-10-02 renamed keys
-// (recallHits, recallMisses, pagesDropped, faults, dedupedBytesUnique)
-// and reasoningBytesExpiredUnique sit on the seeder's
-// UPGRADE_REQUIRED_COUNTER_KEYS, and the parser's matching strictness is
-// what makes a pre-reset session go dark on both surfaces together
-// instead of rendering figures the seeder refused to seed.
+// narrow defaulting exception: an absent `processedContextBytes` or
+// `processedContextTokens` is read as 0, mirroring the seeder's
+// absent-as-zero default for exactly that processedContext gap (the last
+// two counters to join the schema), while a present non-finite value
+// still rejects the record. This tolerance is deliberately narrower than
+// the seeder's, which defaults nine raw keys absent-as-zero: the parser
+// additionally requires every derived key, and the 2026-10-02 renamed
+// keys (recallHits, recallMisses, pagesDropped, faults, dedupedBytesUnique)
+// plus reasoningBytesExpiredUnique reject on absence on both sides, so a
+// pre-reset record darkens the panel on the same boundary where the
+// seeder refuses to seed it.
 const TRANSITIONAL_ABSENT_ZERO_KEYS: readonly TotalsKey[] = ["processedContextBytes", "processedContextTokens"]
 
 const parseTotals = (value: unknown): PanelTotals | undefined => {
