@@ -4202,8 +4202,14 @@ const omissionsCompositeBundle = (): StrictBundle => ({
   ],
 })
 
+const OMISSIONS_LINE_LEAD = "standing omissions: "
+const OMISSIONS_TOOL_OUTPUTS_LABEL = "tool outputs"
+const OMISSIONS_REASONING_BLOCKS_LABEL = "reasoning blocks"
+const OMISSIONS_FENCED_BLOCKS_LABEL = "fenced blocks"
+const OMISSIONS_RELOAD_LEAD = "; reload via "
+
 const omissionsFooterFor = (toolEvictions: number, reasoningParts: number, fenceBlocks: number): string =>
-  `${COMPACTION_BLOCK_MARKER} standing omissions: ${toolEvictions} tool outputs, ${reasoningParts} reasoning blocks, ${fenceBlocks} fenced blocks; reload via ${RECALL_TOOL_NAME}`
+  `${COMPACTION_BLOCK_MARKER} ${OMISSIONS_LINE_LEAD}${toolEvictions} ${OMISSIONS_TOOL_OUTPUTS_LABEL}, ${reasoningParts} ${OMISSIONS_REASONING_BLOCKS_LABEL}, ${fenceBlocks} ${OMISSIONS_FENCED_BLOCKS_LABEL}${OMISSIONS_RELOAD_LEAD}${RECALL_TOOL_NAME}`
 
 test("describe reports the newest run's declared omissions by category with the recall reload pointer", async () => {
   const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
@@ -7021,7 +7027,7 @@ test("the compaction block respects the subject bound", async () => {
   assert.equal(listedSubjects.length, COMPACTION_SUBJECT_BOUND)
 })
 
-test("the compacting hook attaches nothing when hintSubjects is 0 even with a populated session page store", async () => {
+test("the compacting hook keeps only the omissions footer when hintSubjects is 0 even with a populated session page store", async () => {
   const hooks = await loadPluginHooksWith({ hintSubjects: 0 })
   await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
   await runTransform(hooks, buildStandardBundle(SESSION_ID, HINT_RENDERED_SUBJECT))
@@ -7033,7 +7039,7 @@ test("the compacting hook attaches nothing when hintSubjects is 0 even with a po
   assert.equal(output.context[0], omissionsFooterFor(1, 0, 0))
 })
 
-test("the compacting hook attaches only the store note when the session remembers no evicted subjects but holds stored outputs", async () => {
+test("the compacting hook attaches the store note and the omissions footer when the session remembers no evicted subjects but holds stored outputs", async () => {
   const hooks = await loadPluginHooksWith({ rememberedEvictedSubjects: 0 })
   await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
   await runTransform(hooks, buildStandardBundle(SESSION_ID, HINT_RENDERED_SUBJECT))
@@ -7093,6 +7099,12 @@ test("the compacting hook appends the standing-omissions footer exactly when the
   await quietHooks["experimental.session.compacting"]({ sessionID: SESSION_ID }, quietOutput)
 
   assert.equal(quietOutput.context.length, 0)
+  assert.deepEqual((await readStats(quietHooks, SESSION_ID)).omissions, {
+    toolEvictions: 0,
+    reasoningParts: 0,
+    fenceBlocks: 0,
+    reloadTool: RECALL_TOOL_NAME,
+  })
 })
 
 test("a frozen context array degrades through the fault boundary with the native prompt left unmodified", async () => {

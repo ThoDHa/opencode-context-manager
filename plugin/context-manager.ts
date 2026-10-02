@@ -1589,11 +1589,9 @@ const missResponseFor = (subject: string, pageStore: SessionPageStore | undefine
 
 // The counts-only summary a probe hit returns: match counts and sizes read
 // straight off the matches the full reload would walk, no content copied.
-const probeCountsLineFor = (subject: string, inSessionMatches: PageEntry[], pageStoreMatches: PageEntry[]): string => {
-  const matches = inSessionMatches.length > 0 ? inSessionMatches : pageStoreMatches
+const probeCountsLineFor = (subject: string, inSessionMatches: number, pageStoreMatches: number, matches: PageEntry[]): string => {
   const newest = matches[matches.length - 1]
-  const olderMatches = matches.length - 1
-  return `${STASH_MARKER} ${RECALL_PROBE_LEAD} "${subject}": ${RECALL_PROBE_IN_SESSION_LABEL} ${inSessionMatches.length}, ${RECALL_PROBE_PAGE_STORE_LABEL} ${pageStoreMatches.length}, ${RECALL_PROBE_NEWEST_LABEL} ${newest.output.length} ${RECALL_PROBE_BYTES_UNIT}, ${RECALL_PROBE_OLDER_LABEL} ${olderMatches}, ${RECALL_PROBE_ATTACHMENTS_LABEL}: ${newest.attachments !== undefined}.`
+  return `${STASH_MARKER} ${RECALL_PROBE_LEAD} "${subject}": ${RECALL_PROBE_IN_SESSION_LABEL} ${inSessionMatches}, ${RECALL_PROBE_PAGE_STORE_LABEL} ${pageStoreMatches}, ${RECALL_PROBE_NEWEST_LABEL} ${newest.output.length} ${RECALL_PROBE_BYTES_UNIT}, ${RECALL_PROBE_OLDER_LABEL} ${matches.length - 1}, ${RECALL_PROBE_ATTACHMENTS_LABEL}: ${newest.attachments !== undefined}.`
 }
 
 const executeReadEvicted = async (
@@ -1632,7 +1630,7 @@ const executeReadEvicted = async (
     // record: fault counts feed the eviction sort key through
     // faultAdjustedLastTouchOf, so probe side effects would leak into
     // eviction ordering.
-    if (countsOnly) return probeCountsLineFor(subject, [], pages)
+    if (countsOnly) return probeCountsLineFor(subject, 0, pages.length, pages)
     // A page-store hit counts and fault-protects exactly like an in-session
     // hit: the reload is the same event to the eviction policy.
     const sessionMetrics = await metricsForSession(metrics, hydrations, persistedTotalsForSession, sessionKey, metricsSessionBound)
@@ -1644,7 +1642,7 @@ const executeReadEvicted = async (
     const withOlder = olderCount === 0 ? restored : `${restored}\n${pageStoreOlderLineFor(subject, olderCount)}`
     return newest.attachments === undefined ? withOlder : `${withOlder}\n${pageAttachmentsLineFor(newest.attachments)}`
   }
-  if (countsOnly) return probeCountsLineFor(subject, matches, [])
+  if (countsOnly) return probeCountsLineFor(subject, matches.length, 0, matches)
   // Refreshed before the await so the hit counts even if stash churn during
   // the hydration read evicts this session's stash entry.
   touchMapEntry(pageStores, sessionKey)
