@@ -219,9 +219,9 @@ const UNKNOWN_ATTACHMENT_MIME_LABEL = "unknown mime"
 const DEFAULT_FENCE_EVICTABLE_LINES = 40
 const DEFAULT_USER_FENCE_EVICTION_ENABLED = false
 const DEFAULT_MANUAL_MODE = false
-export const DEFAULT_ADVISORY_BAND_ENABLED = true
+const DEFAULT_ADVISORY_BAND_ENABLED = true
 export const ADVISORY_BAND_RATIO_DEFAULT = 0.85
-export const ADVISORY_SUBJECTS_BOUND = 3
+const ADVISORY_SUBJECTS_BOUND = 3
 const DEFAULT_NOW = (): number => Date.now()
 const FENCE_EVICTION_MARKER = "[ctx-evicted-fence]"
 const FENCE_BLOCK_NOUN = "code block"

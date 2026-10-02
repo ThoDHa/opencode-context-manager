@@ -7738,8 +7738,10 @@ const ADVISORY_PROBE_ESTIMATED_TOKENS = tokensForChars(STANDARD_BUNDLE_CHARS)
 const ADVISORY_PROBE_BAND_START_TOKENS = ADVISORY_BAND_RATIO_DEFAULT * ADVISORY_PROBE_WATERMARK_TOKENS
 const ADVISORY_PROBE_DEFICIT_TOKENS = ADVISORY_PROBE_ESTIMATED_TOKENS - ADVISORY_PROBE_WATERMARK_TOKENS
 const ADVISORY_QUIET_SUBJECT = "/data/advisory-quiet.txt"
+const ADVISORY_OLDEST_SUBJECT = "/data/advisory-oldest.txt"
 const ADVISORY_COLD_SUBJECT = "/data/advisory-cold.txt"
 const ADVISORY_WARM_SUBJECT = "/data/advisory-warm.txt"
+const ADVISORY_NEWEST_SUBJECT = "/data/advisory-newest.txt"
 
 const advisoryExpectationOf = (path: string): Record<string, unknown> => ({
   ratio: ADVISORY_BAND_RATIO_DEFAULT,
@@ -7898,7 +7900,7 @@ test("the advisory stays absent when the estimate sits below the band start or n
   assert.equal(Object.hasOwn(await readStats(disarmedHooks, SESSION_ID), "advisory"), false)
 })
 
-test("manual mode computes the advisory alongside the dry run with the top candidates in eviction order", async () => {
+test("manual mode computes the advisory alongside the dry run with the top candidates in eviction order bounded to three", async () => {
   const hooks = await loadPluginHooksWith({
     manualMode: true,
     watermarkTokens: ADVISORY_PROBE_WATERMARK_TOKENS,
@@ -7906,24 +7908,30 @@ test("manual mode computes the advisory alongside the dry run with the top candi
   await setContextLimit(hooks, SESSION_ID, contextForWatermarkTokens(ADVISORY_PROBE_WATERMARK_TOKENS))
 
   const bundle = buildBundle([
+    [pathToolPart(ADVISORY_OLDEST_SUBJECT, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(2),
     [pathToolPart(ADVISORY_COLD_SUBJECT, MIN_EVICTABLE_BYTES)],
     ...fillerMessages(2),
     [pathToolPart(ADVISORY_WARM_SUBJECT, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(2),
+    [pathToolPart(ADVISORY_NEWEST_SUBJECT, MIN_EVICTABLE_BYTES)],
     ...fillerMessages(),
   ])
   await runTransform(hooks, bundle)
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
   assert.equal(toolPartAt(bundle.messages[3], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(toolPartAt(bundle.messages[6], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(toolPartAt(bundle.messages[9], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
 
   const stats = await readStats(hooks, SESSION_ID)
   assert.ok(stats.dryRun !== undefined)
-  const advisoryEstimateTokens = tokensForChars(2 * MIN_EVICTABLE_BYTES + (2 + RECENT_WINDOW_FILLER_MESSAGES) * FILLER_TEXT_CHARS)
+  const advisoryEstimateTokens = tokensForChars(4 * MIN_EVICTABLE_BYTES + (2 + 2 + 2 + RECENT_WINDOW_FILLER_MESSAGES) * FILLER_TEXT_CHARS)
   assert.deepEqual(stats.advisory, {
     ratio: ADVISORY_BAND_RATIO_DEFAULT,
     bandStartTokens: ADVISORY_PROBE_BAND_START_TOKENS,
     estimatedTokens: advisoryEstimateTokens,
     deficitTokens: advisoryEstimateTokens - ADVISORY_PROBE_WATERMARK_TOKENS,
-    subjects: [ADVISORY_COLD_SUBJECT, ADVISORY_WARM_SUBJECT],
+    subjects: [ADVISORY_OLDEST_SUBJECT, ADVISORY_COLD_SUBJECT, ADVISORY_WARM_SUBJECT],
   })
 })
 
