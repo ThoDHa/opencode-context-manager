@@ -192,13 +192,17 @@ const DEFAULT_METRICS_MIN_LINE_INTERVAL_MS = SECONDS_PER_MINUTE * MS_PER_SECOND
 const METRICS_COALESCING_DISABLED_MS = 0
 const DESCRIBE_TOOL_NAME = "describe"
 const DESCRIBE_TOOL_DESCRIPTION =
-  "Return live metrics for the Context Manager in this session: eviction counters, expired reasoning counts, faults (post-eviction re-references of evicted subjects), session page store occupancy, the effective context limit and its headroom, and the most recent transform run's token estimate; also the newest run's declared omissions (tool evictions, expired reasoning parts, evicted fenced blocks) with the recall reload pointer when one exists, the manual-mode dry run when armed, the newest run's advisory pressure-band preview when the estimate enters the band, the newest run's post-transform composition (tool outputs, text, retained reasoning), the echoed option surface including charsPerToken, the remembered-evicted-subjects bound, and the protected tools and patterns, and the last transform error when one occurred."
+  "Return live metrics for the Context Manager in this session: eviction counters, expired reasoning counts, faults (post-eviction re-references of evicted subjects), session page store occupancy, the effective context limit and its headroom, and the most recent transform run's token estimate; also the newest run's declared omissions (tool evictions, expired reasoning parts, evicted fenced blocks) with the recall reload pointer when one exists, the manual-mode dry run when armed, the newest run's advisory pressure-band preview when the estimate enters the band, the newest run's retention audit over the live tool-output pool when one exists, the newest run's post-transform composition (tool outputs, text, retained reasoning), the echoed option surface including charsPerToken, the remembered-evicted-subjects bound, and the protected tools and patterns, and the last transform error when one occurred."
 const OMISSIONS_REPORT_KEY = "omissions"
 const OMISSIONS_TOOL_EVICTIONS_FIELD = "toolEvictions"
 const OMISSIONS_REASONING_PARTS_FIELD = "reasoningParts"
 const OMISSIONS_FENCE_BLOCKS_FIELD = "fenceBlocks"
 const OMISSIONS_RELOAD_TOOL_FIELD = "reloadTool"
 const OMISSIONS_LINE_LEAD = "standing omissions: "
+const RETENTION_REPORT_KEY = "retention"
+const RETENTION_POOL_FIELD = "pool"
+const RETENTION_REASONS_FIELD = "reasons"
+const RETENTION_FAULT_SHIFT_FIELD = "faultShieldedShiftMessages"
 const OMISSIONS_TOOL_OUTPUTS_LABEL = "tool outputs"
 const OMISSIONS_REASONING_BLOCKS_LABEL = "reasoning blocks"
 const OMISSIONS_FENCED_BLOCKS_LABEL = "fenced blocks"
@@ -447,6 +451,11 @@ type SessionMetrics = {
   // exists, or when the estimate sits below the band start; persisted
   // only through the session checkpoint's optional advisory field.
   lastAdvisory?: AdvisoryResult
+  // The newest run's retention audit (pool size and per-reason protection
+  // counts over the unfiltered candidate pool): run-scoped diagnostic
+  // state for describe and the panel, replaced every run; persisted only
+  // through the session checkpoint's optional retention field.
+  lastRetention?: RetentionBreakdown
   // The newest run's composition (toolPoolBytes, textChars,
   // reasoningInWindowBytes): run-scoped diagnostic state for describe,
   // never persisted, replaced every run.
@@ -509,6 +518,7 @@ type SessionCheckpoint = {
   contextLimitModelKey: number | null | string
   lastRun: LastRunMetrics
   advisory?: AdvisoryResult
+  retention?: RetentionBreakdown
   totals: CumulativeCounters
   pageStore: { entries: number; capacity: number }
   hotSubjects: string[]
@@ -1076,6 +1086,17 @@ type LastOmissions = {
   toolEvictions: number
   reasoningParts: number
   fenceBlocks: number
+}
+
+// The newest run's retention audit, recorded beside the run outcome: the
+// live tool-output pool size with per-reason protection counts over the
+// unfiltered candidate pool. Reasons are diagnostic, not exclusive: an
+// entry matching several counts under each. The fault shift reports the
+// largest sort-key lead the recorded faults bought at classify time.
+type RetentionBreakdown = {
+  pool: number
+  reasons: { inWindow: number; protectedTool: number; patternProtected: number; faultShielded: number; retainedRead: number }
+  faultShieldedShiftMessages: number
 }
 
 // Terminal escape sequences counted for escapeBytes and stripped by
@@ -2213,6 +2234,12 @@ const sessionCheckpointOf = (
   // field absent from the JSON so pre-band readers and round-trip
   // deep-equals see the pre-change shape.
   ...(metrics.lastAdvisory === undefined ? {} : { advisory: metrics.lastAdvisory }),
+  // Same tolerance for the retention audit: a snapshot carrying it renders
+  // the panel's retention row, one without it renders none.
+  // Same absent-when-empty rule as the describe block: a run that scanned
+  // no live outputs leaves the field out of the JSON, so the panel renders
+  // no retention row and round-trip deep-equals see the pre-change shape.
+  ...(metrics.lastRetention === undefined || metrics.lastRetention.pool === 0 ? {} : { retention: metrics.lastRetention }),
   totals: totalsOf(metrics, options.charsPerToken),
   pageStore: { entries: pageStore.size, capacity: options.stashLimit },
   hotSubjects: orderedRenderedSubjectsOf(hotSubjects, options.hintSubjects),
@@ -2440,6 +2467,15 @@ const executeStatsTool = (source: StatsSource, toolContext: unknown): string => 
             [OMISSIONS_RELOAD_TOOL_FIELD]: RECALL_TOOL_NAME,
           },
         }),
+    ...(metrics.lastRetention === undefined || metrics.lastRetention.pool === 0
+      ? {}
+      : {
+          [RETENTION_REPORT_KEY]: {
+            [RETENTION_POOL_FIELD]: metrics.lastRetention.pool,
+            [RETENTION_REASONS_FIELD]: metrics.lastRetention.reasons,
+            [RETENTION_FAULT_SHIFT_FIELD]: metrics.lastRetention.faultShieldedShiftMessages,
+          },
+        }),
     ...(metrics.lastDryRun === undefined
       ? {}
       : {
@@ -2556,6 +2592,35 @@ const evictionCandidatesOf = (messages: MessageBundle[], options: ResolvedOption
     .sort((a, b) => a.sortKey - b.sortKey || b.entry.bytes - a.entry.bytes)
     .map((decorated) => decorated.entry)
   return { appearances, entries, evictable, estimatedTokens: estimateTokens(messages, options.charsPerToken) }
+}
+
+// Retention audit beside the candidates computation: classify every live
+// tool output the evictor could see (candidates.entries, the unfiltered
+// scanToolOutputs pool) against the same predicates the filter chain
+// applies, so the audit cannot disagree with the mechanism it audits.
+// Reasons are not exclusive: an entry matching several counts under each,
+// so the sums read as diagnostic, never as a total. Fault-shielded
+// reports the sort-key shift the recorded faults bought at classify time,
+// the maximum FAULT_PENALTY_MESSAGES bought, not a survival guarantee
+// (pressure still evicts a faulted entry); zero when no entry is faulted.
+// A pool of zero is the caller's absence signal: describe and the panel
+// render no retention surface for a run that scanned no live outputs.
+const retentionBreakdownOf = (candidates: EvictionCandidates, messages: MessageBundle[], options: ResolvedOptions, faultCounts: Map<string, number>): RetentionBreakdown => {
+  const hotFromIndex = hotFromIndexOf(messages, options)
+  let maxFaultShieldedShift = 0
+  const reasons = { inWindow: 0, protectedTool: 0, patternProtected: 0, faultShielded: 0, retainedRead: 0 }
+  for (const entry of candidates.entries) {
+    if (entry.msgIndex >= hotFromIndex) reasons.inWindow += 1
+    else if (entry.lastTouch >= hotFromIndex) reasons.retainedRead += 1
+    if (isProtectedTool(entry.tool, options)) reasons.protectedTool += 1
+    if (isPatternProtected(entry.subjects, options)) reasons.patternProtected += 1
+    const faulted = faultCounts.get(primaryRenderedSubjectOf(entry)) ?? 0
+    if (faulted > 0) {
+      reasons.faultShielded += 1
+      maxFaultShieldedShift = Math.max(maxFaultShieldedShift, faulted * FAULT_PENALTY_MESSAGES)
+    }
+  }
+  return { pool: candidates.entries.length, reasons, faultShieldedShiftMessages: maxFaultShieldedShift }
 }
 
 // The aged read tier (agedReadEvictionMessages): read-family outputs,
@@ -2910,6 +2975,7 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
     reasoningParts: runOutcome.reasoningExpired.parts,
     fenceBlocks: runOutcome.fenceEvicted.blocks,
   }
+  sessionMetrics.lastRetention = retentionBreakdownOf(candidates, messages, options, sessionMetrics.faultCounts)
   storeHint(deps.hintBySession, sessionKey, eviction.hotSubjects, options.hintSubjects, options.hintSessions)
   await recordPageStoreLines(options, deps.metricsBySession, sessionKey, pageStoreEntries)
   await recordMetricsLine(options, sessionMetrics, sessionKey, contextLimit, runOutcome)

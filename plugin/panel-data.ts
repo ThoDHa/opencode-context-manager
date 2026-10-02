@@ -259,6 +259,12 @@ export type PanelAdvisory = {
   subjects: string[]
 }
 
+export type PanelRetention = {
+  pool: number
+  reasons: { inWindow: number; protectedTool: number; patternProtected: number; faultShielded: number; retainedRead: number }
+  faultShieldedShiftMessages: number
+}
+
 export type PanelCheckpoint = {
   ts: string
   session: string
@@ -267,6 +273,7 @@ export type PanelCheckpoint = {
   contextLimitSource: string
   lastRun: { estimatedTokens: number; watermarkTokens: number | null; deficitTokens: number | null }
   advisory?: PanelAdvisory
+  retention?: PanelRetention
   totals: PanelTotals
   pageStore: PanelCheckpointPageStore
   hotSubjects: string[]
@@ -279,6 +286,7 @@ export type SessionPanel = {
   contextLimitSource: string
   lastRun: { estimatedTokens: number; watermarkTokens: number | null; deficitTokens: number | null }
   advisory?: PanelAdvisory
+  retention?: PanelRetention
   totals: PanelTotals
   recalls: number
   recentEvictions: PanelEvictedEntry[]
@@ -602,6 +610,24 @@ const parseSnapshotHotSubjects = (value: unknown): string[] | undefined => {
   return subjects
 }
 
+// Absence tolerated (pre-change snapshots render no retention row);
+// present-but-malformed rejected per house strictness. All five reasons
+// are required finite numbers, mirroring the producer's fixed reason set.
+const parseSnapshotRetention = (value: unknown): PanelRetention | undefined => {
+  if (!isRecord(value)) return undefined
+  if (!isFiniteNumber(value["pool"])) return undefined
+  const rawReasons = value["reasons"]
+  if (!isRecord(rawReasons)) return undefined
+  const reasons = { inWindow: 0, protectedTool: 0, patternProtected: 0, faultShielded: 0, retainedRead: 0 }
+  for (const key of Object.keys(reasons) as Array<keyof typeof reasons>) {
+    const raw = rawReasons[key]
+    if (!isFiniteNumber(raw)) return undefined
+    reasons[key] = raw
+  }
+  if (!isFiniteNumber(value["faultShieldedShiftMessages"])) return undefined
+  return { pool: value["pool"], reasons, faultShieldedShiftMessages: value["faultShieldedShiftMessages"] }
+}
+
 // Absence tolerated (pre-change snapshots render no advisory surface);
 // present-but-malformed rejected per house strictness.
 const parseSnapshotAdvisory = (value: unknown): PanelAdvisory | undefined => {
@@ -644,6 +670,8 @@ export const parseCheckpoint = (raw: string): PanelCheckpoint | undefined => {
   if (hotSubjects === undefined) return undefined
   const advisory = parseSnapshotAdvisory(parsed["advisory"])
   if (advisory === undefined && parsed["advisory"] !== undefined) return undefined
+  const retention = parseSnapshotRetention(parsed["retention"])
+  if (retention === undefined && parsed["retention"] !== undefined) return undefined
   return {
     ts: parsed["ts"],
     session: parsed["session"],
@@ -652,6 +680,7 @@ export const parseCheckpoint = (raw: string): PanelCheckpoint | undefined => {
     contextLimitSource: parsed["contextLimitSource"],
     lastRun,
     ...(advisory === undefined ? {} : { advisory }),
+    ...(retention === undefined ? {} : { retention }),
     totals,
     pageStore,
     hotSubjects,
@@ -711,6 +740,7 @@ export const snapshotSessionPanel = (
     recentEvictions: history?.recentEvictions ?? [],
     manualMode: snapshot.manualMode,
     ...(snapshot.advisory === undefined ? {} : { advisory: snapshot.advisory }),
+    ...(snapshot.retention === undefined ? {} : { retention: snapshot.retention }),
     pageStore: snapshot.pageStore,
     hotSubjects: snapshot.hotSubjects,
     lastTransformAtMs: timestampMsOf(snapshot.ts),
@@ -916,6 +946,20 @@ const lastRunText = (current: SessionPanel): string => {
   return `last run: ${estimate} vs ${watermark} (within watermark)`
 }
 
+const RETENTION_ROW_LABEL = "retention:"
+
+// The retention row: the newest run's live pool with every protection
+// reason counted over it. Reasons are diagnostic (multi-tagged entries
+// count under each), so the counts never read as a total.
+const retentionText = (retention: PanelRetention): string => {
+  const reasons = retention.reasons
+  return (
+    `${RETENTION_ROW_LABEL} pool ${retention.pool}; ` +
+    `${reasons.inWindow} in-window, ${reasons.protectedTool} protected-tool, ${reasons.patternProtected} pattern-protected, ` +
+    `${reasons.faultShielded} fault-shielded (shift ${retention.faultShieldedShiftMessages}), ${reasons.retainedRead} retained-read`
+  )
+}
+
 const countersText = (current: SessionPanel): string =>
   `${COUNTERS_ROW_LABEL} ${current.totals.evictions} evictions (${formatBytes(current.totals.bytesReclaimed)} reclaimed, ${formatTokenCount(current.totals.evictionTokensSaved)} tokens saved), ${current.totals.dedupedUnique} dedup (${formatTokenCount(current.totals.dedupTokensSaved)} tokens saved), ${current.recalls} recalls (${current.totals.recallHits} hits)`
 
@@ -974,6 +1018,7 @@ export const panelRows = (data: PanelData, options: PanelRowsOptions = {}): Pane
   rows.push({ text: lastRunText(current), tone: "normal" })
   if (current.advisory !== undefined) rows.push({ text: advisoryText(current.advisory), tone: "warning" })
   rows.push({ text: countersText(current), tone: "normal" })
+  if (current.retention !== undefined) rows.push({ text: retentionText(current.retention), tone: "info" })
   const newestEviction = current.recentEvictions[0]
   if (newestEviction !== undefined) {
     rows.push({ text: `${LAST_EVICTION_ROW_LABEL} ${evictionText(newestEviction)}`, tone: "info" })

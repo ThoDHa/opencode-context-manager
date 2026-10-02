@@ -1001,6 +1001,48 @@ test("parseCheckpoint rejects a snapshot whose advisory is malformed", () => {
   }
 })
 
+test("parseCheckpoint parses a present retention and the snapshot panel carries it", () => {
+  const rawRetention = {
+    pool: 3,
+    reasons: { inWindow: 1, protectedTool: 1, patternProtected: 0, faultShielded: 0, retainedRead: 1 },
+    faultShieldedShiftMessages: 5,
+  }
+  const snapshot = parseCheckpoint(JSON.stringify(makeSnapshot({ retention: rawRetention })))
+
+  assert.ok(snapshot !== undefined)
+  assert.deepEqual(snapshot.retention, rawRetention)
+  const panel = snapshotSessionPanel(snapshot, [], SESSION_A)
+  assert.deepEqual(panel.retention, rawRetention)
+})
+
+test("parseCheckpoint tolerates a snapshot without retention and rejects a malformed one", () => {
+  const absent = parseCheckpoint(JSON.stringify(makeSnapshot()))
+
+  assert.ok(absent !== undefined)
+  assert.equal(absent.retention, undefined)
+  const panel = snapshotSessionPanel(absent, [], SESSION_A)
+  assert.equal(panel.retention, undefined)
+
+  const rawRetention = {
+    pool: 3,
+    reasons: { inWindow: 1, protectedTool: 1, patternProtected: 0, faultShielded: 0, retainedRead: 1 },
+    faultShieldedShiftMessages: 5,
+  }
+  const malformedRetentions: unknown[] = [
+    "not an object",
+    42,
+    {},
+    { ...rawRetention, pool: "big" },
+    { ...rawRetention, reasons: { ...rawRetention.reasons, retainedRead: null } },
+    { ...rawRetention, reasons: { ...rawRetention.reasons, protectedTool: undefined } },
+    { ...rawRetention, faultShieldedShiftMessages: null },
+  ]
+  for (const retention of malformedRetentions) {
+    const snapshot = parseCheckpoint(JSON.stringify(makeSnapshot({ retention })))
+    assert.equal(snapshot, undefined, `expected rejection for retention ${JSON.stringify(retention)}`)
+  }
+})
+
 test("parseCheckpoint rejects snapshots that are not valid JSON or miss required fields", () => {
   assert.equal(parseCheckpoint("{not json"), undefined)
   assert.equal(parseCheckpoint(JSON.stringify({ session: SESSION_A })), undefined)

@@ -271,6 +271,36 @@ test("panelRows surfaces a log read error as the warning row and omits session d
   ])
 })
 
+test("panelRows renders the retention row between the counters row and the newest-eviction row", () => {
+  const rawRetention = {
+    pool: 3,
+    reasons: { inWindow: 1, protectedTool: 1, patternProtected: 0, faultShielded: 0, retainedRead: 1 },
+    faultShieldedShiftMessages: 5,
+  }
+  const data = {
+    source: "/tmp/metrics.jsonl",
+    activeSession: SESSION_A,
+    current: { ...sessionPanelData([makeLine()], SESSION_A), retention: rawRetention },
+    global: globalTotals([]),
+    error: undefined,
+  }
+
+  const rows = panelRows(data)
+
+  const countersIndex = rows.findIndex((row) => row.text.startsWith("counters:"))
+  const retentionIndex = rows.findIndex((row) => row.text.startsWith("retention:"))
+  const evictedIndex = rows.findIndex((row) => row.text.startsWith("last evicted:"))
+  assert.ok(countersIndex !== -1)
+  assert.ok(retentionIndex !== -1)
+  assert.ok(evictedIndex !== -1)
+  assert.ok(
+    countersIndex < retentionIndex && retentionIndex < evictedIndex,
+    `retention row must sit between the counters and newest-eviction rows: ${JSON.stringify(rows)}`,
+  )
+  assert.equal(rows[retentionIndex].tone, "info")
+  assert.equal(rows[retentionIndex].text, "retention: pool 3; 1 in-window, 1 protected-tool, 0 pattern-protected, 0 fault-shielded (shift 5), 1 retained-read")
+})
+
 test("panelRows renders the staleness sentence as the final row with the transform and metrics ages", () => {
   const checkpoint = parseCheckpoint(JSON.stringify(makeSnapshot()))
   assert.ok(checkpoint !== undefined)

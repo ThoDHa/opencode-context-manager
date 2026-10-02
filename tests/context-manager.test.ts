@@ -7986,6 +7986,120 @@ test("describe renders the advisory block after the dry-run block and before the
   assert.ok(dryRunIndex < advisoryIndex && advisoryIndex < compositionIndex, `advisory must render after dryRun and before composition: ${keys.join(",")}`)
 })
 
+const RETENTION_PROBE_PLAIN_SUBJECT = "/data/retention-plain.txt"
+const RETENTION_PROBE_PATTERN_SUBJECT = "/data/retention-pattern-1.txt"
+const RETENTION_PROBE_WINDOW_SUBJECT = "/data/retention-window.txt"
+const RETENTION_PROBE_RETAINED_SUBJECT = "/data/retention-retained.txt"
+const RETENTION_PROBE_PROTECTED_TOOL = GREP_TOOL
+const RETENTION_PROBE_PROTECTED_PATTERN = "/data/retention-pattern-*.txt"
+const RETENTION_PROBE_SEARCH_PATTERN = "/data/retention-search-*.txt"
+const RETENTION_FAULT_SUBJECT = "/data/retention-faulted.txt"
+const RETENTION_FAULT_SHIFT_MESSAGES = 5
+
+test("describe classifies the newest run's retention pool by every matching reason over the unfiltered candidate entries", async () => {
+  const hooks = await loadPluginHooksWith({
+    protectedTools: [RETENTION_PROBE_PROTECTED_TOOL],
+    protectedPatterns: [RETENTION_PROBE_PROTECTED_PATTERN],
+  })
+  const bundle = buildBundle([
+    [pathToolPart(RETENTION_PROBE_PLAIN_SUBJECT, MIN_EVICTABLE_BYTES)],
+    [pathToolPart(RETENTION_PROBE_PATTERN_SUBJECT, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(2),
+    [completedToolPart(GREP_TOOL, { [PATTERN_INPUT_KEY]: RETENTION_PROBE_SEARCH_PATTERN }, outputOfBytes(MIN_EVICTABLE_BYTES))],
+    [pathToolPart(RETENTION_PROBE_WINDOW_SUBJECT, MIN_EVICTABLE_BYTES)],
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.deepEqual((await readStats(hooks, SESSION_ID)).retention, {
+    pool: 4,
+    reasons: { inWindow: 2, protectedTool: 1, patternProtected: 1, faultShielded: 0, retainedRead: 0 },
+    faultShieldedShiftMessages: 0,
+  })
+})
+
+test("describe pins the retention window tags to distinct geometry: born in the window versus re-touched back into it", async () => {
+  const hooks = await loadPluginHooks()
+  const bundle = buildBundle([
+    [pathToolPart(RETENTION_PROBE_RETAINED_SUBJECT, MIN_EVICTABLE_BYTES)],
+    [pathToolPart(RETENTION_PROBE_RETAINED_SUBJECT, APPEARANCE_ONLY_OUTPUT_BYTES)],
+    ...fillerMessages(2),
+    [pathToolPart(RETENTION_PROBE_WINDOW_SUBJECT, MIN_EVICTABLE_BYTES)],
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.deepEqual((await readStats(hooks, SESSION_ID)).retention, {
+    pool: 2,
+    reasons: { inWindow: 1, protectedTool: 0, patternProtected: 0, faultShielded: 0, retainedRead: 1 },
+    faultShieldedShiftMessages: 0,
+  })
+})
+
+test("a faulted entry carries the fault-shielded tag with its sort-key shift and still lands in evicted under pressure", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+  const firstBundle = buildStandardBundle(SESSION_ID, RETENTION_FAULT_SUBJECT)
+  await runTransform(hooks, firstBundle)
+  assert.ok(toolPartAt(firstBundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+
+  const secondBundle = buildBundle([
+    [textPart(textOfChars(FILLER_TEXT_CHARS))],
+    [pathToolPart(RETENTION_FAULT_SUBJECT, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, secondBundle)
+
+  const stats = await readStats(hooks, SESSION_ID)
+  assert.deepEqual(stats.retention, {
+    pool: 1,
+    reasons: { inWindow: 0, protectedTool: 0, patternProtected: 0, faultShielded: 1, retainedRead: 0 },
+    faultShieldedShiftMessages: RETENTION_FAULT_SHIFT_MESSAGES,
+  })
+  assert.equal((stats.omissions as Record<string, unknown>).toolEvictions, 1)
+  assert.ok(toolPartAt(secondBundle.messages[1], 0).state.output.startsWith(TOMBSTONE_MARKER))
+})
+
+test("describe renders the retention block after the omissions block and omits it when the newest pool is empty", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
+  await runTransform(hooks, omissionsCompositeBundle())
+
+  const keys = Object.keys(await readStats(hooks, SESSION_ID))
+  const omissionsIndex = keys.indexOf("omissions")
+  const retentionIndex = keys.indexOf("retention")
+  const compositionIndex = keys.indexOf("composition")
+  assert.ok(omissionsIndex !== -1)
+  assert.ok(retentionIndex !== -1)
+  assert.ok(compositionIndex !== -1)
+  assert.ok(
+    omissionsIndex < retentionIndex && retentionIndex < compositionIndex,
+    `retention must render after omissions and before composition: ${keys.join(",")}`,
+  )
+
+  const emptyPoolHooks = await loadPluginHooks()
+  await runTransform(emptyPoolHooks, buildBundle([[textPart(textOfChars(FILLER_TEXT_CHARS))], ...fillerMessages()]))
+  assert.equal(Object.hasOwn(await readStats(emptyPoolHooks, SESSION_ID), "retention"), false)
+})
+
+test("live state snapshot carries the newest run's retention breakdown and leaves it absent when the pool empties", async () => {
+  const stateDir = makeLiveStateDir()
+  try {
+    const hooks = await loadPluginHooksWithLiveState(stateDir)
+    await runTransform(hooks, buildStandardBundle(SESSION_ID, LIVE_STATE_QUIET_SUBJECT))
+
+    const snapshot = snapshotBodyOf(stateDir, SESSION_ID).snapshot
+    assert.deepEqual(snapshot.retention, {
+      pool: 1,
+      reasons: { inWindow: 0, protectedTool: 0, patternProtected: 0, faultShielded: 0, retainedRead: 0 },
+      faultShieldedShiftMessages: 0,
+    })
+
+    await runTransform(hooks, buildBundle([[textPart(textOfChars(FILLER_TEXT_CHARS))], ...fillerMessages()]))
+    assert.equal(Object.hasOwn(snapshotBodyOf(stateDir, SESSION_ID).snapshot, "retention"), false)
+  } finally {
+    cleanupMetricsDir(stateDir)
+  }
+})
+
 test("metrics log carries wouldEvict fields whenever the manual-mode dry run is armed, zeroed under the watermark", async () => {
   const metricsDir = makeMetricsDir()
   try {
