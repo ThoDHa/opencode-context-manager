@@ -1232,7 +1232,7 @@ test("transform keeps an unregistered session bundle intact past the legacy defa
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
 })
 
-test("transform skips budget-driven eviction when chat params carry no context limit", async () => {
+test("transform skips context-limit-driven eviction when chat params carry no context limit", async () => {
   const hooks = await loadPluginHooks()
   await setChatParamsWithoutContext(hooks, SESSION_ID)
 
@@ -1242,7 +1242,7 @@ test("transform skips budget-driven eviction when chat params carry no context l
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
 })
 
-test("transform purges errored tool inputs on an unknown-budget run that skips eviction", async () => {
+test("transform purges errored tool inputs on an unknown-limit run that skips eviction", async () => {
   const hooks = await loadPluginHooks()
   await setChatParamsWithoutContext(hooks, SESSION_ID)
 
@@ -1255,7 +1255,7 @@ test("transform purges errored tool inputs on an unknown-budget run that skips e
   assert.equal(inputAt(bundle.messages[0]), PURGE_MARKER)
 })
 
-test("transform delivers a hint on an unknown-budget run that skips eviction", async () => {
+test("transform delivers a hint on an unknown-limit run that skips eviction", async () => {
   const hooks = await loadPluginHooks()
   await setChatParamsWithoutContext(hooks, SESSION_ID)
 
@@ -1291,7 +1291,7 @@ test("transform keeps the captured limit in charge when an explicit defaultConte
   assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_MODEL)
 })
 
-test("transform lets the per model override beat the model reported limit and labels the budget source override", async () => {
+test("transform lets the per model override beat the model reported limit and labels the context-limit source override", async () => {
   const hooks = await loadPluginHooksWith({ modelContextTokens: { [OVERRIDE_MODEL_KEY]: SMALL_CONTEXT_LIMIT } })
   await setChatParamsForModel(hooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID, LARGE_DEFAULT_CONTEXT_TOKENS)
 
@@ -1362,7 +1362,7 @@ test("transform ignores non numeric override entries and falls through to the ex
   assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_DEFAULT)
 })
 
-test("transform ignores infinite override entries and an infinite defaultContextTokens option and falls through to the unknown budget", async () => {
+test("transform ignores infinite override entries and an infinite defaultContextTokens option and falls through to the unknown context limit", async () => {
   const hooks = await loadPluginHooksWith({
     modelContextTokens: { [OVERRIDE_MODEL_KEY]: INFINITE_OVERRIDE_ENTRY },
     defaultContextTokens: INFINITE_DEFAULT_CONTEXT_TOKENS,
@@ -1415,7 +1415,7 @@ test("transform keeps a stored real context limit when a later chat params event
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
 })
 
-test("transform keeps session budgets isolated across repeated transforms with no cross talk", async () => {
+test("transform keeps session context limits isolated across repeated transforms with no cross talk", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, ISOLATION_CONTEXT_LIMIT_A)
   await setContextLimit(hooks, SESSION_ID_B, ISOLATION_CONTEXT_LIMIT_B)
@@ -1430,7 +1430,7 @@ test("transform keeps session budgets isolated across repeated transforms with n
   assert.equal(toolPartAt(sessionB.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
 })
 
-test("transform resets a stored budget captured for one model when a later chat params event names a different model without a limit", async () => {
+test("transform resets a stored context limit captured for one model when a later chat params event names a different model without a limit", async () => {
   const hooks = await loadPluginHooks()
   await setChatParamsForModel(hooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
   await setChatParamsForModel(hooks, SESSION_ID, OTHER_MODEL_PROVIDER, OTHER_MODEL_ID)
@@ -1449,7 +1449,7 @@ test("transform resets a stored budget captured for one model when a later chat 
   })
 })
 
-test("transform retains a stored budget when a later chat params event re-fires the same model without a limit", async () => {
+test("transform retains a stored context limit when a later chat params event re-fires the same model without a limit", async () => {
   const hooks = await loadPluginHooks()
   await setChatParamsForModel(hooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
   await setChatParamsForModel(hooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID)
@@ -1463,7 +1463,7 @@ test("transform retains a stored budget when a later chat params event re-fires 
   assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_MODEL)
 })
 
-test("transform retains a stored identity-less budget when a later chat params event names a different model without a limit", async () => {
+test("transform retains a stored identity-less context limit when a later chat params event names a different model without a limit", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
   await setChatParamsForModel(hooks, SESSION_ID, OTHER_MODEL_PROVIDER, OTHER_MODEL_ID)
@@ -1477,7 +1477,7 @@ test("transform retains a stored identity-less budget when a later chat params e
   assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_MODEL)
 })
 
-test("transform replaces the stored budget when a later chat params event names a different model with its own reported limit", async () => {
+test("transform replaces the stored context limit when a later chat params event names a different model with its own reported limit", async () => {
   const hooks = await loadPluginHooks()
   await setChatParamsForModel(hooks, SESSION_ID, OVERRIDE_MODEL_PROVIDER, OVERRIDE_MODEL_ID, ISOLATION_CONTEXT_LIMIT_A)
   await setChatParamsForModel(hooks, SESSION_ID, OTHER_MODEL_PROVIDER, OTHER_MODEL_ID, ISOLATION_CONTEXT_LIMIT_B)
@@ -2092,13 +2092,13 @@ test("recall lists every older match oldest first when three evictions share one
   )
 })
 
-test("recall returns an error-style miss naming the subject when nothing was stashed for it", async () => {
+test("recall returns an error-style miss naming the subject when nothing was stored for it", async () => {
   const hooks = await loadPluginHooks()
 
   assert.equal(await recallTool(hooks, "/data/never-evicted.txt", SESSION_ID), stashMissFor("/data/never-evicted.txt", STASH_EMPTY_OCCUPANCY))
 })
 
-test("recall appends a populated occupancy line with alphabetical categories and the message range on a miss against a multi tool stash", async () => {
+test("recall appends a populated occupancy line with alphabetical categories and the message range on a miss against a multi-tool session page store", async () => {
   const hooks = await loadPluginHooksWith({ protectedTools: [] })
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -2122,7 +2122,7 @@ test("recall appends a populated occupancy line with alphabetical categories and
   )
 })
 
-test("recall reports the single message bound on a miss whose stashed entries all sit at one message index", async () => {
+test("recall reports the single message bound on a miss whose stored entries all sit at one message index", async () => {
   const hooks = await loadPluginHooksWith({ stashLimit: OCCUPANCY_SLIM_STASH_LIMIT })
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -2141,7 +2141,7 @@ test("recall reports the single message bound on a miss whose stashed entries al
   )
 })
 
-test("recall states the stash holds nothing when the session stash exists but is empty", async () => {
+test("recall states the store holds nothing when the session page store exists but is empty", async () => {
   const hooks = await loadPluginHooksWith({ stashLimit: OCCUPANCY_ZERO_STASH_LIMIT })
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -2202,7 +2202,7 @@ test("recall caps the occupancy category list at five categories with an overflo
   )
 })
 
-test("recall categorizes fence stashed entries under the fence label alongside tool entries", async () => {
+test("recall categorizes fence-stored entries under the fence label alongside tool entries", async () => {
   const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -2224,7 +2224,7 @@ test("recall categorizes fence stashed entries under the fence label alongside t
   )
 })
 
-test("recall evicts the oldest stashed entry when a session stash exceeds the fifty entry bound", async () => {
+test("recall evicts the oldest stored entry when a session page store exceeds the fifty entry bound", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -2246,7 +2246,7 @@ test("recall evicts the oldest stashed entry when a session stash exceeds the fi
   assert.equal(await recallTool(hooks, stashSubjects[STASH_LIMIT], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
 })
 
-test("recall keeps stashes isolated between sessions", async () => {
+test("recall keeps session page stores isolated between sessions", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
   await setContextLimit(hooks, SESSION_ID_B, WATERMARK_PROBE_CONTEXT_LIMIT)
@@ -2270,7 +2270,7 @@ test("recall keeps stashes isolated between sessions", async () => {
   )
 })
 
-test("transform leaves no stash behind when the estimate sits under the watermark", async () => {
+test("transform stores no page when the estimate sits under the watermark", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, contextForWatermarkTokens(tokensForChars(STANDARD_BUNDLE_CHARS) + HEADROOM_TOKENS))
 
@@ -2339,7 +2339,7 @@ test("transform dedups an older identical call with the estimate under the water
   assert.ok(!toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
 })
 
-test("transform never stashes a dedup tombstoned output so recall misses it", async () => {
+test("transform never stores a dedup tombstoned output so recall misses it", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -3248,7 +3248,7 @@ test("transform falls back to the default protected tools when protectedTools is
   assert.equal(toolPartAt(emptyEntryBundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
 })
 
-test("transform never stashes a protected output so recall misses it after an eviction run under pressure", async () => {
+test("transform never stores a protected output so recall misses it after an eviction run under pressure", async () => {
   const hooks = await loadPluginHooksWith({ protectedTools: [GREP_TOOL] })
   await setContextLimit(
     hooks,
@@ -3474,7 +3474,7 @@ const evictStashSession = async (hooks: HookMap, index: number): Promise<void> =
   await runTransform(hooks, stashOverflowSessionBundle(index))
 }
 
-test("recall drops the least recently active session stash when a ninth session stashes an eviction", async () => {
+test("recall drops the least recently active session page store when a ninth session stores an eviction", async () => {
   const hooks = await loadPluginHooks()
   for (let index = 0; index < STASH_SESSION_BOUND; index += 1) await evictStashSession(hooks, index)
 
@@ -3507,7 +3507,7 @@ test("recall drops the least recently active session stash when a ninth session 
   )
 })
 
-test("recall protects a refreshed hot session stash when a ninth session stashes an eviction", async () => {
+test("recall protects a refreshed hot session page store when a ninth session stores an eviction", async () => {
   const hooks = await loadPluginHooks()
   for (let index = 0; index < STASH_SESSION_BOUND; index += 1) await evictStashSession(hooks, index)
 
@@ -3528,7 +3528,7 @@ test("recall protects a refreshed hot session stash when a ninth session stashes
   )
 })
 
-test("recall refreshes a reloading session stash so it survives when a ninth session stashes an eviction", async () => {
+test("recall refreshes a reloading session page store so it survives when a ninth session stores an eviction", async () => {
   const hooks = await loadPluginHooks()
   for (let index = 0; index < STASH_SESSION_BOUND; index += 1) await evictStashSession(hooks, index)
 
@@ -3553,7 +3553,7 @@ test("recall refreshes a reloading session stash so it survives when a ninth ses
   )
 })
 
-test("recall does not refresh a session stash on a miss probe so the probing session drops when a ninth session stashes an eviction", async () => {
+test("recall does not refresh a session page store on a miss probe so the probing session drops when a ninth session stores an eviction", async () => {
   const hooks = await loadPluginHooks()
   for (let index = 0; index < STASH_SESSION_BOUND; index += 1) await evictStashSession(hooks, index)
 
@@ -3681,7 +3681,7 @@ test("transform refresh matches a huge multi line subject on its raw value despi
 const COLLISION_SUBJECT_PATH = "/data/collide.txt"
 const COLLISION_ENCODING_KEY = "encoding"
 
-test("recall keeps both same message same subject evictions reloadable instead of overwriting the first stash", async () => {
+test("recall keeps both same message same subject evictions reloadable instead of overwriting the first stored page", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -3885,7 +3885,7 @@ const metricsRotationPanelSeedLine = (session: string = SESSION_ID): Record<stri
   },
 })
 
-test("describe reports zeroed counters unknown budget and empty stash for a session without activity", async () => {
+test("describe reports zeroed counters unknown context limit and empty page store for a session without activity", async () => {
   const hooks = await loadPluginHooks()
 
   const stats = await readStats(hooks, SESSION_ID)
@@ -3931,7 +3931,7 @@ test("describe reports zeroed counters unknown budget and empty stash for a sess
   assert.equal(Object.hasOwn(stats, "logWriteError"), false)
 })
 
-test("describe reports the explicit defaultContextTokens option as the budget when no limit was captured", async () => {
+test("describe reports the explicit defaultContextTokens option as the context limit when no limit was captured", async () => {
   const hooks = await loadPluginHooksWith({ defaultContextTokens: EXPLICIT_DEFAULT_CONTEXT_TOKENS })
 
   const stats = await readStats(hooks, SESSION_ID)
@@ -3964,7 +3964,7 @@ test("describe reports headroomTokens as null when the context limit is unknown"
   assert.equal(stats.headroomTokens, null)
 })
 
-test("describe records an unknown budget last run with null watermark and deficit after a skip run", async () => {
+test("describe records an unknown context limit last run with null watermark and deficit after a skip run", async () => {
   const hooks = await loadPluginHooks()
 
   const bundle = buildStandardBundle(SESSION_ID, STATS_SKIP_RUN_SUBJECT)
@@ -3980,7 +3980,7 @@ test("describe records an unknown budget last run with null watermark and defici
   })
 })
 
-test("describe counts the eviction reclaimed bytes stash entry and last run deficit after one eviction run", async () => {
+test("describe counts the eviction reclaimed bytes stored page and last run deficit after one eviction run", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
 
@@ -4036,7 +4036,7 @@ test("describe scales the eviction token-savings estimate by the resolved charsP
   assert.equal(counters.evictionTokensSaved, Math.ceil(MIN_EVICTABLE_BYTES / SAVINGS_CUSTOM_CHARS_PER_TOKEN))
 })
 
-test("describe counts stash hits and misses from recall and leaves invalid subject arguments uncounted", async () => {
+test("describe counts recall hits and misses from recall and leaves invalid subject arguments uncounted", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -4318,7 +4318,32 @@ test("describe credits the dedup token-savings estimate once per pair and holds 
   assert.equal(counters.dedupTokensSaved, tokensForChars(DEDUP_SAVINGS_PAIR_COUNT * THREE_ENTRY_OUTPUT_BYTES))
 })
 
-test("describe counts stash drops when a single run evicts fifty one entries past the stash bound", async () => {
+// Characterization pin (not red-first: it pins the shipped behavior): one
+// run superseding two copies of the same pair walks newest first, so the
+// newer superseded copy's key/byte pair is admitted first and credits its
+// bytes once; the older copy re-reports the already-admitted key and adds
+// nothing, while deduped counts both tombstones.
+test("describe credits one pair's first-admitted superseded bytes when a single run supersedes two copies of it", async () => {
+  const hooks = await loadPluginHooks()
+  const multiCopyParts = (): MessagePart[][] => [
+    [pathToolPart(DEDUP_PATH, 4000)],
+    ...fillerMessages(2),
+    [pathToolPart(DEDUP_PATH, 3000)],
+    ...fillerMessages(2),
+    [pathToolPart(DEDUP_PATH, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(2),
+  ]
+
+  await runTransform(hooks, buildBundle(multiCopyParts()))
+
+  const counters = countersOf(await readStats(hooks, SESSION_ID))
+  assert.equal(counters.deduped, 2)
+  assert.equal(counters.dedupedUnique, 1)
+  assert.equal(counters.dedupedBytesUnique, 3000)
+  assert.equal(counters.dedupTokensSaved, tokensForChars(3000))
+})
+
+test("describe counts drops when a single run evicts fifty one entries past the page bound", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -4338,7 +4363,7 @@ test("describe counts stash drops when a single run evicts fifty one entries pas
   assert.deepEqual(stats.pageStore, { entries: STASH_LIMIT, capacity: STASH_LIMIT })
 })
 
-test("transform drops nothing from a session stash holding exactly the fifty entry bound", async () => {
+test("transform drops nothing from a session page store holding exactly the fifty entry bound", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -4355,7 +4380,7 @@ test("transform drops nothing from a session stash holding exactly the fifty ent
   assert.equal(await recallTool(hooks, subjects[0], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
 })
 
-test("recall drops the earliest runs' entries first when later runs push a session stash past the fifty entry bound", async () => {
+test("recall drops the earliest runs' entries first when later runs push a session page store past the fifty entry bound", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -4450,7 +4475,7 @@ test("metrics log appends one eventful jsonl line with expected fields and nothi
   }
 })
 
-test("metrics log records an unknown budget skip state with null watermark on an eventful run without a captured limit", async () => {
+test("metrics log records an unknown context limit skip state with null watermark on an eventful run without a captured limit", async () => {
   const metricsDir = makeMetricsDir()
   try {
     const hooks = await loadPluginHooksWithMetricsLog(metricsLogPathIn(metricsDir))
@@ -4533,7 +4558,7 @@ test("metrics log records the override source label fields for a per model map d
   }
 })
 
-test("metrics log records stash reads since the last line on the next transform after a reload", async () => {
+test("metrics log records recalls since the last line on the next transform after a reload", async () => {
   const metricsDir = makeMetricsDir()
   try {
     const hooks = await loadPluginHooksWithMetricsLog(metricsLogPathIn(metricsDir))
@@ -4649,7 +4674,7 @@ test("describe drops the least recently active session metrics when a ninth sess
   assert.equal(countersOf(await readStats(hooks, metricsSessionId(METRICS_SESSION_OVERFLOW_COUNT - 1))).evictions, 1)
 })
 
-test("recall leaves live session metrics untouched when a never-transformed session probes a stash miss at the session bound", async () => {
+test("recall leaves live session metrics untouched when a never-transformed session probes a store miss at the session bound", async () => {
   const hooks = await loadPluginHooks()
   for (let index = 0; index < METRICS_SESSION_BOUND; index += 1) await storeMetricsSession(hooks, index)
 
@@ -4684,7 +4709,7 @@ test("describe leaves live session metrics untouched when a never-transformed se
   assert.equal(countersOf(await readStats(hooks, metricsSessionId(METRICS_SESSION_BOUND - 1))).evictions, 1)
 })
 
-test("describe does not refresh a session stash so a stats-only probe leaves it exposed when a ninth session stashes an eviction", async () => {
+test("describe does not refresh a session page store so a stats-only probe leaves it exposed when a ninth session stores an eviction", async () => {
   const hooks = await loadPluginHooks()
   for (let index = 0; index < STASH_SESSION_BOUND; index += 1) await evictStashSession(hooks, index)
 
@@ -4979,7 +5004,7 @@ const assertValidTimestamp = (ts: unknown): void => {
   assert.ok(Number.isNaN(new Date(ts as string).getTime()) === false)
 }
 
-test("live state snapshot is written on a quiet run with the exact schema budget counters stash occupancy and hot subjects", async () => {
+test("live state snapshot is written on a quiet run with the exact schema counters page-store occupancy and hot subjects", async () => {
   const stateDir = makeLiveStateDir()
   try {
     const hooks = await loadPluginHooksWithLiveState(stateDir)
@@ -5032,7 +5057,7 @@ test("live state snapshots keep one file per session in the state directory", as
   }
 })
 
-test("live state snapshot carries the captured budget source manual mode and the armed watermark on a manual run", async () => {
+test("live state snapshot carries the captured context limit source manual mode and the armed watermark on a manual run", async () => {
   const stateDir = makeLiveStateDir()
   try {
     const hooks = await loadPluginHooksWithLiveState(stateDir, { manualMode: true })
@@ -5064,7 +5089,7 @@ test("live state snapshot carries the captured budget source manual mode and the
   }
 })
 
-test("live state snapshot records eviction totals stash occupancy and an empty hot list after a pressured run", async () => {
+test("live state snapshot records eviction totals page-store occupancy and an empty hot list after a pressured run", async () => {
   const stateDir = makeLiveStateDir()
   try {
     const hooks = await loadPluginHooksWithLiveState(stateDir)
@@ -6144,7 +6169,7 @@ test("transform evicts an over threshold fenced block from an old user message i
   )
 })
 
-test("recall returns the exact stashed fence block text after a fence eviction", async () => {
+test("recall returns the exact stored fence block text after a fence eviction", async () => {
   const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
   const block = fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG))
   await runTransform(hooks, userFenceBundle(`${FENCE_PROSE_BEFORE}\n${block}\n${FENCE_PROSE_AFTER}`))
@@ -6219,7 +6244,7 @@ test("transform truncates a long fence first line in the tombstone and reload po
   assert.equal(await recallTool(hooks, truncated, SESSION_ID), `${block}\n`)
 })
 
-test("recall evicts the oldest stashed entry when fence evictions push a session stash past the fifty entry bound", async () => {
+test("recall evicts the oldest stored entry when fence evictions push a session page store past the fifty entry bound", async () => {
   const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
   const fenceCount = STASH_OVERFLOW_COUNT
   const blocks = Array.from({ length: fenceCount }, (_, index) =>
@@ -6248,7 +6273,7 @@ test("recall evicts the oldest stashed entry when fence evictions push a session
   assert.equal(await recallTool(hooks, fenceFirstLineOf("block1"), SESSION_ID), `${blocks[1]}\n`)
 })
 
-test("transform lowers the estimate with fence bytes before the budget decision and lands the block in the shared bounded stash", async () => {
+test("transform lowers the estimate with fence bytes before the context-limit decision and lands the block in the shared bounded session page store", async () => {
   const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
   const padLine = "p".repeat(FENCE_COMPOSED_PAD_CHARS)
   const contentLines = [fenceFirstLineOf(FENCE_LINE_TAG), ...Array.from({ length: FENCE_OVER_LINES - 1 }, () => padLine)]
@@ -6312,7 +6337,7 @@ test("transform keeps fenced blocks in non user messages untouched while userFen
   assert.equal(textAt(bundle, 0), text)
 })
 
-test("recall keeps two same subject fence evictions in one part reloadable instead of overwriting the first stash", async () => {
+test("recall keeps two same subject fence evictions in one part reloadable instead of overwriting the first stored page", async () => {
   const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
   const blockA = fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG))
   const blockB = fenceBlockText(FENCE_LANGUAGE_JS, fenceContentLines(FENCE_OVER_LINES + 1, FENCE_LINE_TAG))
@@ -6526,7 +6551,7 @@ test("metrics log with metricsMinLineIntervalMs zero keeps writing one line per 
   }
 })
 
-test("metrics log keeps stash read accounting correct across a suppressed then flushed sequence", async () => {
+test("metrics log keeps recall accounting correct across a suppressed then flushed sequence", async () => {
   const metricsDir = makeMetricsDir()
   try {
     const metricsPath = metricsLogPathIn(metricsDir)
@@ -6556,7 +6581,7 @@ test("metrics log keeps stash read accounting correct across a suppressed then f
   }
 })
 
-test("metrics log flushes a coalesced session when the budget source changes mid sitting", async () => {
+test("metrics log flushes a coalesced session when the context-limit source changes mid sitting", async () => {
   const metricsDir = makeMetricsDir()
   try {
     const metricsPath = metricsLogPathIn(metricsDir)
@@ -6638,7 +6663,7 @@ test("transform evicts a four backtick fence holding three backtick lines as con
   assert.equal(await recallTool(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), `${block}\n`)
 })
 
-test("transform evicts a fence indented up to three spaces and stashes its exact indented text", async () => {
+test("transform evicts a fence indented up to three spaces and stores its exact indented text", async () => {
   const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
   const block = `${FENCE_INDENT_THREE_SPACES}${FENCE_TICKS}${FENCE_LANGUAGE_TS}\n${fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG).join("\n")}\n${FENCE_INDENT_TWO_SPACES}${FENCE_TICKS}`
   const text = `${FENCE_PROSE_BEFORE}\n${block}\n${FENCE_PROSE_AFTER}`
@@ -6726,7 +6751,7 @@ test("transform keeps an explicit defaultContextTokens from driving eviction whi
   assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
 })
 
-test("transform keeps a per model override budget from driving eviction while manualMode is enabled", async () => {
+test("transform keeps a per model override limit from driving eviction while manualMode is enabled", async () => {
   const hooks = await loadPluginHooksWith({
     manualMode: true,
     modelContextTokens: { [OVERRIDE_MODEL_KEY]: SMALL_CONTEXT_LIMIT },
@@ -6742,7 +6767,7 @@ test("transform keeps a per model override budget from driving eviction while ma
   assert.equal(stats.contextLimitSource, CONTEXT_TOKENS_SOURCE_OVERRIDE)
 })
 
-test("transform under manualMode with an unknown budget is byte-identical to the unknown-budget stand-down", async () => {
+test("transform under manualMode with an unknown context limit is byte-identical to the unknown-limit stand-down", async () => {
   const manualHooks = await loadPluginHooksWith({ manualMode: true })
   const standDownHooks = await loadPluginHooks()
 
@@ -6754,7 +6779,7 @@ test("transform under manualMode with an unknown budget is byte-identical to the
   assert.deepEqual(manualBundle, standDownBundle)
 })
 
-test("transform under manualMode with a captured limit is byte-identical to the unknown-budget stand-down", async () => {
+test("transform under manualMode with a captured limit is byte-identical to the unknown-limit stand-down", async () => {
   const manualHooks = await loadPluginHooksWith({ manualMode: true })
   await setContextLimit(manualHooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
   const standDownHooks = await loadPluginHooks()
@@ -6782,7 +6807,7 @@ test("transform behaves byte-identically with manualMode false configured and wi
   assert.ok(toolPartAt(defaultBundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
 })
 
-test("the compacting hook appends hot subjects and the stash note for a session with recorded evictions", async () => {
+test("the compacting hook appends hot subjects and the store note for a session with recorded evictions", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
   await runTransform(hooks, buildStandardBundle(SESSION_ID, HINT_RENDERED_SUBJECT))
@@ -6847,7 +6872,7 @@ test("the compaction block respects the subject bound", async () => {
   assert.equal(listedSubjects.length, COMPACTION_SUBJECT_BOUND)
 })
 
-test("the compacting hook attaches nothing when hintSubjects is 0 even with a populated stash", async () => {
+test("the compacting hook attaches nothing when hintSubjects is 0 even with a populated session page store", async () => {
   const hooks = await loadPluginHooksWith({ hintSubjects: 0 })
   await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
   await runTransform(hooks, buildStandardBundle(SESSION_ID, HINT_RENDERED_SUBJECT))
@@ -6858,7 +6883,7 @@ test("the compacting hook attaches nothing when hintSubjects is 0 even with a po
   assert.equal(output.context.length, 0)
 })
 
-test("the compacting hook attaches only the stash note when the session remembers no evicted subjects but holds stashed outputs", async () => {
+test("the compacting hook attaches only the store note when the session remembers no evicted subjects but holds stored outputs", async () => {
   const hooks = await loadPluginHooksWith({ rememberedEvictedSubjects: 0 })
   await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
   await runTransform(hooks, buildStandardBundle(SESSION_ID, HINT_RENDERED_SUBJECT))
@@ -6871,7 +6896,7 @@ test("the compacting hook attaches only the stash note when the session remember
   assert.ok(output.context[0].includes(RECALL_TOOL_NAME))
 })
 
-test("the stash note dedupes repeated subjects and caps at the subject bound, newest first", async () => {
+test("the store note dedupes repeated subjects and caps at the subject bound, newest first", async () => {
   const hooks = await loadPluginHooksWith({ hintSubjects: COMPACTION_SUBJECT_BOUND })
   await setContextLimit(hooks, SESSION_ID, contextForDeficit(COMPACTION_STASH_BUNDLE_CHARS, tokensForChars(THREE_ENTRY_OUTPUT_BYTES) * 2 + 1))
 
@@ -7149,7 +7174,7 @@ test("a frozen hygiene output object degrades through the fault boundary with th
 
 const agedBundle = (): StrictBundle => buildBundle([[pathToolPart(AGED_READ_PATH, MIN_EVICTABLE_BYTES)], ...fillerMessages(AGED_FILLER_COUNT)])
 
-test("an aged read older than the threshold evicts with no budget captured and credits the counters", async () => {
+test("an aged read older than the threshold evicts with no context limit captured and credits the counters", async () => {
   const hooks = await loadPluginHooksWith({ agedReadEvictionMessages: AGED_EVICTION_MESSAGES })
 
   const bundle = agedBundle()
@@ -7527,7 +7552,7 @@ test("manual mode with watermarkTokens reports a dry run without tombstoning any
   assert.equal(subjects.length, DRY_RUN_EXPECTED_COUNT)
 })
 
-test("manual mode with watermarkTokens and no captured budget still reports the dry run", async () => {
+test("manual mode with watermarkTokens and no captured context limit still reports the dry run", async () => {
   const hooks = await loadPluginHooksWith({ manualMode: true, watermarkTokens: DRY_RUN_WATERMARK_TOKENS })
 
   const bundle = buildDryRunBundle()
@@ -7722,7 +7747,7 @@ test("chat system transform delivers a hint under pressure while manualMode is e
   assert.deepEqual(hintBlocksIn(await runSystemTransform(hooks, SESSION_ID)), [hintLineFor([MANUAL_HINT_SUBJECT])])
 })
 
-test("transform keeps fence eviction the stash and recall active while manualMode is enabled", async () => {
+test("transform keeps fence eviction the page stores and recall active while manualMode is enabled", async () => {
   const hooks = await loadPluginHooksWith({ manualMode: true, userFenceEviction: { enabled: true } })
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -7737,7 +7762,7 @@ test("transform keeps fence eviction the stash and recall active while manualMod
   assert.equal(await recallTool(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID), `${block}\n`)
 })
 
-test("describe reports the manual state the captured budget and the armed watermark last run", async () => {
+test("describe reports the manual state the captured context limit and the armed watermark last run", async () => {
   const hooks = await loadPluginHooksWith({ manualMode: true })
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -7755,7 +7780,7 @@ test("describe reports the manual state the captured budget and the armed waterm
   })
 })
 
-test("describe keeps a null watermark and deficit for a manual session with no budget and no watermarkTokens", async () => {
+test("describe keeps a null watermark and deficit for a manual session with no context limit and no watermarkTokens", async () => {
   const hooks = await loadPluginHooksWith({ manualMode: true })
 
   const bundle = buildStandardBundle(SESSION_ID, MANUAL_UNWATERMARKED_SUBJECT)
@@ -7799,13 +7824,13 @@ const SUBSTRING_FLOOR_ZERO = 0
 const SUBSTRING_FLOOR_INVALID = -1
 const STASH_LIMIT_OVERRIDE_SUBJECT_PREFIX = "/data/slim-stash"
 
-test("describe reports the default stash capacity of fifty entries when stashLimit is unset", async () => {
+test("describe reports the default page-store capacity of fifty entries when stashLimit is unset", async () => {
   const stats = await readStats(await loadPluginHooks(), SESSION_ID)
 
   assert.deepEqual(stats.pageStore, { entries: 0, capacity: STASH_LIMIT })
 })
 
-test("recall applies a custom stashLimit dropping the oldest stashed entry past the bound", async () => {
+test("recall applies a custom stashLimit dropping the oldest stored entry past the bound", async () => {
   const hooks = await loadPluginHooksWith({ stashLimit: STASH_LIMIT_OVERRIDE })
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -7831,7 +7856,7 @@ test("recall applies a custom stashLimit dropping the oldest stashed entry past 
   assert.equal(await recallTool(hooks, subjects[2], SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
 })
 
-test("describe keeps the default stash capacity when stashLimit is invalid", async () => {
+test("describe keeps the default page-store capacity when stashLimit is invalid", async () => {
   for (const invalidLimit of STASH_LIMIT_INVALID_VALUES) {
     const hooks = await loadPluginHooksWith({ stashLimit: invalidLimit })
     const stats = await readStats(hooks, SESSION_ID)
@@ -7840,7 +7865,7 @@ test("describe keeps the default stash capacity when stashLimit is invalid", asy
   }
 })
 
-test("recall drops the least recently active session stash when the stashSessions bound is exceeded", async () => {
+test("recall drops the least recently active session page store when the stashSessions bound is exceeded", async () => {
   const hooks = await loadPluginHooksWith({ stashSessions: SESSION_BOUND_OVERRIDE })
   for (let index = 0; index < SESSION_BOUND_OVERRIDE; index += 1) await evictStashSession(hooks, index)
 
@@ -7860,7 +7885,7 @@ test("recall drops the least recently active session stash when the stashSession
   )
 })
 
-test("recall keeps early session stashes when an invalid stashSessions falls back to the default bound", async () => {
+test("recall keeps early session page stores when an invalid stashSessions falls back to the default bound", async () => {
   const hooks = await loadPluginHooksWith({ stashSessions: SESSION_BOUND_INVALID_ZERO })
   for (let index = 0; index < STASH_SESSION_OVERFLOW_COUNT; index += 1) await evictStashSession(hooks, index)
 
@@ -8417,7 +8442,7 @@ test("a pre-rename record is rejected by the seeder so the session restarts at z
   }
 })
 
-test("a quiet post restart run writes no metrics line because seeded stash reads are logged through", async () => {
+test("a quiet post restart run writes no metrics line because seeded recalls are logged through", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
   try {
@@ -8517,7 +8542,7 @@ test("resumed sessions seed reasoning counters only from their own persisted rec
   }
 })
 
-test("resumed session resolves the budget persisted in its snapshot and logs it instead of null unknown", async () => {
+test("resumed session resolves the context limit persisted in its checkpoint and logs it instead of null unknown", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
   try {
@@ -8542,7 +8567,7 @@ test("resumed session resolves the budget persisted in its snapshot and logs it 
   }
 })
 
-test("a live chat.params capture overrides the budget rehydrated from the snapshot", async () => {
+test("a live chat.params capture overrides the context limit rehydrated from the checkpoint", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
   try {
@@ -8565,7 +8590,7 @@ test("a live chat.params capture overrides the budget rehydrated from the snapsh
   }
 })
 
-test("a mid sitting model change without a limit invalidates the rehydrated budget and stands eviction down", async () => {
+test("a mid sitting model change without a limit invalidates the rehydrated context limit and stands eviction down", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
   try {
@@ -8597,7 +8622,7 @@ test("a mid sitting model change without a limit invalidates the rehydrated budg
   }
 })
 
-test("a model change across a restart suppresses the persisted budget instead of refilling it", async () => {
+test("a model change across a restart suppresses the persisted context limit instead of refilling it", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
   try {
@@ -8623,7 +8648,7 @@ test("a model change across a restart suppresses the persisted budget instead of
   }
 })
 
-test("a same model no limit chat params event keeps the rehydrated budget resolved", async () => {
+test("a same model no limit chat params event keeps the rehydrated context limit resolved", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
   try {
@@ -8646,7 +8671,7 @@ test("a same model no limit chat params event keeps the rehydrated budget resolv
   }
 })
 
-test("a model change across a restart suppresses a budget seeded from the metrics log tail", async () => {
+test("a model change across a restart suppresses a context limit seeded from the metrics log tail", async () => {
   const metricsDir = makeMetricsDir()
   try {
     const metricsPath = metricsLogPathIn(metricsDir)
@@ -8673,7 +8698,7 @@ test("a model change across a restart suppresses a budget seeded from the metric
   }
 })
 
-test("a removed model override suppresses the persisted override budget across a restart", async () => {
+test("a removed model override suppresses the persisted override limit across a restart", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
   try {
@@ -8708,7 +8733,7 @@ test("a removed model override suppresses the persisted override budget across a
   }
 })
 
-test("a removed defaultContextTokens option suppresses the persisted default budget across a restart", async () => {
+test("a removed defaultContextTokens option suppresses the persisted default limit across a restart", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
   try {
@@ -8765,7 +8790,7 @@ test("a hostile model key in the persisted record rejects the whole seed", async
   }
 })
 
-test("describe resolves the rehydrated budget once the session entry is hydrated", async () => {
+test("describe resolves the rehydrated context limit once the session entry is hydrated", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
   try {
@@ -8786,7 +8811,7 @@ test("describe resolves the rehydrated budget once the session entry is hydrated
   }
 })
 
-test("eviction engages on a resumed session whose budget rehydrated where a fresh process stood down", async () => {
+test("eviction engages on a resumed session whose context limit rehydrated where a fresh process stood down", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
   const freshMetricsDir = makeMetricsDir()
@@ -8812,7 +8837,7 @@ test("eviction engages on a resumed session whose budget rehydrated where a fres
   }
 })
 
-test("a snapshot predating budget persistence seeds counters and leaves the budget unknown", async () => {
+test("a checkpoint predating context-limit persistence seeds counters and leaves the context limit unknown", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
   try {
@@ -8836,7 +8861,7 @@ test("a snapshot predating budget persistence seeds counters and leaves the budg
   }
 })
 
-test("a snapshot whose budget fields are invalid rejects the whole record and the session starts zeroed", async () => {
+test("a checkpoint whose context-limit fields are invalid rejects the whole record and the session starts zeroed", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
   try {
@@ -8968,7 +8993,7 @@ test("metrics-store bound eviction of one sibling leaves the other's reasoning c
   }
 })
 
-test("a stash miss issued while the session's first hydration is in flight counts against the seeded entry", async () => {
+test("a store miss issued while the session's first hydration is in flight counts against the seeded entry", async () => {
   const metricsDir = makeMetricsDir()
   const stateDir = makeLiveStateDir()
   try {
@@ -9559,7 +9584,7 @@ test("a page store hit fault-protects the reading session like an in-session rel
   }
 })
 
-test("an in-session stash hit keeps precedence over the page store and stays byte-identical", async () => {
+test("a session page store hit keeps precedence over the page store and stays byte-identical", async () => {
   const pagesDir = makeMetricsDir()
   try {
     const storePath = pageStorePathIn(pagesDir)
