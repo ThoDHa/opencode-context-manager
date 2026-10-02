@@ -136,6 +136,8 @@ const STASH_OCCUPANCY_SUBJECT_LABEL = "subject"
 const STASH_OCCUPANCY_SUBJECTS_LABEL = "subjects"
 const STASH_OCCUPANCY_CATEGORY_SEPARATOR = ", "
 const STASH_OCCUPANCY_OVERFLOW_LABEL = "more"
+const STASH_OCCUPANCY_RANGE_OLDEST_LABEL = "oldest"
+const STASH_OCCUPANCY_RANGE_NEWEST_LABEL = "newest"
 const MAX_OCCUPANCY_CATEGORIES = 5
 const STASH_EMPTY_OCCUPANCY = `${STASH_MARKER} ${STASH_OCCUPANCY_LEAD} ${STASH_OCCUPANCY_EMPTY_TAIL}.`
 const OCCUPANCY_MISS_SUBJECT = "/data/occupancy-miss.txt"
@@ -565,7 +567,6 @@ const stashMissFor = (subject: string, occupancy: string): string =>
 type OccupancyEntryShape = { tool: string; subject: string; msgIndex: number }
 
 const stashOccupancyLineFor = (entries: OccupancyEntryShape[]): string => {
-  if (entries.length === 0) return STASH_EMPTY_OCCUPANCY
   const categoryCounts = new Map<string, number>()
   let oldest = entries[0].msgIndex
   let newest = entries[0].msgIndex
@@ -583,7 +584,7 @@ const stashOccupancyLineFor = (entries: OccupancyEntryShape[]): string => {
   const bounds =
     entries.length === 1
       ? `${STASH_MESSAGE_LABEL} ${oldest}`
-      : `oldest ${STASH_MESSAGE_LABEL} ${oldest}, newest ${STASH_MESSAGE_LABEL} ${newest}`
+      : `${STASH_OCCUPANCY_RANGE_OLDEST_LABEL} ${STASH_MESSAGE_LABEL} ${oldest}, ${STASH_OCCUPANCY_RANGE_NEWEST_LABEL} ${STASH_MESSAGE_LABEL} ${newest}`
   const subjectCount = new Set(entries.map((entry) => entry.subject)).size
   return `${STASH_MARKER} ${STASH_OCCUPANCY_LEAD} ${entries.length} ${
     entries.length === 1 ? STASH_OCCUPANCY_ENTRY_LABEL : STASH_OCCUPANCY_ENTRIES_LABEL
