@@ -36,11 +36,13 @@ import {
   ESTIMATED_TOKENS,
   EVICTED_BYTES,
   EVICTED_MESSAGES_AGO,
+  FORMATTER_NOW_MS,
   HUGE_RECLAIMED_BYTES,
   LOG_LINE_ONLY_EVICTIONS,
   LOG_LINE_TS_STALE,
   MODEL_CONTEXT_LIMIT_SOURCE,
   OVERRIDE_CONTEXT_LIMIT_SOURCE,
+  ONE_MINUTE_MS,
   SECOND_LINE_ESTIMATED,
   SESSION_A,
   SESSION_B,
@@ -53,6 +55,7 @@ import {
   SNAPSHOT_PAGE_STORE_ENTRIES,
   SNAPSHOT_SUFFIX,
   SNAPSHOT_TS,
+  STALENESS_NOW_MS,
   TOTALS_BYTES,
   TOTALS_DEDUPED_UNIQUE,
   TOTALS_EVICTIONS,
@@ -103,8 +106,7 @@ const DEFAULT_CONTEXT_LIMIT_SOURCE = "default"
 
 const LOG_LINE_TS_NEWER = "2026-09-18T10:00:00.000Z"
 const SESSION_A_LOG_LINE_COUNT = 1
-const STALENESS_NOW_MS = Date.parse("2026-10-02T12:00:00.000Z")
-const ONE_MINUTE_MS = 60_000
+const MALFORMED_SNAPSHOT_TS = "not-a-timestamp"
 const ONE_HOUR_MS = 60 * ONE_MINUTE_MS
 const ONE_DAY_MS = 24 * ONE_HOUR_MS
 
@@ -857,17 +859,17 @@ test("formatBytes renders sub-kilobyte counts as-is and larger sizes in kB, MB, 
 })
 
 test("formatAgeText renders just now under a minute and singular and plural minutes, hours, and days at the threshold boundaries", () => {
-  assert.equal(formatAgeText(STALENESS_NOW_MS, STALENESS_NOW_MS), "just now")
-  assert.equal(formatAgeText(STALENESS_NOW_MS, STALENESS_NOW_MS - (ONE_MINUTE_MS - 1)), "just now")
-  assert.equal(formatAgeText(STALENESS_NOW_MS, STALENESS_NOW_MS - ONE_MINUTE_MS), "1 minute ago")
-  assert.equal(formatAgeText(STALENESS_NOW_MS, STALENESS_NOW_MS - 2 * ONE_MINUTE_MS), "2 minutes ago")
-  assert.equal(formatAgeText(STALENESS_NOW_MS, STALENESS_NOW_MS - (ONE_HOUR_MS - 1)), "59 minutes ago")
-  assert.equal(formatAgeText(STALENESS_NOW_MS, STALENESS_NOW_MS - ONE_HOUR_MS), "1 hour ago")
-  assert.equal(formatAgeText(STALENESS_NOW_MS, STALENESS_NOW_MS - 2 * ONE_HOUR_MS), "2 hours ago")
-  assert.equal(formatAgeText(STALENESS_NOW_MS, STALENESS_NOW_MS - (ONE_DAY_MS - 1)), "23 hours ago")
-  assert.equal(formatAgeText(STALENESS_NOW_MS, STALENESS_NOW_MS - ONE_DAY_MS), "1 day ago")
-  assert.equal(formatAgeText(STALENESS_NOW_MS, STALENESS_NOW_MS - 2 * ONE_DAY_MS), "2 days ago")
-  assert.equal(formatAgeText(STALENESS_NOW_MS, STALENESS_NOW_MS + ONE_MINUTE_MS), "just now")
+  assert.equal(formatAgeText(FORMATTER_NOW_MS, FORMATTER_NOW_MS), "just now")
+  assert.equal(formatAgeText(FORMATTER_NOW_MS, FORMATTER_NOW_MS - (ONE_MINUTE_MS - 1)), "just now")
+  assert.equal(formatAgeText(FORMATTER_NOW_MS, FORMATTER_NOW_MS - ONE_MINUTE_MS), "1 minute ago")
+  assert.equal(formatAgeText(FORMATTER_NOW_MS, FORMATTER_NOW_MS - 2 * ONE_MINUTE_MS), "2 minutes ago")
+  assert.equal(formatAgeText(FORMATTER_NOW_MS, FORMATTER_NOW_MS - (ONE_HOUR_MS - 1)), "59 minutes ago")
+  assert.equal(formatAgeText(FORMATTER_NOW_MS, FORMATTER_NOW_MS - ONE_HOUR_MS), "1 hour ago")
+  assert.equal(formatAgeText(FORMATTER_NOW_MS, FORMATTER_NOW_MS - 2 * ONE_HOUR_MS), "2 hours ago")
+  assert.equal(formatAgeText(FORMATTER_NOW_MS, FORMATTER_NOW_MS - (ONE_DAY_MS - 1)), "23 hours ago")
+  assert.equal(formatAgeText(FORMATTER_NOW_MS, FORMATTER_NOW_MS - ONE_DAY_MS), "1 day ago")
+  assert.equal(formatAgeText(FORMATTER_NOW_MS, FORMATTER_NOW_MS - 2 * ONE_DAY_MS), "2 days ago")
+  assert.equal(formatAgeText(FORMATTER_NOW_MS, FORMATTER_NOW_MS + ONE_MINUTE_MS), "just now")
 })
 
 test("contextLimitSourceLabel maps the plugin's source ids to panel labels", () => {
@@ -1109,6 +1111,29 @@ test("loadPanelData keeps the snapshot's fields when the newest log line shares 
     assert.deepEqual(data.current.totals, makeTotals())
     assert.equal(data.current.manualMode, true)
     assert.deepEqual(data.current.pageStore, { entries: SNAPSHOT_PAGE_STORE_ENTRIES, capacity: SNAPSHOT_PAGE_STORE_CAPACITY })
+  })
+})
+
+test("loadPanelData degrades a malformed snapshot ts to a metrics-only staleness row", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "metrics.jsonl")
+    const stateDir = join(dir, "context-state")
+    mkdirSync(stateDir)
+    writeFileSync(path, serialize([logLineStaleAgainstSnapshot()]))
+    writeSnapshot(stateDir, SESSION_A, makeSnapshot({ ts: MALFORMED_SNAPSHOT_TS }))
+
+    const data = await loadPanelData({ path, stateDir, sessionID: SESSION_A, nowMs: STALENESS_NOW_MS })
+
+    assert.equal(data.error, undefined)
+    assert.ok(data.current !== undefined)
+    assert.equal(data.current.lastTransformAtMs, undefined)
+    assert.equal(data.current.lastMetricsLineAtMs, Date.parse(LOG_LINE_TS_STALE))
+
+    const rows = panelRows(data)
+
+    assert.ok(rows.some((row) => row.text === "metrics last written 1 hour ago"))
+    assert.ok(!rows.some((row) => row.text.startsWith("last transform")))
+    assert.equal(rows[rows.length - 1].text, "metrics last written 1 hour ago")
   })
 })
 

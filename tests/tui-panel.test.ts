@@ -29,7 +29,6 @@ const UNREADABLE_ROW_MARKER = "metrics log unreadable:"
 const EVICTION_ROW_MARKER = "last evicted:"
 const STALENESS_METRICS_MARKER = "metrics last written"
 const STALENESS_EXPECTED_AGE = "2 minutes ago"
-const ONE_MINUTE_MS = 60_000
 const STALENESS_LOOKBACK_MINUTES = 2
 const MANUAL_MODE_HEADER_SUFFIX = " (manual)"
 const BUDGET_LABEL_SPAN = "context limit: "
@@ -89,7 +88,7 @@ after(() => {
 })
 
 const { assertTempHomeOwnsPaths, writeMetricsLog, writeSessionSnapshot } = await import("./tui/fixtures.ts")
-const { makeAdvisory, makeLine } = await import("./panel-fixtures.ts")
+const { makeAdvisory, makeLine, ONE_MINUTE_MS } = await import("./panel-fixtures.ts")
 const { DEFAULT_LIVE_STATE_DIR, DEFAULT_METRICS_PATH, PANEL_COMMAND_TITLE } = await import("../plugin/panel-data.ts")
 const plugin = (await import("../plugin/context-manager.tui.tsx")).default as TuiPluginEntry
 

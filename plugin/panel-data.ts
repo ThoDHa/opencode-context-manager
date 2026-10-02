@@ -793,7 +793,6 @@ export const loadPanelData = async (options: LoadPanelDataOptions = {}): Promise
   const childSessionIDs = options.childSessionIDs
   const recentEvictionsLimit = options.recentEvictions ?? DEFAULT_RECENT_EVICTIONS
   const reader = options.reader ?? createMetricsLogReader(path)
-  const nowMs = options.nowMs
   const snapshot = sessionID === undefined ? undefined : await readSessionSnapshot(stateDir, sessionID)
   const childSnapshots = childSessionIDs === undefined ? [] : await Promise.all(childSessionIDs.map((childID) => readSessionSnapshot(stateDir, childID)))
   const childPanels = (lines: PanelMetricsLine[]): SubagentPanelEntry[] | undefined =>
@@ -814,7 +813,7 @@ export const loadPanelData = async (options: LoadPanelDataOptions = {}): Promise
     const message = error instanceof Error ? error.message : String(error)
     const current =
       snapshot !== undefined && sessionID !== undefined ? snapshotSessionPanel(snapshot, [], sessionID, recentEvictionsLimit) : undefined
-    return { source: path, activeSession: sessionID, current, global: globalTotals([]), error: message, subagentPanels: childPanels([]), nowMs }
+    return { source: path, activeSession: sessionID, current, global: globalTotals([]), error: message, subagentPanels: childPanels([]), nowMs: options.nowMs }
   }
   let current: SessionPanel | undefined
   if (sessionID !== undefined) {
@@ -823,7 +822,7 @@ export const loadPanelData = async (options: LoadPanelDataOptions = {}): Promise
         ? sessionPanelData(lines, sessionID, recentEvictionsLimit)
         : snapshotSessionPanel(snapshot, lines, sessionID, recentEvictionsLimit)
   }
-  return { source: path, activeSession: sessionID, current, global: globalTotals(lines), error: undefined, subagentPanels: childPanels(lines), nowMs }
+  return { source: path, activeSession: sessionID, current, global: globalTotals(lines), error: undefined, subagentPanels: childPanels(lines), nowMs: options.nowMs }
 }
 
 export const contextLimitSourceLabel = (source: string): string => {

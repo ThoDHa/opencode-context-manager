@@ -51,6 +51,14 @@ const SNAPSHOT_PAGE_STORE_CAPACITY = 50
 const SNAPSHOT_HOT_SUBJECTS = ["/data/hot-a.txt", "/data/hot-b.txt"]
 const SNAPSHOT_TS = "2026-09-18T09:00:00.000Z"
 const LOG_LINE_TS_STALE = "2026-09-18T08:00:00.000Z"
+// Two clocks because they serve different fixtures: STALENESS_NOW_MS
+// anchors against the timestamps above (30 minutes after SNAPSHOT_TS, 90
+// minutes after LOG_LINE_TS_STALE, so rows read "30 minutes" and "1 hour
+// ago"), while FORMATTER_NOW_MS is a pure anchor for threshold-boundary
+// arithmetic in the formatter tests, tied to no fixture timestamp.
+const STALENESS_NOW_MS = Date.parse("2026-09-18T09:30:00.000Z")
+const FORMATTER_NOW_MS = Date.parse("2026-10-02T12:00:00.000Z")
+const ONE_MINUTE_MS = 60_000
 
 const SNAPSHOT_ADVISORY_RATIO = 0.85
 const SNAPSHOT_ADVISORY_BAND_START_TOKENS = 105400
@@ -224,6 +232,9 @@ export {
   SNAPSHOT_ADVISORY_DEFICIT_TOKENS,
   SNAPSHOT_ADVISORY_SUBJECTS,
   LOG_LINE_TS_STALE,
+  STALENESS_NOW_MS,
+  FORMATTER_NOW_MS,
+  ONE_MINUTE_MS,
   LOG_LINE_ONLY_EVICTIONS,
   SECOND_LINE_ESTIMATED,
   makeTotals,

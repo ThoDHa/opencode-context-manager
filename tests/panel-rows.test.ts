@@ -21,6 +21,7 @@ import {
   SNAPSHOT_ADVISORY_DEFICIT_TOKENS,
   SNAPSHOT_ADVISORY_RATIO,
   SNAPSHOT_ADVISORY_SUBJECTS,
+  STALENESS_NOW_MS,
   TOTALS_DEDUPED_UNIQUE,
   TOTALS_EVICTIONS,
   TOTALS_FENCE_EVICTED,
@@ -35,7 +36,6 @@ import {
 } from "./panel-fixtures.ts"
 
 const COLLECTED_EVICTION_COUNT = 2
-const STALENESS_NOW_MS = Date.parse("2026-09-18T09:30:00.000Z")
 
 const panelDataWithAdvisory = () => ({
   source: "/tmp/metrics.jsonl",
