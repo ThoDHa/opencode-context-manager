@@ -23,6 +23,7 @@ import {
   readMetricsLog,
   readCheckpoint,
   sessionPanelData,
+  snapshotSessionPanel,
   type PanelMetricsLine,
 } from "../plugin/panel-data.ts"
 import { TOTALS_KEYS } from "../plugin/schema.ts"
@@ -42,6 +43,10 @@ import {
   SECOND_LINE_ESTIMATED,
   SESSION_A,
   SESSION_B,
+  SNAPSHOT_ADVISORY_BAND_START_TOKENS,
+  SNAPSHOT_ADVISORY_DEFICIT_TOKENS,
+  SNAPSHOT_ADVISORY_RATIO,
+  SNAPSHOT_ADVISORY_SUBJECTS,
   SNAPSHOT_HOT_SUBJECTS,
   SNAPSHOT_PAGE_STORE_CAPACITY,
   SNAPSHOT_PAGE_STORE_ENTRIES,
@@ -59,6 +64,7 @@ import {
   WATERMARK_TOKENS,
   logLineAgainstSnapshot,
   logLineStaleAgainstSnapshot,
+  makeAdvisory,
   makeLine,
   makeSnapshot,
   makeTotals,
@@ -908,6 +914,48 @@ test("parseCheckpoint accepts a null unknown-limit watermark trio like the metri
   assert.ok(snapshot !== undefined)
   assert.equal(snapshot.contextLimit, null)
   assert.deepEqual(snapshot.lastRun, { estimatedTokens: ESTIMATED_TOKENS, watermarkTokens: null, deficitTokens: null })
+})
+
+test("parseCheckpoint parses a present advisory and the snapshot panel carries it", () => {
+  const rawAdvisory = makeAdvisory()
+  const snapshot = parseCheckpoint(JSON.stringify(makeSnapshot({ advisory: rawAdvisory })))
+
+  assert.ok(snapshot !== undefined)
+  assert.deepEqual(snapshot.advisory, {
+    ratio: SNAPSHOT_ADVISORY_RATIO,
+    bandStartTokens: SNAPSHOT_ADVISORY_BAND_START_TOKENS,
+    estimatedTokens: ESTIMATED_TOKENS,
+    deficitTokens: SNAPSHOT_ADVISORY_DEFICIT_TOKENS,
+    subjects: SNAPSHOT_ADVISORY_SUBJECTS,
+  })
+  const panel = snapshotSessionPanel(snapshot, [], SESSION_A)
+  assert.deepEqual(panel.advisory, snapshot.advisory)
+})
+
+test("parseCheckpoint tolerates a pre-change snapshot without an advisory", () => {
+  const snapshot = parseCheckpoint(JSON.stringify(makeSnapshot()))
+
+  assert.ok(snapshot !== undefined)
+  assert.equal(snapshot.advisory, undefined)
+  const panel = snapshotSessionPanel(snapshot, [], SESSION_A)
+  assert.equal(panel.advisory, undefined)
+})
+
+test("parseCheckpoint rejects a snapshot whose advisory is malformed", () => {
+  const invalidAdvisories: Record<string, unknown>[] = [
+    "not an object",
+    42,
+    {},
+    { ...makeAdvisory(), ratio: "high" },
+    { ...makeAdvisory(), bandStartTokens: null },
+    { ...makeAdvisory(), estimatedTokens: "big" },
+    { ...makeAdvisory(), deficitTokens: null },
+    { ...makeAdvisory(), subjects: ["/data/a.txt", 42] },
+  ]
+  for (const advisory of invalidAdvisories) {
+    const snapshot = parseCheckpoint(JSON.stringify(makeSnapshot({ advisory })))
+    assert.equal(snapshot, undefined, `expected rejection for advisory ${JSON.stringify(advisory)}`)
+  }
 })
 
 test("parseCheckpoint rejects snapshots that are not valid JSON or miss required fields", () => {

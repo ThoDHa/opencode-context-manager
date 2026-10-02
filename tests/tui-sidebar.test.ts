@@ -27,7 +27,7 @@ after(() => {
 const { createTuiApiMock } = await import("./tui/api-mock.ts")
 const { nodeText, renderTree, settleUntil } = await import("./tui/opentui-stub.ts")
 const { assertTempHomeOwnsPaths, writeMetricsLog, writeSessionSnapshot } = await import("./tui/fixtures.ts")
-const { EXPECTED_TOKENS_PROCESSED_STAT, makeLine, makeTotals } = await import("./panel-fixtures.ts")
+const { EXPECTED_TOKENS_PROCESSED_STAT, makeAdvisory, makeLine, makeTotals } = await import("./panel-fixtures.ts")
 const { DEFAULT_LIVE_STATE_DIR, DEFAULT_METRICS_PATH } = await import("../plugin/panel-data.ts")
 
 const POLL_INTERVAL_MS = 5000
@@ -45,6 +45,7 @@ const MINUTE_MS = 60 * 1000
 const HIDDEN_SESSION = "sess-tui-hidden"
 const REPAINT_SESSION = "sess-tui-repaint"
 const MOUNT_SESSION = "sess-tui-mount"
+const ADVISORY_SESSION = "sess-tui-advisory"
 const POLL_SESSION = "sess-tui-poll"
 const SUBAGENTS_SESSION = "sess-tui-subagents"
 const SUBAGENTS_CHILD = "sess-tui-subagents-child"
@@ -170,6 +171,23 @@ test("SidebarEntry renders, polls, and disposes against the temp HOME fixtures",
       assert.ok(!text.includes("Evictions: 9"))
       assert.ok(text.includes("Last evicted: read /data/a.txt"), `log should supply evictions: ${text}`)
       assert.ok(text.includes("3 kB, 7 messages ago"))
+    })
+  })
+
+  await suite.test("entry renders the snapshot's Advisory row after the Window row when the checkpoint carries one", async (st) => {
+    writeSessionSnapshot(DEFAULT_LIVE_STATE_DIR, ADVISORY_SESSION, { session: ADVISORY_SESSION, advisory: makeAdvisory() })
+    writeMetricsLog(DEFAULT_METRICS_PATH, [makeLine({ session: ADVISORY_SESSION, evictedThisRun: [] })])
+    await withPollSidebar(st, tui, ADVISORY_SESSION, false, async (sidebar) => {
+      await settleUntil(() => nodeText(sidebar.root).includes("Context Manager"))
+      const text = nodeText(sidebar.root)
+      const windowIndex = text.indexOf("Window:")
+      const advisoryIndex = text.indexOf("Advisory:")
+      const tokensIndex = text.indexOf("Tokens processed:")
+      assert.ok(windowIndex !== -1)
+      assert.ok(advisoryIndex !== -1, "expected the Advisory row to render")
+      assert.ok(tokensIndex !== -1)
+      assert.ok(windowIndex < advisoryIndex && advisoryIndex < tokensIndex, `the Advisory row must sit after Window and before Tokens processed: ${text}`)
+      assert.ok(text.includes("0.85 of watermark (105.4k"))
     })
   })
 

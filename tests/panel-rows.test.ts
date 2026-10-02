@@ -2,17 +2,23 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 
 import {
+  formatTokenCount,
   globalTotals,
   panelRows,
   sessionPanelData,
   splitRowText,
 } from "../plugin/panel-data.ts"
 import {
+  ESTIMATED_TOKENS,
   EVICTED_BYTES,
   EVICTED_MESSAGES_AGO,
   OVERRIDE_CONTEXT_LIMIT_SOURCE,
   SESSION_A,
   SESSION_B,
+  SNAPSHOT_ADVISORY_BAND_START_TOKENS,
+  SNAPSHOT_ADVISORY_DEFICIT_TOKENS,
+  SNAPSHOT_ADVISORY_RATIO,
+  SNAPSHOT_ADVISORY_SUBJECTS,
   TOTALS_DEDUPED_UNIQUE,
   TOTALS_EVICTIONS,
   TOTALS_FENCE_EVICTED,
@@ -20,10 +26,54 @@ import {
   TOTALS_RECALL_HITS,
   TOTALS_RECALL_MISSES,
   UNKNOWN_CONTEXT_LIMIT_SOURCE,
+  makeAdvisory,
   makeLine,
 } from "./panel-fixtures.ts"
 
 const COLLECTED_EVICTION_COUNT = 2
+
+const panelDataWithAdvisory = () => ({
+  source: "/tmp/metrics.jsonl",
+  activeSession: SESSION_A,
+  current: { ...sessionPanelData([makeLine()], SESSION_A), advisory: makeAdvisory() },
+  global: globalTotals([]),
+  error: undefined,
+})
+
+const advisoryRowText = (): string => {
+  const deficit = SNAPSHOT_ADVISORY_DEFICIT_TOKENS
+  const pressure = deficit > 0 ? `over by ${formatTokenCount(deficit)}` : `${formatTokenCount(-deficit)} to watermark`
+  return `advisory: ${SNAPSHOT_ADVISORY_RATIO} of watermark (${formatTokenCount(SNAPSHOT_ADVISORY_BAND_START_TOKENS)} tokens), ${formatTokenCount(ESTIMATED_TOKENS)} estimate, ${pressure}; next: ${SNAPSHOT_ADVISORY_SUBJECTS.join(", ")}`
+}
+
+test("panelRows renders the advisory row between the last-run row and the counters row", () => {
+  const rows = panelRows(panelDataWithAdvisory())
+
+  const lastIndex = rows.findIndex((row) => row.text.startsWith("last run:"))
+  const advisoryIndex = rows.findIndex((row) => row.text.startsWith("advisory:"))
+  const countersIndex = rows.findIndex((row) => row.text.startsWith("counters:"))
+  assert.ok(lastIndex !== -1)
+  assert.ok(advisoryIndex !== -1)
+  assert.ok(countersIndex !== -1)
+  assert.ok(lastIndex < advisoryIndex && advisoryIndex < countersIndex, `advisory row must sit between the last-run and counters rows: ${JSON.stringify(rows)}`)
+  assert.equal(rows[advisoryIndex].tone, "warning")
+  assert.equal(rows[advisoryIndex].text, advisoryRowText())
+})
+
+test("panelRows omits the advisory row when the panel carries no advisory", () => {
+  const data = {
+    source: "/tmp/metrics.jsonl",
+    activeSession: SESSION_A,
+    current: sessionPanelData([makeLine()], SESSION_A),
+    global: globalTotals([]),
+    error: undefined,
+  }
+
+  const rows = panelRows(data)
+
+  assert.ok(!rows.some((row) => row.text.startsWith("advisory:")))
+  assert.equal(rows.length, 5)
+})
 
 test("splitRowText splits a label value row at the first colon-space", () => {
   assert.deepEqual(splitRowText("context limit: 200k tokens"), { label: "context limit", value: "200k tokens" })

@@ -28,11 +28,14 @@ import {
   OVERRIDE_CONTEXT_LIMIT_SOURCE,
   SESSION_A,
   SESSION_B,
+  SNAPSHOT_ADVISORY_BAND_START_TOKENS,
+  SNAPSHOT_ADVISORY_SUBJECTS,
   TOTALS_EVICTIONS,
   TOTALS_RECALL_HITS,
   TOTALS_RECALL_MISSES,
   UNKNOWN_CONTEXT_LIMIT_SOURCE,
   logLineStaleAgainstSnapshot,
+  makeAdvisory,
   makeLine,
   makeSnapshot,
   makeTotals,
@@ -47,6 +50,51 @@ const ZERO_DEFICIT = 0
 const NEGATIVE_DEFICIT = -5
 const STALE_RUN_ESTIMATE = 11111
 const NEWEST_RUN_ESTIMATE = 22222
+const LONG_ADVISORY_SUBJECT = `/data/${"c".repeat(60)}.txt`
+
+const ADVISORY_ROW_PREFIX = "Advisory:"
+
+const sidebarDataWithAdvisory = (advisory: Record<string, unknown>): PanelData => ({
+  source: "/tmp/metrics.jsonl",
+  activeSession: SESSION_A,
+  current: { ...sessionPanelData([makeLine()], SESSION_A), advisory },
+  global: globalTotals([]),
+  error: undefined,
+})
+
+test("sidebarRows renders the Advisory row after Window and before the counters rows when the panel carries one", () => {
+  const rows = sidebarRowsWithinWidth(sidebarDataWithAdvisory(makeAdvisory()))
+
+  const windowIndex = rows.findIndex((row) => row.text.startsWith("Window:"))
+  const advisoryIndex = rows.findIndex((row) => row.text.startsWith(ADVISORY_ROW_PREFIX))
+  const tokensIndex = rows.findIndex((row) => row.text.startsWith("Tokens processed:"))
+  assert.ok(windowIndex !== -1)
+  assert.ok(advisoryIndex !== -1)
+  assert.ok(tokensIndex !== -1)
+  assert.ok(windowIndex < advisoryIndex && advisoryIndex < tokensIndex, `Advisory row must sit after Window and before Tokens processed: ${JSON.stringify(rows)}`)
+  assert.equal(rows[advisoryIndex].tone, "warning")
+  assert.ok(rows[advisoryIndex].text.includes("0.85 of watermark (105.4k"))
+  assert.ok(rows[advisoryIndex].text.includes(SNAPSHOT_ADVISORY_SUBJECTS[0]) === false, "the Advisory row must be truncated before the subjects")
+})
+
+test("sidebarRows truncates an over-long Advisory row to the column limit and omits the row without an advisory", () => {
+  const longSubjectAdvisory = { ...makeAdvisory(), subjects: [LONG_ADVISORY_SUBJECT] }
+  const rows = sidebarRowsWithinWidth(sidebarDataWithAdvisory(longSubjectAdvisory))
+
+  const advisoryRow = rows.find((row) => row.text.startsWith(ADVISORY_ROW_PREFIX))
+  assert.ok(advisoryRow !== undefined)
+  assert.equal(advisoryRow.text.length, SIDEBAR_COLUMN_LIMIT)
+  assert.ok(advisoryRow.text.endsWith("…"))
+
+  const withoutAdvisory = sidebarRowsWithinWidth({
+    source: "/tmp/metrics.jsonl",
+    activeSession: SESSION_A,
+    current: sessionPanelData([makeLine()], SESSION_A),
+    global: globalTotals([]),
+    error: undefined,
+  })
+  assert.ok(!withoutAdvisory.some((row) => row.text.startsWith(ADVISORY_ROW_PREFIX)))
+})
 
 const sidebarRowsWithinWidth = (data: PanelData): PanelRow[] => {
   const rows = sidebarRows(data)

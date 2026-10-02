@@ -247,6 +247,14 @@ export type PanelMetricsLine = {
 
 export type PanelCheckpointPageStore = { entries: number; capacity: number }
 
+export type PanelAdvisory = {
+  ratio: number
+  bandStartTokens: number
+  estimatedTokens: number
+  deficitTokens: number
+  subjects: string[]
+}
+
 export type PanelCheckpoint = {
   ts: string
   session: string
@@ -254,6 +262,7 @@ export type PanelCheckpoint = {
   contextLimit: number | null
   contextLimitSource: string
   lastRun: { estimatedTokens: number; watermarkTokens: number | null; deficitTokens: number | null }
+  advisory?: PanelAdvisory
   totals: PanelTotals
   pageStore: PanelCheckpointPageStore
   hotSubjects: string[]
@@ -265,6 +274,7 @@ export type SessionPanel = {
   contextLimitTokens: number | null
   contextLimitSource: string
   lastRun: { estimatedTokens: number; watermarkTokens: number | null; deficitTokens: number | null }
+  advisory?: PanelAdvisory
   totals: PanelTotals
   recalls: number
   recentEvictions: PanelEvictedEntry[]
@@ -582,6 +592,25 @@ const parseSnapshotHotSubjects = (value: unknown): string[] | undefined => {
   return subjects
 }
 
+// Absence tolerated (pre-change snapshots render no advisory surface);
+// present-but-malformed rejected per house strictness.
+const parseSnapshotAdvisory = (value: unknown): PanelAdvisory | undefined => {
+  if (!isRecord(value)) return undefined
+  if (!isFiniteNumber(value["ratio"])) return undefined
+  if (!isFiniteNumber(value["bandStartTokens"])) return undefined
+  if (!isFiniteNumber(value["estimatedTokens"])) return undefined
+  if (!isFiniteNumber(value["deficitTokens"])) return undefined
+  const subjects = parseSnapshotHotSubjects(value["subjects"])
+  if (subjects === undefined) return undefined
+  return {
+    ratio: value["ratio"],
+    bandStartTokens: value["bandStartTokens"],
+    estimatedTokens: value["estimatedTokens"],
+    deficitTokens: value["deficitTokens"],
+    subjects,
+  }
+}
+
 export const parseCheckpoint = (raw: string): PanelCheckpoint | undefined => {
   let parsed: unknown
   try {
@@ -603,6 +632,8 @@ export const parseCheckpoint = (raw: string): PanelCheckpoint | undefined => {
   if (pageStore === undefined) return undefined
   const hotSubjects = parseSnapshotHotSubjects(parsed["hotSubjects"])
   if (hotSubjects === undefined) return undefined
+  const advisory = parsed["advisory"] === undefined ? undefined : parseSnapshotAdvisory(parsed["advisory"])
+  if (parsed["advisory"] !== undefined && advisory === undefined) return undefined
   return {
     ts: parsed["ts"],
     session: parsed["session"],
@@ -610,6 +641,7 @@ export const parseCheckpoint = (raw: string): PanelCheckpoint | undefined => {
     contextLimit: parsed["contextLimit"],
     contextLimitSource: parsed["contextLimitSource"],
     lastRun,
+    ...(advisory === undefined ? {} : { advisory }),
     totals,
     pageStore,
     hotSubjects,
@@ -668,6 +700,7 @@ export const snapshotSessionPanel = (
     recalls: totals.recallHits + totals.recallMisses,
     recentEvictions: history?.recentEvictions ?? [],
     manualMode: snapshot.manualMode,
+    ...(snapshot.advisory === undefined ? {} : { advisory: snapshot.advisory }),
     pageStore: snapshot.pageStore,
     hotSubjects: snapshot.hotSubjects,
   }
@@ -859,6 +892,21 @@ const lastRunText = (current: SessionPanel): string => {
 const countersText = (current: SessionPanel): string =>
   `${COUNTERS_ROW_LABEL} ${current.totals.evictions} evictions (${formatBytes(current.totals.bytesReclaimed)} reclaimed, ${formatTokenCount(current.totals.evictionTokensSaved)} tokens saved), ${current.totals.dedupedUnique} dedup (${formatTokenCount(current.totals.dedupTokensSaved)} tokens saved), ${current.recalls} recalls (${current.totals.recallHits} hits)`
 
+const ADVISORY_ROW_LABEL = "advisory:"
+const SIDEBAR_ADVISORY_LABEL = "Advisory:"
+
+const advisoryPressureText = (deficitTokens: number): string =>
+  deficitTokens > 0 ? `over by ${formatTokenCount(deficitTokens)}` : `${formatTokenCount(-deficitTokens)} to watermark`
+
+const advisoryBandStartText = (advisory: PanelAdvisory): string =>
+  `${advisory.ratio} of watermark (${formatTokenCount(advisory.bandStartTokens)} tokens), ${formatTokenCount(advisory.estimatedTokens)}`
+
+const advisoryText = (advisory: PanelAdvisory): string =>
+  `${ADVISORY_ROW_LABEL} ${advisoryBandStartText(advisory)} estimate, ${advisoryPressureText(advisory.deficitTokens)}; next: ${advisory.subjects.join(", ")}`
+
+const sidebarAdvisoryText = (advisory: PanelAdvisory): string =>
+  `${SIDEBAR_ADVISORY_LABEL} ${advisoryBandStartText(advisory)} est, ${advisoryPressureText(advisory.deficitTokens)}`
+
 const evictionText = (entry: PanelEvictedEntry): string =>
   `${entry.tool} ${entry.subject} (${formatBytes(entry.bytes)}, ${entry.messagesAgo} msgs ago)`
 
@@ -881,6 +929,7 @@ export const panelRows = (data: PanelData): PanelRow[] => {
   }
   rows.push({ text: contextLimitText(current), tone: "normal" })
   rows.push({ text: lastRunText(current), tone: "normal" })
+  if (current.advisory !== undefined) rows.push({ text: advisoryText(current.advisory), tone: "warning" })
   rows.push({ text: countersText(current), tone: "normal" })
   const newestEviction = current.recentEvictions[0]
   if (newestEviction !== undefined) {
@@ -1100,6 +1149,7 @@ export const sidebarRows = (data: PanelData, subagentRows?: PanelRow[]): PanelRo
   const overByRow = sidebarOverByRow(current)
   if (overByRow !== undefined) statGroup.push(overByRow)
   statGroup.push({ text: sidebarWindowText(current), tone: "normal" })
+  if (current.advisory !== undefined) statGroup.push({ text: truncateToWidth(sidebarAdvisoryText(current.advisory), SIDEBAR_COLUMN_LIMIT), tone: "warning" })
   statGroup.push(...sidebarCountersGroup(current))
   groups.push(statGroup)
   const newestEviction = current.recentEvictions[0]

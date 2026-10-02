@@ -192,7 +192,7 @@ const DEFAULT_METRICS_MIN_LINE_INTERVAL_MS = SECONDS_PER_MINUTE * MS_PER_SECOND
 const METRICS_COALESCING_DISABLED_MS = 0
 const DESCRIBE_TOOL_NAME = "describe"
 const DESCRIBE_TOOL_DESCRIPTION =
-  "Return live metrics for the Context Manager in this session: eviction counters, expired reasoning counts, faults (post-eviction re-references of evicted subjects), session page store occupancy, the effective context limit and its headroom, and the most recent transform run's token estimate; also the newest run's post-transform composition (tool outputs, text, retained reasoning), the newest run's declared omissions (tool evictions, expired reasoning parts, evicted fenced blocks) with the recall reload pointer when one exists, the manual-mode dry run when armed, the echoed option surface including charsPerToken, the remembered-evicted-subjects bound, and the protected tools and patterns, and the last transform error when one occurred."
+  "Return live metrics for the Context Manager in this session: eviction counters, expired reasoning counts, faults (post-eviction re-references of evicted subjects), session page store occupancy, the effective context limit and its headroom, and the most recent transform run's token estimate; also the newest run's post-transform composition (tool outputs, text, retained reasoning), the newest run's declared omissions (tool evictions, expired reasoning parts, evicted fenced blocks) with the recall reload pointer when one exists, the manual-mode dry run when armed, the newest run's advisory pressure-band preview when the estimate enters the band, the echoed option surface including charsPerToken, the remembered-evicted-subjects bound, and the protected tools and patterns, and the last transform error when one occurred."
 const OMISSIONS_REPORT_KEY = "omissions"
 const OMISSIONS_TOOL_EVICTIONS_FIELD = "toolEvictions"
 const OMISSIONS_REASONING_PARTS_FIELD = "reasoningParts"
@@ -219,6 +219,9 @@ const UNKNOWN_ATTACHMENT_MIME_LABEL = "unknown mime"
 const DEFAULT_FENCE_EVICTABLE_LINES = 40
 const DEFAULT_USER_FENCE_EVICTION_ENABLED = false
 const DEFAULT_MANUAL_MODE = false
+export const DEFAULT_ADVISORY_BAND_ENABLED = true
+export const ADVISORY_BAND_RATIO_DEFAULT = 0.85
+export const ADVISORY_SUBJECTS_BOUND = 3
 const DEFAULT_NOW = (): number => Date.now()
 const FENCE_EVICTION_MARKER = "[ctx-evicted-fence]"
 const FENCE_BLOCK_NOUN = "code block"
@@ -272,6 +275,8 @@ type ContextManagerOptions = {
   liveStatePruneMaxAgeMs?: number
   liveStatePruneMinIntervalMs?: number
   manualMode?: boolean
+  advisoryBand?: boolean
+  advisoryBandRatio?: number
   userFenceEviction?: { enabled?: boolean; minBlockLines?: number }
   now?: () => number
   // Test-only fault injection for the compaction hook: when the injected
@@ -364,6 +369,7 @@ type RunOutcome = {
   reasoningExpired: ReasoningExpiry
   fenceEvicted: FenceEviction
   dryRun: DryRunResult | undefined
+  advisory: AdvisoryResult | undefined
   composition: RunComposition
 }
 
@@ -432,15 +438,20 @@ type SessionMetrics = {
   // The manual-mode dry run from this session's newest run: run-scoped
   // diagnostic state for describe, never persisted, replaced every run.
   lastDryRun?: DryRunResult
-  // The newest run's composition (toolPoolBytes, textChars,
-  // reasoningInWindowBytes): run-scoped diagnostic state for describe,
-  // never persisted, replaced every run.
-  lastComposition?: RunComposition
   // The newest run's declared omissions (tool evictions, expired reasoning
   // parts, evicted fenced blocks): run-scoped diagnostic state for describe
   // and the compaction footer, never persisted, replaced every run.
   // Wave-A field order: 63's lastOmissions precedes 65's lastAdvisory.
   lastOmissions?: LastOmissions
+  // The newest run's advisory band preview: run-scoped diagnostic state
+  // for describe, undefined when disarmed, when no effective watermark
+  // exists, or when the estimate sits below the band start; persisted
+  // only through the session checkpoint's optional advisory field.
+  lastAdvisory?: AdvisoryResult
+  // The newest run's composition (toolPoolBytes, textChars,
+  // reasoningInWindowBytes): run-scoped diagnostic state for describe,
+  // never persisted, replaced every run.
+  lastComposition?: RunComposition
   // The newest fault-isolated failure on this session's transform: set by
   // the transform boundary when the body throws, surfaced through
   // describe, never persisted, replaced by the next run's outcome.
@@ -498,6 +509,7 @@ type SessionCheckpoint = {
   contextLimitSource: ContextTokensSource
   contextLimitModelKey: number | null | string
   lastRun: LastRunMetrics
+  advisory?: AdvisoryResult
   totals: CumulativeCounters
   pageStore: { entries: number; capacity: number }
   hotSubjects: string[]
@@ -669,6 +681,16 @@ const resolveOptions = (raw: ContextManagerOptions = {}): ResolvedOptions => {
         ? raw.liveStatePruneMinIntervalMs
         : MIN_MS_BETWEEN_PRUNE_SCANS,
     manualMode: typeof raw.manualMode === "boolean" ? raw.manualMode : DEFAULT_MANUAL_MODE,
+    // The advisory pressure band below the effective watermark: a boolean
+    // switch per the boolean-option discipline, and a ratio with the
+    // watermark's numeric discipline narrowed to (0, 1), since a ratio
+    // outside that open interval either sits at or beyond the watermark
+    // itself (the critical zone) or at non-positive pressure.
+    advisoryBand: typeof raw.advisoryBand === "boolean" ? raw.advisoryBand : DEFAULT_ADVISORY_BAND_ENABLED,
+    advisoryBandRatio:
+      typeof raw.advisoryBandRatio === "number" && Number.isFinite(raw.advisoryBandRatio) && raw.advisoryBandRatio > 0 && raw.advisoryBandRatio < 1
+        ? raw.advisoryBandRatio
+        : ADVISORY_BAND_RATIO_DEFAULT,
     userFenceEviction: userFenceEvictionOf(raw.userFenceEviction),
     // Test-injection seam for wall-clock time: the coalesce window, the
     // prune throttle, and the metrics-line timestamp all read this one
@@ -2188,6 +2210,10 @@ const sessionCheckpointOf = (
   contextLimitSource: contextLimit.source,
   contextLimitModelKey: contextLimit.modelKey ?? null,
   lastRun,
+  // Spread, not a present-undefined key: a below-band run must leave the
+  // field absent from the JSON so pre-band readers and round-trip
+  // deep-equals see the pre-change shape.
+  ...(metrics.lastAdvisory === undefined ? {} : { advisory: metrics.lastAdvisory }),
   totals: totalsOf(metrics, options.charsPerToken),
   pageStore: { entries: pageStore.size, capacity: options.stashLimit },
   hotSubjects: orderedRenderedSubjectsOf(hotSubjects, options.hintSubjects),
@@ -2392,6 +2418,8 @@ const executeStatsTool = (source: StatsSource, toolContext: unknown): string => 
         minBlockLines: source.options.userFenceEviction.minBlockLines,
       },
       manualMode: source.options.manualMode,
+      advisoryBand: source.options.advisoryBand,
+      advisoryBandRatio: source.options.advisoryBandRatio,
       charsPerToken: source.options.charsPerToken,
       rememberedEvictedSubjects: source.options.rememberedEvictedSubjects,
       protectedTools: source.options.protectedTools,
@@ -2423,6 +2451,7 @@ const executeStatsTool = (source: StatsSource, toolContext: unknown): string => 
             wouldEvictSubjects: metrics.lastDryRun.wouldEvictSubjects.slice(0, source.options.rememberedEvictedSubjects),
           },
         }),
+    ...(metrics.lastAdvisory === undefined ? {} : { advisory: metrics.lastAdvisory }),
     ...(metrics.lastComposition === undefined
       ? {}
       : {
@@ -2591,6 +2620,35 @@ const measureWithoutEvicting = (candidates: EvictionCandidates, watermarkTokens:
 }
 
 type DryRunResult = { deficitTokens: number; wouldEvictCount: number; wouldEvictBytes: number; wouldEvictSubjects: string[] }
+
+// The advisory pressure band below the effective watermark: the newest
+// run's preview of how close the session sits to eviction. The band start
+// is ratio x effective watermark and the estimate tested is the shared
+// candidates' pre-eviction figure, the same one the dry run prices, so
+// the preview and the evictor can never disagree about the session's size.
+// Returns undefined when disarmed, when no effective watermark exists, or
+// when the estimate sits below the band start; never mutates anything.
+type AdvisoryResult = {
+  ratio: number
+  bandStartTokens: number
+  estimatedTokens: number
+  deficitTokens: number
+  subjects: string[]
+}
+
+const measureAdvisory = (candidates: EvictionCandidates, effectiveWatermarkTokens: number | null, options: ResolvedOptions): AdvisoryResult | undefined => {
+  if (!options.advisoryBand || effectiveWatermarkTokens === null) return undefined
+  const bandStartTokens = options.advisoryBandRatio * effectiveWatermarkTokens
+  const estimatedTokens = candidates.estimatedTokens
+  if (estimatedTokens < bandStartTokens) return undefined
+  return {
+    ratio: options.advisoryBandRatio,
+    bandStartTokens,
+    estimatedTokens,
+    deficitTokens: estimatedTokens - effectiveWatermarkTokens,
+    subjects: candidates.evictable.slice(0, ADVISORY_SUBJECTS_BOUND).map((entry) => primaryRenderedSubjectOf(entry)),
+  }
+}
 
 // Manual-mode dry run: with an effective watermark in hand, compute what
 // the evictor WOULD reclaim (the shared candidate list, the same
@@ -2821,6 +2879,11 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
     options.manualMode && effectiveWatermarkTokens !== null
       ? measureDryRun(messages, candidates, options, effectiveWatermarkTokens)
       : undefined
+  // The advisory pressure band: computed for every run (manual mode
+  // included, alongside the dry run) from the same pre-eviction
+  // candidates the evictor and the dry run consume. Eviction itself
+  // still fires only at the effective watermark.
+  const advisory = measureAdvisory(candidates, effectiveWatermarkTokens, options)
   const faultsThisRun = countFaults(sessionMetrics, eviction.appearances, options.minSubstringMatchChars)
   // Composition reads the final post-transform list: every pass above has
   // applied its edits, so the sums are what this request carries.
@@ -2836,10 +2899,12 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
     reasoningExpired: reasoningExpiredThisRun,
     fenceEvicted: fenceEvictedThisRun,
     dryRun,
+    advisory,
     composition,
   }
   recordRunOutcome(sessionMetrics, runOutcome, options.rememberedEvictedSubjects)
   sessionMetrics.lastDryRun = runOutcome.dryRun
+  sessionMetrics.lastAdvisory = runOutcome.advisory
   sessionMetrics.lastComposition = runOutcome.composition
   sessionMetrics.lastOmissions = {
     toolEvictions: runOutcome.eviction.evicted.length,

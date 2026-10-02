@@ -4017,6 +4017,8 @@ test("describe reports zeroed counters unknown context limit and empty page stor
     liveStatePruneMinIntervalMs: DEFAULT_LIVE_STATE_PRUNE_MIN_INTERVAL_MS,
     userFenceEviction: { enabled: false, minBlockLines: FENCE_DEFAULT_MIN_BLOCK_LINES },
     manualMode: false,
+    advisoryBand: true,
+    advisoryBandRatio: ADVISORY_BAND_RATIO_DEFAULT,
     charsPerToken: CHARS_PER_TOKEN,
     rememberedEvictedSubjects: 100,
     protectedTools: ["task", "todowrite"],
@@ -4953,6 +4955,31 @@ test("describe reports metricsMinLineIntervalMs defaulting to sixty seconds and 
   }
 })
 
+test("describe echoes advisoryBand and advisoryBandRatio defaulting to enabled and 0.85 with invalid values falling back", async () => {
+  const defaultOptions = (await readStats(await loadPluginHooks(), SESSION_ID)).options as Record<string, unknown>
+  assert.equal(defaultOptions.advisoryBand, true)
+  assert.equal(defaultOptions.advisoryBandRatio, ADVISORY_BAND_RATIO_DEFAULT)
+
+  const customHooks = await loadPluginHooksWith({ advisoryBand: false, advisoryBandRatio: ADVISORY_BAND_RATIO_CUSTOM })
+  const customOptions = (await readStats(customHooks, SESSION_ID)).options as Record<string, unknown>
+  assert.equal(customOptions.advisoryBand, false)
+  assert.equal(customOptions.advisoryBandRatio, ADVISORY_BAND_RATIO_CUSTOM)
+
+  for (const invalidRatio of ADVISORY_BAND_RATIO_INVALID_VALUES) {
+    const hooks = await loadPluginHooksWith({ advisoryBandRatio: invalidRatio })
+    const options = (await readStats(hooks, SESSION_ID)).options as Record<string, unknown>
+    assert.equal(options.advisoryBandRatio, ADVISORY_BAND_RATIO_DEFAULT, `expected the default ratio for ${String(invalidRatio)}`)
+    assert.equal(options.advisoryBand, true)
+  }
+
+  for (const invalidBand of ADVISORY_BAND_INVALID_VALUES) {
+    const hooks = await loadPluginHooksWith({ advisoryBand: invalidBand })
+    const options = (await readStats(hooks, SESSION_ID)).options as Record<string, unknown>
+    assert.equal(options.advisoryBand, true, `expected the default band switch for ${String(invalidBand)}`)
+    assert.equal(options.advisoryBandRatio, ADVISORY_BAND_RATIO_DEFAULT)
+  }
+})
+
 test("metrics log stays byte identical at exactly the rotation cap and rotates when an append would cross it", async () => {
   const metricsDir = makeMetricsDir()
   try {
@@ -5238,6 +5265,25 @@ test("live state snapshot carries the captured context limit source manual mode 
     })
     assert.deepEqual(snapshot.pageStore, { entries: 0, capacity: STASH_LIMIT })
     assert.deepEqual(snapshot.hotSubjects, [LIVE_STATE_MANUAL_SUBJECT])
+  } finally {
+    cleanupMetricsDir(stateDir)
+  }
+})
+
+test("live state snapshot carries the newest run's advisory preview when the estimate enters the band and omits it below", async () => {
+  const stateDir = makeLiveStateDir()
+  try {
+    const armedHooks = await loadPluginHooksWithLiveState(stateDir)
+    await setContextLimit(armedHooks, SESSION_ID, contextForWatermarkTokens(ADVISORY_PROBE_WATERMARK_TOKENS))
+    await runTransform(armedHooks, buildStandardBundle(SESSION_ID, ADVISORY_QUIET_SUBJECT))
+
+    const snapshot = snapshotBodyOf(stateDir, SESSION_ID).snapshot
+    assert.deepEqual(snapshot.advisory, advisoryExpectationOf(ADVISORY_QUIET_SUBJECT))
+
+    const belowStateDir = stateDir
+    const belowHooks = await loadPluginHooksWithLiveState(belowStateDir, { watermarkTokens: ADVISORY_BELOW_WATERMARK_TOKENS })
+    await runTransform(belowHooks, buildStandardBundle(SESSION_ID, ADVISORY_QUIET_SUBJECT))
+    assert.equal(Object.hasOwn(snapshotBodyOf(belowStateDir, SESSION_ID).snapshot, "advisory"), false)
   } finally {
     cleanupMetricsDir(stateDir)
   }
@@ -7679,6 +7725,30 @@ const DRY_RUN_ARMED_DEFICIT_TOKENS = DRY_RUN_BUNDLE_ESTIMATED_TOKENS - DRY_RUN_W
 const DRY_RUN_EXPECTED_COUNT = 1
 const DRY_RUN_EXPECTED_BYTES = DRY_RUN_CANDIDATE_BYTES
 
+// Advisory-band probe figures: the standard bundle's estimate (522 tokens)
+// sits between 0.85 x 600 = 510 (band start) and the 600-token watermark,
+// while 0.85 x 620 = 527 clears the estimate entirely.
+const ADVISORY_BAND_RATIO_DEFAULT = 0.85
+const ADVISORY_BAND_RATIO_CUSTOM = 0.7
+const ADVISORY_BAND_RATIO_INVALID_VALUES: unknown[] = [0, 1, 1.5, -0.5, "0.9", Number.NaN, Number.POSITIVE_INFINITY]
+const ADVISORY_BAND_INVALID_VALUES: unknown[] = ["yes", 1, 0, null]
+const ADVISORY_PROBE_WATERMARK_TOKENS = 600
+const ADVISORY_BELOW_WATERMARK_TOKENS = 620
+const ADVISORY_PROBE_ESTIMATED_TOKENS = tokensForChars(STANDARD_BUNDLE_CHARS)
+const ADVISORY_PROBE_BAND_START_TOKENS = ADVISORY_BAND_RATIO_DEFAULT * ADVISORY_PROBE_WATERMARK_TOKENS
+const ADVISORY_PROBE_DEFICIT_TOKENS = ADVISORY_PROBE_ESTIMATED_TOKENS - ADVISORY_PROBE_WATERMARK_TOKENS
+const ADVISORY_QUIET_SUBJECT = "/data/advisory-quiet.txt"
+const ADVISORY_COLD_SUBJECT = "/data/advisory-cold.txt"
+const ADVISORY_WARM_SUBJECT = "/data/advisory-warm.txt"
+
+const advisoryExpectationOf = (path: string): Record<string, unknown> => ({
+  ratio: ADVISORY_BAND_RATIO_DEFAULT,
+  bandStartTokens: ADVISORY_PROBE_BAND_START_TOKENS,
+  estimatedTokens: ADVISORY_PROBE_ESTIMATED_TOKENS,
+  deficitTokens: ADVISORY_PROBE_DEFICIT_TOKENS,
+  subjects: [path],
+})
+
 // A bundle whose two cold candidates sit outside the recent window:
 // estimate = candidates + fillers, well above the 1000-token dry-run
 // watermark. Different paths and no offset/limit, so dedup and range
@@ -7797,6 +7867,79 @@ test("the same dry-run session evicts for real once manual mode is off", async (
   assert.ok(evictions >= DRY_RUN_EXPECTED_COUNT)
   const stats = await readStats(hooks, SESSION_ID)
   assert.equal(Object.hasOwn(stats, "dryRun"), false)
+})
+
+test("a run whose estimate enters the advisory band carries the preview in describe and evicts nothing by itself", async () => {
+  const hooks = await loadPluginHooksWith({ watermarkTokens: ADVISORY_PROBE_WATERMARK_TOKENS })
+  await setContextLimit(hooks, SESSION_ID, contextForWatermarkTokens(ADVISORY_PROBE_WATERMARK_TOKENS))
+
+  const bundle = buildStandardBundle(SESSION_ID, ADVISORY_QUIET_SUBJECT)
+  await runTransform(hooks, bundle)
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+
+  const stats = await readStats(hooks, SESSION_ID)
+  assert.deepEqual(stats.advisory, advisoryExpectationOf(ADVISORY_QUIET_SUBJECT))
+})
+
+test("the advisory stays absent when the estimate sits below the band start or no effective watermark exists", async () => {
+  const belowBandHooks = await loadPluginHooksWith({ watermarkTokens: ADVISORY_BELOW_WATERMARK_TOKENS })
+  await runTransform(belowBandHooks, buildStandardBundle(SESSION_ID, ADVISORY_QUIET_SUBJECT))
+  assert.equal(Object.hasOwn(await readStats(belowBandHooks, SESSION_ID), "advisory"), false)
+
+  const noWatermarkHooks = await loadPluginHooks()
+  await runTransform(noWatermarkHooks, buildStandardBundle(SESSION_ID, ADVISORY_QUIET_SUBJECT))
+  assert.equal(Object.hasOwn(await readStats(noWatermarkHooks, SESSION_ID), "advisory"), false)
+
+  const disarmedHooks = await loadPluginHooksWith({
+    advisoryBand: false,
+    watermarkTokens: ADVISORY_PROBE_WATERMARK_TOKENS,
+  })
+  await runTransform(disarmedHooks, buildStandardBundle(SESSION_ID, ADVISORY_QUIET_SUBJECT))
+  assert.equal(Object.hasOwn(await readStats(disarmedHooks, SESSION_ID), "advisory"), false)
+})
+
+test("manual mode computes the advisory alongside the dry run with the top candidates in eviction order", async () => {
+  const hooks = await loadPluginHooksWith({
+    manualMode: true,
+    watermarkTokens: ADVISORY_PROBE_WATERMARK_TOKENS,
+  })
+  await setContextLimit(hooks, SESSION_ID, contextForWatermarkTokens(ADVISORY_PROBE_WATERMARK_TOKENS))
+
+  const bundle = buildBundle([
+    [pathToolPart(ADVISORY_COLD_SUBJECT, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(2),
+    [pathToolPart(ADVISORY_WARM_SUBJECT, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(toolPartAt(bundle.messages[3], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+
+  const stats = await readStats(hooks, SESSION_ID)
+  assert.ok(stats.dryRun !== undefined)
+  const advisoryEstimateTokens = tokensForChars(2 * MIN_EVICTABLE_BYTES + (2 + RECENT_WINDOW_FILLER_MESSAGES) * FILLER_TEXT_CHARS)
+  assert.deepEqual(stats.advisory, {
+    ratio: ADVISORY_BAND_RATIO_DEFAULT,
+    bandStartTokens: ADVISORY_PROBE_BAND_START_TOKENS,
+    estimatedTokens: advisoryEstimateTokens,
+    deficitTokens: advisoryEstimateTokens - ADVISORY_PROBE_WATERMARK_TOKENS,
+    subjects: [ADVISORY_COLD_SUBJECT, ADVISORY_WARM_SUBJECT],
+  })
+})
+
+test("describe renders the advisory block after the dry-run block and before the composition block", async () => {
+  const hooks = await loadPluginHooksWith({ manualMode: true, watermarkTokens: ADVISORY_PROBE_WATERMARK_TOKENS })
+  await setContextLimit(hooks, SESSION_ID, contextForWatermarkTokens(ADVISORY_PROBE_WATERMARK_TOKENS))
+  await runTransform(hooks, buildStandardBundle(SESSION_ID, ADVISORY_QUIET_SUBJECT))
+
+  const keys = Object.keys(await readStats(hooks, SESSION_ID))
+  const dryRunIndex = keys.indexOf("dryRun")
+  const advisoryIndex = keys.indexOf("advisory")
+  const compositionIndex = keys.indexOf("composition")
+  assert.ok(dryRunIndex !== -1)
+  assert.ok(advisoryIndex !== -1)
+  assert.ok(compositionIndex !== -1)
+  assert.ok(dryRunIndex < advisoryIndex && advisoryIndex < compositionIndex, `advisory must render after dryRun and before composition: ${keys.join(",")}`)
 })
 
 test("metrics log carries wouldEvict fields whenever the manual-mode dry run is armed, zeroed under the watermark", async () => {

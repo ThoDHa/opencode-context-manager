@@ -50,6 +50,7 @@ const EXPECTED_SUCCESS_SPAN_COUNT = 5
 const EXPECTED_WARNING_SPAN_COUNT = 1
 
 const SNAPSHOT_SESSION = "sess-tui-panel-snapshot"
+const ADVISORY_SESSION = "sess-tui-panel-advisory"
 const LOG_ONLY_SESSION = "sess-tui-panel-colors"
 const UNREADABLE_SESSION = "sess-tui-panel-unreadable"
 const SIDEBAR_SESSION = "sess-tui-panel-sidebar"
@@ -84,7 +85,7 @@ after(() => {
 })
 
 const { assertTempHomeOwnsPaths, writeMetricsLog, writeSessionSnapshot } = await import("./tui/fixtures.ts")
-const { makeLine } = await import("./panel-fixtures.ts")
+const { makeAdvisory, makeLine } = await import("./panel-fixtures.ts")
 const { DEFAULT_LIVE_STATE_DIR, DEFAULT_METRICS_PATH, PANEL_COMMAND_TITLE } = await import("../plugin/panel-data.ts")
 const plugin = (await import("../plugin/context-manager.tui.tsx")).default as TuiPluginEntry
 
@@ -149,6 +150,24 @@ test("session route renders the session's snapshot data plus its log evictions",
     assert.ok(rendered.includes(EVICTION_ROW_MARKER))
     assert.equal(rendered.includes(NO_SESSION_ROW_TEXT), false)
     assert.equal(mock.calls.children.length, 0)
+  })
+})
+
+test("session route renders the advisory row between the last-run and counters rows when the snapshot carries one", async () => {
+  writeSessionSnapshot(DEFAULT_LIVE_STATE_DIR, ADVISORY_SESSION, { session: ADVISORY_SESSION, advisory: makeAdvisory() })
+  writeMetricsLog(DEFAULT_METRICS_PATH, [makeLine({ session: ADVISORY_SESSION, evictedThisRun: [] })])
+  const mock = createTuiApiMock()
+  mock.setSessionRoute(ADVISORY_SESSION)
+  const renderer = await openPanelRenderer(mock)
+  await withRenderedTree(renderer, async (tree) => {
+    const rendered = nodeText(tree.root)
+    const lastIndex = rendered.indexOf("last run:")
+    const advisoryIndex = rendered.indexOf("advisory:")
+    const countersIndex = rendered.indexOf("counters:")
+    assert.ok(lastIndex !== -1)
+    assert.ok(advisoryIndex !== -1, "expected the advisory row to render")
+    assert.ok(countersIndex !== -1)
+    assert.ok(lastIndex < advisoryIndex && advisoryIndex < countersIndex, `advisory row must sit between the last-run and counters rows: ${rendered}`)
   })
 })
 

@@ -52,6 +52,19 @@ const SNAPSHOT_HOT_SUBJECTS = ["/data/hot-a.txt", "/data/hot-b.txt"]
 const SNAPSHOT_TS = "2026-09-18T09:00:00.000Z"
 const LOG_LINE_TS_STALE = "2026-09-18T08:00:00.000Z"
 
+const SNAPSHOT_ADVISORY_RATIO = 0.85
+const SNAPSHOT_ADVISORY_BAND_START_TOKENS = 105400
+const SNAPSHOT_ADVISORY_DEFICIT_TOKENS = -544
+const SNAPSHOT_ADVISORY_SUBJECTS = ["/data/hot-a.txt", "/data/hot-b.txt", "/data/hot-c.txt"]
+
+const makeAdvisory = (): Record<string, unknown> => ({
+  ratio: SNAPSHOT_ADVISORY_RATIO,
+  bandStartTokens: SNAPSHOT_ADVISORY_BAND_START_TOKENS,
+  estimatedTokens: ESTIMATED_TOKENS,
+  deficitTokens: SNAPSHOT_ADVISORY_DEFICIT_TOKENS,
+  subjects: SNAPSHOT_ADVISORY_SUBJECTS,
+})
+
 const LOG_LINE_ONLY_EVICTIONS = TOTALS_EVICTIONS + 1
 const TOTALS_DEDUPED_BYTES = 9000
 const TOTALS_COLLAPSED_WINDOWS = 2
@@ -206,6 +219,10 @@ export {
   SNAPSHOT_PAGE_STORE_CAPACITY,
   SNAPSHOT_HOT_SUBJECTS,
   SNAPSHOT_TS,
+  SNAPSHOT_ADVISORY_RATIO,
+  SNAPSHOT_ADVISORY_BAND_START_TOKENS,
+  SNAPSHOT_ADVISORY_DEFICIT_TOKENS,
+  SNAPSHOT_ADVISORY_SUBJECTS,
   LOG_LINE_TS_STALE,
   LOG_LINE_ONLY_EVICTIONS,
   SECOND_LINE_ESTIMATED,
@@ -215,6 +232,7 @@ export {
   makeLine,
   serialize,
   withTempDir,
+  makeAdvisory,
   makeSnapshot,
   writeSnapshot,
   logLineAgainstSnapshot,
