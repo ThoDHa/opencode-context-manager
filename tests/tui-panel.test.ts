@@ -244,9 +244,11 @@ test("panel rows carry tone colors through fg and style.fg spans", async () => {
   const renderer = await openPanelRenderer(mock)
   await withRenderedTree(renderer, async (tree) => {
     const wholeLineTexts = elementsOfName(tree.root, "text").filter((node) => node.props["fg"] !== undefined)
-    assert.equal(wholeLineTexts.length, 1)
+    assert.equal(wholeLineTexts.length, 2)
     assert.equal(wholeLineTexts[0].props["fg"], MOCK_THEME.primary)
     assert.equal(nodeText(wholeLineTexts[0]), PANEL_COMMAND_TITLE)
+    assert.equal(wholeLineTexts[1].props["fg"], MOCK_THEME.info)
+    assert.ok(nodeText(wholeLineTexts[1]).includes(STALENESS_METRICS_MARKER))
     const labelSpans = spansWithFg(tree.root, MOCK_THEME.accent)
     assert.equal(labelSpans.length, EXPECTED_LABEL_SPAN_COUNT)
     assert.equal(spansWithFg(tree.root, MOCK_THEME.text).length, EXPECTED_TEXT_VALUE_SPAN_COUNT)

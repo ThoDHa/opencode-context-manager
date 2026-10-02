@@ -79,7 +79,7 @@ test("panelRows omits the advisory row when the panel carries no advisory", () =
   const rows = panelRows(data)
 
   assert.ok(!rows.some((row) => row.text.startsWith("advisory:")))
-  assert.equal(rows.length, 5)
+  assert.equal(rows.length, 6)
 })
 
 test("splitRowText splits a label value row at the first colon-space", () => {
@@ -139,7 +139,7 @@ test("panelRows renders the session's context limit, last run, compact counters,
     ),
   )
   assert.ok(rows.some((row) => row.text === `last evicted: read /data/a.txt (3 kB, ${EVICTED_MESSAGES_AGO} msgs ago)`))
-  assert.equal(rows.length, 5)
+  assert.equal(rows.length, 6)
   assert.ok(!rows.some((row) => row.text === "recently evicted:"))
   assert.ok(!rows.some((row) => row.text.startsWith("session:")))
   assert.ok(!rows.some((row) => row.text.startsWith("mode:")))
