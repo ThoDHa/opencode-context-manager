@@ -245,7 +245,7 @@ export type PanelMetricsLine = {
   totals: PanelTotals
 }
 
-export type PanelSnapshotStash = { entries: number; capacity: number }
+export type PanelCheckpointStash = { entries: number; capacity: number }
 
 export type PanelCheckpoint = {
   ts: string
@@ -255,7 +255,7 @@ export type PanelCheckpoint = {
   modelContextTokensSource: string
   lastRun: { estimatedTokens: number; watermarkTokens: number | null; deficitTokens: number | null }
   totals: PanelTotals
-  stash: PanelSnapshotStash
+  stash: PanelCheckpointStash
   hotSubjects: string[]
 }
 
@@ -269,7 +269,7 @@ export type SessionPanel = {
   stashReads: number
   recentEvictions: PanelEvictedEntry[]
   manualMode?: boolean
-  stash?: PanelSnapshotStash
+  stash?: PanelCheckpointStash
   hotSubjects?: string[]
 }
 
@@ -554,7 +554,7 @@ export const createMetricsLogReader = (path: string): MetricsLogReader => {
   }
 }
 
-const parseSnapshotStash = (value: unknown): PanelSnapshotStash | undefined => {
+const parseSnapshotStash = (value: unknown): PanelCheckpointStash | undefined => {
   if (!isRecord(value)) return undefined
   if (!isFiniteNumber(value["entries"])) return undefined
   if (!isFiniteNumber(value["capacity"])) return undefined
