@@ -11,6 +11,7 @@ import {
   canRegisterKeymap,
   canRegisterSidebar,
   createMetricsLogReader,
+  formatAgeText,
   formatBytes,
   formatTokenCount,
   globalTotals,
@@ -102,6 +103,10 @@ const DEFAULT_CONTEXT_LIMIT_SOURCE = "default"
 
 const LOG_LINE_TS_NEWER = "2026-09-18T10:00:00.000Z"
 const SESSION_A_LOG_LINE_COUNT = 1
+const STALENESS_NOW_MS = Date.parse("2026-10-02T12:00:00.000Z")
+const ONE_MINUTE_MS = 60_000
+const ONE_HOUR_MS = 60 * ONE_MINUTE_MS
+const ONE_DAY_MS = 24 * ONE_HOUR_MS
 
 const logLineNewerThanSnapshot = (): PanelMetricsLine => logLineAgainstSnapshot(LOG_LINE_TS_NEWER)
 
@@ -781,6 +786,28 @@ test("sessionPanelData returns an empty recent list when the limit is zero", () 
   assert.deepEqual(panel.recentEvictions, [])
 })
 
+test("session panels carry the newest line's timestamp and the snapshot's timestamp by origin", () => {
+  const logPanel = sessionPanelData([makeLine()], SESSION_A)
+
+  assert.ok(logPanel !== undefined)
+  assert.equal(logPanel.lastTransformAtMs, undefined)
+  assert.equal(logPanel.lastMetricsLineAtMs, Date.parse(LOG_LINE_TS_STALE))
+
+  const checkpoint = parseCheckpoint(JSON.stringify(makeSnapshot()))
+  assert.ok(checkpoint !== undefined)
+  const snapshotPanel = snapshotSessionPanel(checkpoint, [logLineStaleAgainstSnapshot()], SESSION_A)
+
+  assert.equal(snapshotPanel.lastTransformAtMs, Date.parse(SNAPSHOT_TS))
+  assert.equal(snapshotPanel.lastMetricsLineAtMs, Date.parse(LOG_LINE_TS_STALE))
+
+  const snapshotWithoutLines = snapshotSessionPanel(checkpoint, [], SESSION_A)
+
+  assert.equal(snapshotWithoutLines.lastTransformAtMs, Date.parse(SNAPSHOT_TS))
+  assert.equal(snapshotWithoutLines.lastMetricsLineAtMs, undefined)
+
+  assert.equal(sessionPanelData([makeLine()], SESSION_B), undefined)
+})
+
 test("globalTotals sums each session's latest cumulative totals once per session", () => {
   const lines = [
     makeLine(),
@@ -827,6 +854,20 @@ test("formatBytes renders sub-kilobyte counts as-is and larger sizes in kB, MB, 
   assert.equal(formatBytes(MEGABYTE_BYTES), "1.4 MB")
   assert.equal(formatBytes(GIGABYTE_BYTES), "3 GB")
   assert.equal(formatBytes(HUGE_RECLAIMED_BYTES), "115 GB")
+})
+
+test("formatAgeText renders just now under a minute and singular and plural minutes, hours, and days at the threshold boundaries", () => {
+  assert.equal(formatAgeText(STALENESS_NOW_MS, STALENESS_NOW_MS), "just now")
+  assert.equal(formatAgeText(STALENESS_NOW_MS, STALENESS_NOW_MS - (ONE_MINUTE_MS - 1)), "just now")
+  assert.equal(formatAgeText(STALENESS_NOW_MS, STALENESS_NOW_MS - ONE_MINUTE_MS), "1 minute ago")
+  assert.equal(formatAgeText(STALENESS_NOW_MS, STALENESS_NOW_MS - 2 * ONE_MINUTE_MS), "2 minutes ago")
+  assert.equal(formatAgeText(STALENESS_NOW_MS, STALENESS_NOW_MS - (ONE_HOUR_MS - 1)), "59 minutes ago")
+  assert.equal(formatAgeText(STALENESS_NOW_MS, STALENESS_NOW_MS - ONE_HOUR_MS), "1 hour ago")
+  assert.equal(formatAgeText(STALENESS_NOW_MS, STALENESS_NOW_MS - 2 * ONE_HOUR_MS), "2 hours ago")
+  assert.equal(formatAgeText(STALENESS_NOW_MS, STALENESS_NOW_MS - (ONE_DAY_MS - 1)), "23 hours ago")
+  assert.equal(formatAgeText(STALENESS_NOW_MS, STALENESS_NOW_MS - ONE_DAY_MS), "1 day ago")
+  assert.equal(formatAgeText(STALENESS_NOW_MS, STALENESS_NOW_MS - 2 * ONE_DAY_MS), "2 days ago")
+  assert.equal(formatAgeText(STALENESS_NOW_MS, STALENESS_NOW_MS + ONE_MINUTE_MS), "just now")
 })
 
 test("contextLimitSourceLabel maps the plugin's source ids to panel labels", () => {

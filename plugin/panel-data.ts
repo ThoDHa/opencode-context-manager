@@ -196,6 +196,10 @@ const MEGABYTE_DECIMALS = 1
 const GIGABYTE_DECIMALS = 1
 const KILOTOKEN_DECIMALS = 1
 const MEGATOKEN_DECIMALS = 2
+const AGE_MINUTE_MS = 60_000
+const AGE_HOUR_MS = 60 * AGE_MINUTE_MS
+const AGE_DAY_MS = 24 * AGE_HOUR_MS
+const AGE_JUST_NOW_MAX_MS = AGE_MINUTE_MS
 
 const CONTEXT_LIMIT_SOURCE_OVERRIDE = "override"
 const CONTEXT_LIMIT_SOURCE_MODEL = "model"
@@ -218,6 +222,10 @@ export const PANEL_COMMAND_CATEGORY = "Context"
 export const PANEL_COMMAND_SLASH_NAME = "context"
 const COUNTERS_ROW_LABEL = "counters:"
 const LAST_EVICTION_ROW_LABEL = "last evicted:"
+const AGE_JUST_NOW_TEXT = "just now"
+const AGE_MINUTE_UNIT = "minute"
+const AGE_HOUR_UNIT = "hour"
+const AGE_DAY_UNIT = "day"
 const NO_SESSION_ROW_TEXT = "no active session"
 const NO_RUNS_ROW_TEXT = "no metrics recorded for this session yet"
 const METRICS_UNREADABLE_PREFIX = "metrics log unreadable: "
@@ -281,6 +289,8 @@ export type SessionPanel = {
   manualMode?: boolean
   pageStore?: PanelCheckpointPageStore
   hotSubjects?: string[]
+  lastTransformAtMs?: number | undefined
+  lastMetricsLineAtMs?: number | undefined
 }
 
 export type GlobalTotals = {
@@ -703,6 +713,8 @@ export const snapshotSessionPanel = (
     ...(snapshot.advisory === undefined ? {} : { advisory: snapshot.advisory }),
     pageStore: snapshot.pageStore,
     hotSubjects: snapshot.hotSubjects,
+    lastTransformAtMs: timestampMsOf(snapshot.ts),
+    lastMetricsLineAtMs: history?.lastMetricsLineAtMs,
   }
 }
 
@@ -740,6 +752,8 @@ export const sessionPanelData = (
     totals: last.totals,
     recalls: last.totals.recallHits + last.totals.recallMisses,
     recentEvictions,
+    lastTransformAtMs: undefined,
+    lastMetricsLineAtMs: timestampMsOf(last.ts),
   }
 }
 
@@ -835,6 +849,20 @@ export const formatBytes = (bytes: number): string => {
   if (Math.abs(bytes) < BYTES_PER_MEGABYTE) return compactNumber(bytes, BYTES_PER_KILOBYTE, KILOBYTE_DECIMALS, " kB")
   if (Math.abs(bytes) < BYTES_PER_GIGABYTE) return compactNumber(bytes, BYTES_PER_MEGABYTE, MEGABYTE_DECIMALS, " MB")
   return compactNumber(bytes, BYTES_PER_GIGABYTE, GIGABYTE_DECIMALS, " GB")
+}
+
+const ageUnitText = (count: number, unit: string): string => `${count} ${unit}${count === 1 ? "" : "s"} ago`
+
+// Renders a wall-clock age against explicit thresholds: sub-minute ages
+// (including a future timestamp from clock skew) read as "just now", then
+// whole floored units up through days. A render-time formatter, not date
+// machinery: it formats ages already parsed to ms by timestampMsOf.
+export const formatAgeText = (nowMs: number, thenMs: number): string => {
+  const ageMs = nowMs - thenMs
+  if (ageMs < AGE_JUST_NOW_MAX_MS) return AGE_JUST_NOW_TEXT
+  if (ageMs < AGE_HOUR_MS) return ageUnitText(Math.floor(ageMs / AGE_MINUTE_MS), AGE_MINUTE_UNIT)
+  if (ageMs < AGE_DAY_MS) return ageUnitText(Math.floor(ageMs / AGE_HOUR_MS), AGE_HOUR_UNIT)
+  return ageUnitText(Math.floor(ageMs / AGE_DAY_MS), AGE_DAY_UNIT)
 }
 
 export type PanelRowTone = "header" | "normal" | "warning" | "success" | "info"
