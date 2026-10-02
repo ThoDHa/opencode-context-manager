@@ -5238,6 +5238,11 @@ test("live state snapshot is written on a quiet run with the exact schema counte
       contextLimitModelKey: null,
       lastRun: { estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS), watermarkTokens: null, deficitTokens: null },
       totals: { ...STATS_ZEROED_COUNTERS, processedContextBytes: STANDARD_BUNDLE_CHARS, processedContextTokens: tokensForChars(STANDARD_BUNDLE_CHARS) },
+      retention: {
+        pool: 1,
+        reasons: { inWindow: 0, protectedTool: 0, patternProtected: 0, faultShielded: 0, retainedRead: 0 },
+        faultShieldedShiftMessages: 0,
+      },
       pageStore: { entries: 0, capacity: STASH_LIMIT },
       hotSubjects: [LIVE_STATE_QUIET_SUBJECT],
     })
@@ -5251,6 +5256,11 @@ test("live state snapshot is written on a quiet run with the exact schema counte
       contextLimitModelKey: null,
       lastRun: { estimatedTokens: tokensForChars(STANDARD_BUNDLE_CHARS), watermarkTokens: null, deficitTokens: null },
       totals: { ...STATS_ZEROED_COUNTERS, processedContextBytes: 2 * STANDARD_BUNDLE_CHARS, processedContextTokens: tokensForChars(2 * STANDARD_BUNDLE_CHARS) },
+      retention: {
+        pool: 1,
+        reasons: { inWindow: 0, protectedTool: 0, patternProtected: 0, faultShielded: 0, retainedRead: 0 },
+        faultShieldedShiftMessages: 0,
+      },
       pageStore: { entries: 0, capacity: STASH_LIMIT },
       hotSubjects: [LIVE_STATE_QUIET_SUBJECT],
     })
