@@ -334,7 +334,7 @@ type RunOutcome = {
   dedupedUnique: number
   collapsedWindows: number
   collapsedWindowBytes: number
-  touches: number
+  faults: number
   reasoningExpired: ReasoningExpiry
   fenceEvicted: FenceEviction
   dryRun: DryRunResult | undefined
@@ -374,7 +374,7 @@ type SessionMetrics = {
   fenceEvicted: number
   processedContextBytes: number
   evictedSubjects: Subject[]
-  touchScanThrough: number
+  faultScanThrough: number
   // Per-entry memory for the unique-event counters: content identities of
   // reasoning parts and dedup pairs already counted. They reset when the
   // metrics store evicts and reseeds the entry, so unique counts are
@@ -393,7 +393,7 @@ type SessionMetrics = {
   // because the fault map's keys live in the rendered subject domain
   // read_evicted matches on.
   evictedRenderedSubjects: string[]
-  stashReadsLoggedThrough: number
+  recallsLoggedThrough: number
   // Per-process bookkeeping for the metrics line coalesce gate: the moment
   // of the session's last flushed line and the budget source it carried.
   // Never persisted; a restart simply writes on its next eventful run.
@@ -448,8 +448,8 @@ type RawCounterKey = SchemaRawCounterKey
 type NumberValuedSessionMetricKey = {
   [K in keyof SessionMetrics]-?: SessionMetrics[K] extends number ? K : never
 }[keyof SessionMetrics]
-export type MetricsCursorKey = "touchScanThrough" | "stashReadsLoggedThrough"
-export const METRICS_CURSOR_KEYS: readonly MetricsCursorKey[] = ["touchScanThrough", "stashReadsLoggedThrough"]
+export type MetricsCursorKey = "faultScanThrough" | "recallsLoggedThrough"
+export const METRICS_CURSOR_KEYS: readonly MetricsCursorKey[] = ["faultScanThrough", "recallsLoggedThrough"]
 type UnseededMetricKeys = Exclude<Exclude<NumberValuedSessionMetricKey, MetricsCursorKey>, RawCounterKey>
 type AssertEveryMetricSeeded = UnseededMetricKeys extends never ? true : never
 const everyMetricIsSeeded: AssertEveryMetricSeeded = true
@@ -1598,12 +1598,12 @@ const zeroedRawCounters = Object.fromEntries(RAW_COUNTER_KEYS.map((key) => [key,
 const createSessionMetrics = (): SessionMetrics => ({
   ...zeroedRawCounters,
   evictedSubjects: [],
-  touchScanThrough: TOUCH_SCAN_INITIAL_WATERMARK,
+  faultScanThrough: TOUCH_SCAN_INITIAL_WATERMARK,
   reasoningSeenKeys: [],
   dedupedPairKeys: [],
   faultCounts: new Map(),
   evictedRenderedSubjects: [],
-  stashReadsLoggedThrough: 0,
+  recallsLoggedThrough: 0,
 })
 
 // Runtime inventory of SessionMetrics's numeric keys, derived from a real
@@ -1767,7 +1767,7 @@ const seedSessionCounters = (metrics: SessionMetrics, persisted: PersistedTotals
   // Raised with the seeded reads: without it the first post-restart run
   // would count every pre-restart stash read as read-since-last-line and
   // write a spurious eventful line.
-  metrics.stashReadsLoggedThrough = persisted.counters.stashHits + persisted.counters.stashMisses
+  metrics.recallsLoggedThrough = persisted.counters.stashHits + persisted.counters.stashMisses
 }
 
 type MetricsHydrationEntry = { promise: Promise<void>; settled: boolean }
@@ -1846,17 +1846,17 @@ const creditKeyedFaults = (metrics: SessionMetrics, appearance: ToolAppearance, 
   }
 }
 
-const countPostEvictionTouches = (metrics: SessionMetrics, appearances: ToolAppearance[], minSubstringChars: number): number => {
-  let touches = 0
-  let latestIndex = metrics.touchScanThrough
+const countFaults = (metrics: SessionMetrics, appearances: ToolAppearance[], minSubstringChars: number): number => {
+  let faults = 0
+  let latestIndex = metrics.faultScanThrough
   for (const appearance of appearances) {
-    if (appearance.msgIndex <= metrics.touchScanThrough) continue
-    if (appearanceTouches(metrics.evictedSubjects, appearance, minSubstringChars)) touches += 1
+    if (appearance.msgIndex <= metrics.faultScanThrough) continue
+    if (appearanceTouches(metrics.evictedSubjects, appearance, minSubstringChars)) faults += 1
     creditKeyedFaults(metrics, appearance, minSubstringChars)
     latestIndex = appearance.msgIndex
   }
-  metrics.touchScanThrough = latestIndex
-  return touches
+  metrics.faultScanThrough = latestIndex
+  return faults
 }
 
 const lastRunMetricsOf = (eviction: EvictionResult): LastRunMetrics => ({
@@ -1866,7 +1866,7 @@ const lastRunMetricsOf = (eviction: EvictionResult): LastRunMetrics => ({
 })
 
 const recordRunOutcome = (metrics: SessionMetrics, run: RunOutcome, rememberedSubjectsBound: number): void => {
-  const { eviction, deduped: dedupedThisRun, dedupedBytes: dedupedBytesThisRun, dedupedUnique: dedupedUniqueThisRun, collapsedWindows: collapsedWindowsThisRun, collapsedWindowBytes: collapsedWindowBytesThisRun, touches: touchesThisRun, reasoningExpired: reasoningExpiredThisRun, fenceEvicted: fenceEvictedThisRun } = run
+  const { eviction, deduped: dedupedThisRun, dedupedBytes: dedupedBytesThisRun, dedupedUnique: dedupedUniqueThisRun, collapsedWindows: collapsedWindowsThisRun, collapsedWindowBytes: collapsedWindowBytesThisRun, faults: faultsThisRun, reasoningExpired: reasoningExpiredThisRun, fenceEvicted: fenceEvictedThisRun } = run
   metrics.lastRun = lastRunMetricsOf(eviction)
   metrics.evictions += eviction.evicted.length
   metrics.stashDropped += eviction.stashDropped
@@ -1889,7 +1889,7 @@ const recordRunOutcome = (metrics: SessionMetrics, run: RunOutcome, rememberedSu
   // expireAgedReasoning's return value.
   metrics.reasoningExpiredUnique += reasoningExpiredThisRun.unique
   metrics.reasoningBytesExpiredUnique += reasoningExpiredThisRun.uniqueBytes
-  metrics.postEvictionTouches += touchesThisRun
+  metrics.postEvictionTouches += faultsThisRun
   metrics.fenceEvicted += fenceEvictedThisRun.blocks
   metrics.bytesReclaimed += fenceEvictedThisRun.bytes
   metrics.stashDropped += fenceEvictedThisRun.stashDropped
@@ -2000,8 +2000,8 @@ const recordMetricsLine = async (
   budget: ContextLimit,
   run: RunOutcome,
 ): Promise<void> => {
-  const { eviction, deduped: dedupedThisRun, touches: touchesThisRun, reasoningExpired: reasoningExpiredThisRun, fenceEvicted: fenceEvictedThisRun } = run
-  const stashReadsSinceLastLine = metrics.stashHits + metrics.stashMisses - metrics.stashReadsLoggedThrough
+  const { eviction, deduped: dedupedThisRun, faults: faultsThisRun, reasoningExpired: reasoningExpiredThisRun, fenceEvicted: fenceEvictedThisRun } = run
+  const stashReadsSinceLastLine = metrics.stashHits + metrics.stashMisses - metrics.recallsLoggedThrough
   const nowMs = options.now()
   // The five recorded-event disjuncts feed both gates so the lists cannot
   // drift. Eventful runs are the candidates for a line: an eviction, dedup
@@ -2018,7 +2018,7 @@ const recordMetricsLine = async (
   const hasRecordedEvent =
     eviction.evicted.length > 0 ||
     dedupedThisRun > 0 ||
-    touchesThisRun > 0 ||
+    faultsThisRun > 0 ||
     fenceEvictedThisRun.blocks > 0 ||
     stashReadsSinceLastLine > 0
   const isEventful = hasRecordedEvent || reasoningExpiredThisRun.parts > 0
@@ -2057,7 +2057,7 @@ const recordMetricsLine = async (
           wouldEvictBytesThisRun: run.dryRun.wouldEvictBytes,
         }),
     fenceEvictedThisRun: fenceEvictedThisRun.blocks,
-    postEvictionTouchesThisRun: touchesThisRun,
+    postEvictionTouchesThisRun: faultsThisRun,
     stashReadsSinceLastLine,
     totals: totalsOf(metrics, options.charsPerToken),
   }
@@ -2065,7 +2065,7 @@ const recordMetricsLine = async (
     const metricsJsonLine = `${JSON.stringify(line)}\n`
     await rotateMetricsLogPastCap(options.metricsPath, Buffer.byteLength(metricsJsonLine), options.metricsRotationMaxBytes)
     await appendFile(options.metricsPath, metricsJsonLine)
-    metrics.stashReadsLoggedThrough = metrics.stashHits + metrics.stashMisses
+    metrics.recallsLoggedThrough = metrics.stashHits + metrics.stashMisses
     metrics.lastLineAtMs = nowMs
     metrics.lastLineBudgetSource = budget.source
     delete metrics.logWriteError
@@ -2721,7 +2721,7 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
     options.manualMode && effectiveWatermarkTokens !== null
       ? measureDryRun(messages, candidates, options, effectiveWatermarkTokens)
       : undefined
-  const touchesThisRun = countPostEvictionTouches(sessionMetrics, eviction.appearances, options.minSubstringMatchChars)
+  const faultsThisRun = countFaults(sessionMetrics, eviction.appearances, options.minSubstringMatchChars)
   // Composition reads the final post-transform list: every pass above has
   // applied its edits, so the sums are what this request carries.
   const composition = runCompositionOf(messages, options)
@@ -2732,7 +2732,7 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
     dedupedUnique: dedupedUniqueThisRun,
     collapsedWindows: rangeCollapse.collapsed,
     collapsedWindowBytes: rangeCollapse.collapsedBytes,
-    touches: touchesThisRun,
+    faults: faultsThisRun,
     reasoningExpired: reasoningExpiredThisRun,
     fenceEvicted: fenceEvictedThisRun,
     dryRun,
