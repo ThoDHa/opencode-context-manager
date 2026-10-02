@@ -6966,11 +6966,12 @@ test("the compacting hook appends hot subjects and the store note for a session 
   const output = { context: [] as string[] }
   await hooks["experimental.session.compacting"]({ sessionID: SESSION_ID }, output)
 
-  assert.equal(output.context.length, 2)
+  assert.equal(output.context.length, 3)
   assert.equal(output.context[0], hintLineFor([HINT_RENDERED_SUBJECT]))
   assert.ok(output.context[1].startsWith(COMPACTION_BLOCK_MARKER))
   assert.ok(output.context[1].includes(RECALL_TOOL_NAME))
   assert.ok(output.context[1].includes(HINT_RENDERED_SUBJECT))
+  assert.equal(output.context[2], omissionsFooterFor(1, 0, 0))
 })
 
 test("the compacting hook attaches nothing for an unknown session", async () => {
@@ -7031,7 +7032,8 @@ test("the compacting hook attaches nothing when hintSubjects is 0 even with a po
   const output = { context: [] as string[] }
   await hooks["experimental.session.compacting"]({ sessionID: SESSION_ID }, output)
 
-  assert.equal(output.context.length, 0)
+  assert.equal(output.context.length, 1)
+  assert.equal(output.context[0], omissionsFooterFor(1, 0, 0))
 })
 
 test("the compacting hook attaches only the store note when the session remembers no evicted subjects but holds stored outputs", async () => {
@@ -7042,9 +7044,10 @@ test("the compacting hook attaches only the store note when the session remember
   const output = { context: [] as string[] }
   await hooks["experimental.session.compacting"]({ sessionID: SESSION_ID }, output)
 
-  assert.equal(output.context.length, 1)
+  assert.equal(output.context.length, 2)
   assert.ok(output.context[0].startsWith(COMPACTION_BLOCK_MARKER))
   assert.ok(output.context[0].includes(RECALL_TOOL_NAME))
+  assert.equal(output.context[1], omissionsFooterFor(1, 0, 0))
 })
 
 test("the store note dedupes repeated subjects and caps at the subject bound, newest first", async () => {
