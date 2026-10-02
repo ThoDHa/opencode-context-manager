@@ -7,6 +7,7 @@ import { test } from "node:test"
 import contextManagerEntry, {
   DEFAULT_INGESTION_HYGIENE_ROTATION_MAX_BYTES,
   DEFAULT_METRICS_ROTATION_MAX_BYTES,
+  DEFAULT_PAGE_STORE_ROTATION_MAX_BYTES,
   METRIC_NUMBER_KEYS,
   METRICS_CURSOR_KEYS,
   RAW_COUNTER_KEYS,
@@ -160,6 +161,9 @@ const OCCUPANCY_CAPPED_SIXTH_TOOL = "webfetch"
 const OCCUPANCY_CAPPED_SIXTH_PREFIX = "/data/capped-sixth"
 const FENCE_MIXED_TAG = "mixed"
 const STASH_INVALID_SUBJECT_LEAD = "requires a non-empty subject string"
+const PAGE_STORE_RESTORED_LEAD = "restored from the prior-session page store"
+const PAGE_STORE_OLDER_LEAD = "older prior-session pages for subject"
+const PAGE_STORE_MISS_LEAD = "no prior-session page for subject"
 const RECEIVED_LABEL = "received"
 const UNKNOWN_TARGET_LABEL = "unknown target"
 const STASH_LIMIT = 50
@@ -419,10 +423,16 @@ const buildSmallBundle = (): MessageBundle => ({
 })
 
 const loadPluginHooks = async (): Promise<HookMap> =>
-  (await contextManagerFactory({}, { metricsLog: false, liveStateLog: false, ingestionHygieneCopy: false })) as HookMap
+  (await contextManagerFactory(
+    {},
+    { metricsLog: false, liveStateLog: false, ingestionHygieneCopy: false, pageStore: false },
+  )) as HookMap
 
 const loadPluginHooksWith = async (options: Record<string, unknown>): Promise<HookMap> =>
-  (await contextManagerFactory({}, { metricsLog: false, liveStateLog: false, ingestionHygieneCopy: false, ...options })) as HookMap
+  (await contextManagerFactory(
+    {},
+    { metricsLog: false, liveStateLog: false, ingestionHygieneCopy: false, pageStore: false, ...options },
+  )) as HookMap
 
 type HintPartRef = { messageIndex: number; partIndex: number; text: string }
 
@@ -586,8 +596,15 @@ const outputDigestFor = (tool: string, subject: string, output: string): string 
 const digestSentenceFor = (tool: string, subject: string, output: string): string =>
   `${DIGEST_POINTER_LEAD}${outputDigestFor(tool, subject, output)}${DIGEST_SENTENCE_TAIL}`
 
+const pageStoreRestoredLineFor = (): string => `${STASH_MARKER} ${PAGE_STORE_RESTORED_LEAD}.`
+
+const pageStoreOlderLineFor = (subject: string, count: number): string =>
+  `${STASH_MARKER} ${PAGE_STORE_OLDER_LEAD} "${subject}": ${count}.`
+
+const pageStoreMissLineFor = (subject: string): string => `${STASH_MARKER} ${PAGE_STORE_MISS_LEAD} "${subject}".`
+
 const stashMissFor = (subject: string, occupancy: string): string =>
-  `${STASH_MARKER} ${STASH_MISS_LEAD} "${subject}"; ${STASH_MISS_HINT}.\n${occupancy}`
+  `${STASH_MARKER} ${STASH_MISS_LEAD} "${subject}"; ${STASH_MISS_HINT}.\n${occupancy}\n${pageStoreMissLineFor(subject)}`
 
 type OccupancyEntryShape = { tool: string; subject: string; msgIndex: number }
 
@@ -3670,6 +3687,8 @@ const METRICS_LOG_BASENAME = "context-metrics.jsonl"
 const DEFAULT_METRICS_PATH = join(homedir(), ...METRICS_DIR_SEGMENTS, METRICS_LOG_BASENAME)
 const HYGIENE_LOG_BASENAME = "context-hygiene.jsonl"
 const DEFAULT_INGESTION_HYGIENE_PATH = join(homedir(), ...METRICS_DIR_SEGMENTS, HYGIENE_LOG_BASENAME)
+const PAGE_STORE_LOG_BASENAME = "context-pages.jsonl"
+const DEFAULT_PAGE_STORE_PATH = join(homedir(), ...METRICS_DIR_SEGMENTS, PAGE_STORE_LOG_BASENAME)
 const METRICS_TEMP_DIR_PREFIX = "ctx-metrics-test-"
 const METRICS_LOG_FILE_NAME = "metrics.jsonl"
 const METRICS_BLOCKED_DIR_NAME = "missing-subdir"
@@ -3866,6 +3885,9 @@ test("context_stats reports zeroed counters unknown budget and empty stash for a
     ingestionHygieneCopy: false,
     ingestionHygienePath: DEFAULT_INGESTION_HYGIENE_PATH,
     ingestionHygieneRotationMaxBytes: DEFAULT_INGESTION_HYGIENE_ROTATION_MAX_BYTES,
+    pageStore: false,
+    pageStorePath: DEFAULT_PAGE_STORE_PATH,
+    pageStoreRotationMaxBytes: DEFAULT_PAGE_STORE_ROTATION_MAX_BYTES,
     liveStateLog: false,
     liveStatePath: DEFAULT_LIVE_STATE_DIR,
     liveStatePruneMaxAgeMs: DEFAULT_LIVE_STATE_PRUNE_MAX_AGE_MS,
@@ -9138,4 +9160,371 @@ test("the plugin entry exports the v1 module object with the shared id and the s
   assert.ok(PLUGIN_ID.length > 0)
   assert.equal(contextManagerEntry.id, PLUGIN_ID)
   assert.equal(typeof contextManagerEntry.server, "function")
+})
+
+const PAGE_STORE_LOG_FILE_NAME = "pages.jsonl"
+const PAGE_STORE_SEED_TS = "2026-10-01T00:00:00.000Z"
+const PAGE_STORE_EVICTED_SUBJECT = "/data/page-store-evicted.txt"
+const PAGE_STORE_DISABLED_PROBE_SUBJECT = "/data/page-store-disabled.txt"
+const PAGE_STORE_ROTATION_A_SUBJECT = "/data/page-store-rotation-a.txt"
+const PAGE_STORE_ROTATION_B_SUBJECT = "/data/page-store-rotation-b.txt"
+const PAGE_STORE_REPLACEMENT_SUBJECT = "/data/page-store-replacement.txt"
+const PAGE_STORE_ROUNDTRIP_SUBJECT = "/data/page-store-roundtrip.txt"
+const PAGE_STORE_OLDER_SUBJECT = "/data/page-store-older.txt"
+const PAGE_STORE_OLDER_OUTPUTS = ["older page one", "older page two", "newest page of three"]
+const PAGE_STORE_ATTACHED_SUBJECT = "/data/page-store-attached.txt"
+const PAGE_STORE_CORRUPT_SUBJECT = "/data/page-store-corrupt.txt"
+const PAGE_STORE_CORRUPT_GOOD_OUTPUT = "the one well-formed page"
+const PAGE_STORE_FAULT_RELOADED = "/data/page-store-fault-reloaded.txt"
+const PAGE_STORE_FAULT_SIBLING = "/data/page-store-fault-sibling.txt"
+const PAGE_STORE_ABSENT_MISS_SUBJECT = "/data/page-store-absent.txt"
+const PAGE_STORE_WRITE_BLOCKED_DIR = "missing-subdir"
+const PAGE_STORE_STALE_ROTATED_CONTENT = "stale rotated pages\n"
+const PAGE_STORE_CUSTOM_PATH_TAIL = "custom-pages.jsonl"
+const PAGE_STORE_CUSTOM_ROTATION_CAP = 4096
+const PAGE_STORE_INVALID_ROTATION_CAPS = [-1, Number.NaN, Number.POSITIVE_INFINITY]
+
+const pageStorePathIn = (dir: string): string => join(dir, PAGE_STORE_LOG_FILE_NAME)
+
+const rotatedPageStorePathIn = (dir: string): string => `${pageStorePathIn(dir)}${METRICS_ROTATION_SUFFIX}`
+
+const blockedPageStorePathIn = (dir: string): string => join(dir, PAGE_STORE_WRITE_BLOCKED_DIR, PAGE_STORE_LOG_FILE_NAME)
+
+const loadPluginHooksWithPageStore = async (storePath: string, extra: Record<string, unknown> = {}): Promise<HookMap> =>
+  loadPluginHooksWith({ pageStore: true, pageStorePath: storePath, ...extra })
+
+const pageLinesIn = (storePath: string): Record<string, unknown>[] =>
+  readFileSync(storePath, "utf8")
+    .split(METRICS_LINE_SEPARATOR)
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+
+const seedPageStore = (storePath: string, lines: Record<string, unknown>[]): void =>
+  writeFileSync(storePath, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`)
+
+const pageLineOf = (subject: string, output: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+  ts: PAGE_STORE_SEED_TS,
+  session: SESSION_ID,
+  tool: READ_TOOL,
+  subject,
+  msgIndex: 0,
+  partIndex: 0,
+  output,
+  ...extra,
+})
+
+const runPageStoreEviction = async (hooks: HookMap, sessionID: string, path: string): Promise<StrictBundle> => {
+  await setContextLimit(hooks, sessionID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+  const bundle = buildStandardBundle(sessionID, path)
+  await runTransform(hooks, bundle)
+  return bundle
+}
+
+test("an eviction appends one well-formed page line to the store in the same transform run", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const hooks = await loadPluginHooksWithPageStore(storePath)
+
+    const bundle = await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+
+    assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+    const lines = pageLinesIn(storePath)
+    assert.equal(lines.length, 1)
+    assertValidTimestamp(lines[0].ts)
+    assert.equal(lines[0].session, SESSION_ID)
+    assert.equal(lines[0].tool, READ_TOOL)
+    assert.equal(lines[0].subject, PAGE_STORE_EVICTED_SUBJECT)
+    assert.equal(lines[0].msgIndex, 0)
+    assert.equal(lines[0].partIndex, 0)
+    assert.equal(lines[0].output, outputOfBytes(MIN_EVICTABLE_BYTES))
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a fence eviction appends its page line with the fence label and the span slot", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const hooks = await loadPluginHooksWithPageStore(storePath, { userFenceEviction: { enabled: true } })
+    const block = fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG))
+    await runTransform(hooks, userFenceBundle(`${FENCE_PROSE_BEFORE}\n${block}\n${FENCE_PROSE_AFTER}`))
+
+    const lines = pageLinesIn(storePath)
+    assert.equal(lines.length, 1)
+    assert.equal(lines[0].tool, FENCE_STASH_TOOL_LABEL)
+    assert.equal(lines[0].subject, fenceFirstLineOf(FENCE_LINE_TAG))
+    assert.equal(lines[0].stashSlot, 1)
+    assert.equal(lines[0].output, `${block}\n`)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("pageStore false writes nothing to the store path", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const hooks = await loadPluginHooksWith({})
+
+    await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_DISABLED_PROBE_SUBJECT)
+
+    assert.equal(existsSync(storePath), false)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("pageStoreRotationMaxBytes zero writes nothing to the store path", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const hooks = await loadPluginHooksWithPageStore(storePath, { pageStoreRotationMaxBytes: METRICS_ROTATION_DISABLED_MAX_BYTES })
+
+    await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_DISABLED_PROBE_SUBJECT)
+
+    assert.equal(existsSync(storePath), false)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("the page store rotates to the .1 sibling when an append would cross the cap", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const probeHooks = await loadPluginHooksWithPageStore(storePath)
+    await runPageStoreEviction(probeHooks, SESSION_ID, PAGE_STORE_ROTATION_A_SUBJECT)
+    const capBytes = statSync(storePath).size
+    rmSync(storePath)
+
+    const hooks = await loadPluginHooksWithPageStore(storePath, { pageStoreRotationMaxBytes: capBytes })
+    await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_ROTATION_A_SUBJECT)
+    assert.equal(existsSync(rotatedPageStorePathIn(pagesDir)), false)
+    assert.equal(statSync(storePath).size, capBytes)
+
+    await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_ROTATION_B_SUBJECT)
+
+    const rotatedLines = pageLinesIn(rotatedPageStorePathIn(pagesDir))
+    assert.equal(rotatedLines.length, 1)
+    assert.equal(rotatedLines[0].subject, PAGE_STORE_ROTATION_A_SUBJECT)
+    const freshLines = pageLinesIn(storePath)
+    assert.equal(freshLines.length, 1)
+    assert.equal(freshLines[0].subject, PAGE_STORE_ROTATION_B_SUBJECT)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("page store rotation replaces a prior .1 sibling with the rotated file", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const seedLine = pageLineOf(PAGE_STORE_ROTATION_A_SUBJECT, outputOfBytes(MIN_EVICTABLE_BYTES))
+    const seedContent = `${JSON.stringify(seedLine)}\n`
+    writeFileSync(storePath, seedContent)
+    writeFileSync(rotatedPageStorePathIn(pagesDir), PAGE_STORE_STALE_ROTATED_CONTENT)
+
+    const hooks = await loadPluginHooksWithPageStore(storePath, { pageStoreRotationMaxBytes: METRICS_ROTATION_TINY_CAP })
+    await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_REPLACEMENT_SUBJECT)
+
+    assert.equal(readFileSync(rotatedPageStorePathIn(pagesDir), "utf8"), seedContent)
+    const freshLines = pageLinesIn(storePath)
+    assert.equal(freshLines.length, 1)
+    assert.equal(freshLines[0].subject, PAGE_STORE_REPLACEMENT_SUBJECT)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a page store write failure surfaces pageStoreWriteError and never blocks the eviction", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const hooks = await loadPluginHooksWithPageStore(blockedPageStorePathIn(pagesDir))
+
+    const bundle = await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+
+    assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+    const stats = await readStats(hooks, SESSION_ID)
+    assert.equal(typeof stats.pageStoreWriteError, "string")
+    assert.ok((stats.pageStoreWriteError as string).length > 0)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a fresh plugin instance reloads a prior session's evicted original through the page store", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const firstSittingHooks = await loadPluginHooksWithPageStore(storePath)
+    await runPageStoreEviction(firstSittingHooks, SESSION_ID, PAGE_STORE_ROUNDTRIP_SUBJECT)
+
+    const secondSittingHooks = await loadPluginHooksWithPageStore(storePath)
+    assert.equal(
+      await readEvicted(secondSittingHooks, PAGE_STORE_ROUNDTRIP_SUBJECT, SESSION_ID_B),
+      `${outputOfBytes(MIN_EVICTABLE_BYTES)}\n${pageStoreRestoredLineFor()}`,
+    )
+    assert.equal(countersOf(await readStats(secondSittingHooks, SESSION_ID_B)).stashHits, 1)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a page store hit returns the newest page in full and counts the older pages", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const hooks = await loadPluginHooksWithPageStore(storePath)
+    seedPageStore(storePath, PAGE_STORE_OLDER_OUTPUTS.map((output) => pageLineOf(PAGE_STORE_OLDER_SUBJECT, output)))
+
+    assert.equal(
+      await readEvicted(hooks, PAGE_STORE_OLDER_SUBJECT, SESSION_ID),
+      `${PAGE_STORE_OLDER_OUTPUTS[2]}\n${pageStoreRestoredLineFor()}\n${pageStoreOlderLineFor(PAGE_STORE_OLDER_SUBJECT, 2)}`,
+    )
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a page store hit appends the attachments manifest when the page carries attachments", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const hooks = await loadPluginHooksWithPageStore(storePath)
+    seedPageStore(storePath, [
+      pageLineOf(PAGE_STORE_ATTACHED_SUBJECT, outputOfBytes(MIN_EVICTABLE_BYTES), {
+        attachments: [attachmentItemOf(ATTACHMENT_MIME_PNG, ATTACHMENT_PAYLOAD_CHARS_PRIMARY, "call_pagestore")],
+      }),
+    ])
+
+    assert.equal(
+      await readEvicted(hooks, PAGE_STORE_ATTACHED_SUBJECT, SESSION_ID),
+      `${outputOfBytes(MIN_EVICTABLE_BYTES)}\n${pageStoreRestoredLineFor()}\n${attachmentManifestLineFor([
+        attachmentSummaryFor(ATTACHMENT_MIME_PNG, ATTACHED_URL_PRIMARY_CHARS),
+      ])}`,
+    )
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a page store hit fault-protects the reading session like an in-session reload", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const firstSittingHooks = await loadPluginHooksWithPageStore(storePath)
+    await runPageStoreEviction(firstSittingHooks, SESSION_ID, PAGE_STORE_FAULT_RELOADED)
+
+    const secondSittingHooks = await loadPluginHooksWithPageStore(storePath)
+    assert.ok((await readEvicted(secondSittingHooks, PAGE_STORE_FAULT_RELOADED, SESSION_ID)).startsWith(outputOfBytes(MIN_EVICTABLE_BYTES)))
+
+    const bundle = await runFaultContest(secondSittingHooks, [PAGE_STORE_FAULT_RELOADED, PAGE_STORE_FAULT_SIBLING], OVER_BY_ONE_TOKENS)
+    assertEntryTombstoned(bundle, 1)
+    assertEntryKept(bundle, 0)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("an in-session stash hit keeps precedence over the page store and stays byte-identical", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const hooks = await loadPluginHooksWithPageStore(storePath)
+
+    await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+
+    assert.equal(await readEvicted(hooks, PAGE_STORE_EVICTED_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a page store holding corrupt lines skips them and still serves the well-formed page", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const hooks = await loadPluginHooksWithPageStore(storePath)
+    const rejectedLine = pageLineOf(PAGE_STORE_CORRUPT_SUBJECT, "rejected: the output field is missing")
+    delete rejectedLine.output
+    writeFileSync(
+      storePath,
+      `{"broken": true\n${JSON.stringify(rejectedLine)}\n${JSON.stringify(pageLineOf(PAGE_STORE_CORRUPT_SUBJECT, PAGE_STORE_CORRUPT_GOOD_OUTPUT))}\n`,
+    )
+
+    assert.equal(
+      await readEvicted(hooks, PAGE_STORE_CORRUPT_SUBJECT, SESSION_ID),
+      `${PAGE_STORE_CORRUPT_GOOD_OUTPUT}\n${pageStoreRestoredLineFor()}`,
+    )
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("an absent or empty page store degrades to the composed miss naming the no page clause", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const hooks = await loadPluginHooksWithPageStore(storePath)
+
+    assert.equal(
+      await readEvicted(hooks, PAGE_STORE_ABSENT_MISS_SUBJECT, SESSION_ID),
+      stashMissFor(PAGE_STORE_ABSENT_MISS_SUBJECT, STASH_EMPTY_OCCUPANCY),
+    )
+
+    writeFileSync(storePath, "")
+    assert.equal(
+      await readEvicted(hooks, PAGE_STORE_ABSENT_MISS_SUBJECT, SESSION_ID),
+      stashMissFor(PAGE_STORE_ABSENT_MISS_SUBJECT, STASH_EMPTY_OCCUPANCY),
+    )
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("an unreadable page store degrades to the composed miss instead of a tool error", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const hooks = await loadPluginHooksWithPageStore(blockedPageStorePathIn(pagesDir))
+
+    const result = await readEvicted(hooks, PAGE_STORE_ABSENT_MISS_SUBJECT, SESSION_ID)
+
+    assert.equal(result, stashMissFor(PAGE_STORE_ABSENT_MISS_SUBJECT, STASH_EMPTY_OCCUPANCY))
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("pageStore options resolve beside the metrics log defaults round trip and fall back on invalid values", async () => {
+  const defaultHooks = (await contextManagerFactory(
+    {},
+    { metricsLog: false, liveStateLog: false, ingestionHygieneCopy: false },
+  )) as HookMap
+  const defaultOptions = (await readStats(defaultHooks, SESSION_ID)).options as Record<string, unknown>
+  assert.equal(defaultOptions.pageStore, true)
+  assert.equal(defaultOptions.pageStorePath, DEFAULT_PAGE_STORE_PATH)
+  assert.equal(defaultOptions.pageStoreRotationMaxBytes, DEFAULT_PAGE_STORE_ROTATION_MAX_BYTES)
+  assert.equal(DEFAULT_PAGE_STORE_PATH, join(homedir(), ".local", "share", "opencode", "context-pages.jsonl"))
+
+  const customHooks = await loadPluginHooksWith({
+    pageStore: false,
+    pageStorePath: join(PAGE_STORE_CUSTOM_PATH_TAIL, PAGE_STORE_LOG_FILE_NAME),
+    pageStoreRotationMaxBytes: PAGE_STORE_CUSTOM_ROTATION_CAP,
+  })
+  const customOptions = (await readStats(customHooks, SESSION_ID)).options as Record<string, unknown>
+  assert.equal(customOptions.pageStore, false)
+  assert.equal(customOptions.pageStorePath, join(PAGE_STORE_CUSTOM_PATH_TAIL, PAGE_STORE_LOG_FILE_NAME))
+  assert.equal(customOptions.pageStoreRotationMaxBytes, PAGE_STORE_CUSTOM_ROTATION_CAP)
+
+  for (const invalidCap of PAGE_STORE_INVALID_ROTATION_CAPS) {
+    const invalidHooks = await loadPluginHooksWith({ pageStoreRotationMaxBytes: invalidCap })
+    const invalidOptions = (await readStats(invalidHooks, SESSION_ID)).options as Record<string, unknown>
+    assert.equal(invalidOptions.pageStoreRotationMaxBytes, DEFAULT_PAGE_STORE_ROTATION_MAX_BYTES)
+  }
+  const invalidSwitchHooks = await loadPluginHooksWith({ pageStore: "yes", pageStorePath: 42 })
+  const invalidSwitchOptions = (await readStats(invalidSwitchHooks, SESSION_ID)).options as Record<string, unknown>
+  assert.equal(invalidSwitchOptions.pageStore, true)
+  assert.equal(invalidSwitchOptions.pageStorePath, DEFAULT_PAGE_STORE_PATH)
 })
