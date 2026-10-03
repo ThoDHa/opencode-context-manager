@@ -170,6 +170,12 @@ const defaultPageStorePath = (): string => join(homedir(), ...DEFAULT_METRICS_DI
 // log's cap was sized for, and the store is a standing record, not an
 // escape hatch.
 export const DEFAULT_PAGE_STORE_ROTATION_MAX_BYTES = 20 * 1024 * 1024
+// The page-store line contract's own version, stamped on every new line so
+// mixed-version stores classify line by line: a legacy unstamped line reads
+// as this version (v1 is the unstamped shape plus the field), a strictly
+// newer version is refused rather than interpreted, and refusal halts this
+// process's appends and rotation so it cannot bury a newer build's pages.
+export const PAGE_STORE_SCHEMA_VERSION = 1
 const LIVE_STATE_FILE_SUFFIX = ".json"
 const MS_PER_SECOND = 1000
 const SECONDS_PER_MINUTE = 60
@@ -393,6 +399,22 @@ type ContextLimit = { tokens: number | null; source: ContextTokensSource; modelK
 
 type PruneThrottle = { lastScanMs: number }
 
+// The instance-level downgrade-refusal fact, the PruneThrottle pattern: one
+// flag per plugin process, set the first time any walk of the store (the
+// recall walk or the writer's pre-rename walk) classifies a line whose
+// schema version is newer than this build's, and never cleared, so the
+// process stops managing the store for its remaining lifetime.
+type PageStoreGuard = { newerSchemaObserved: boolean }
+
+// One parsed store line's relation to this build's schema version: absent
+// or equal admits the line under the current shape, strictly greater is a
+// newer writer's line this build must never interpret, and anything else is
+// corruption the existing invalid-line skip covers.
+type PageStoreSchemaVerdict =
+  | { kind: "admissible" }
+  | { kind: "invalid" }
+  | { kind: "newer"; observed: number }
+
 type ChatParamsModel = { providerID?: string; modelID?: string; limit?: { context?: number } }
 
 type SessionMetrics = {
@@ -471,6 +493,10 @@ type SessionMetrics = {
   stateWriteError?: string
   hygieneWriteError?: string
   pageStoreWriteError?: string
+  // Set when this session observed a page-store line from a newer schema
+  // version, or when an eviction ran while the instance guard held: the
+  // store's writes and rotation are halted and describe explains why.
+  pageStoreSchemaError?: string
 }
 
 type LastError = { message: string; atMs: number }
@@ -1595,19 +1621,41 @@ const pageStoreLineOf = (parsed: unknown): PageEntry | undefined => {
   }
 }
 
-// Cross-session pages for one subject, read fresh per miss (misses are the
-// rare path) in file order, so the last matching line is the newest page.
-// Any read or parse failure degrades to no pages: a corrupt or unreadable
-// store is a clean miss, never a thrown tool error.
-const pageStoreMatchesFor = async (options: ResolvedOptions, subject: string): Promise<PageEntry[]> => {
-  if (options.pageStore === false) return []
+const pageStoreSchemaVerdictOf = (parsed: unknown): PageStoreSchemaVerdict => {
+  const schemaVersion = isRecord(parsed) ? parsed["schemaVersion"] : undefined
+  if (schemaVersion === undefined) return { kind: "admissible" }
+  if (typeof schemaVersion !== "number" || !Number.isFinite(schemaVersion)) return { kind: "invalid" }
+  if (schemaVersion > PAGE_STORE_SCHEMA_VERSION) return { kind: "newer", observed: schemaVersion }
+  if (schemaVersion === PAGE_STORE_SCHEMA_VERSION) return { kind: "admissible" }
+  return { kind: "invalid" }
+}
+
+const pageStoreSchemaErrorFor = (observed: number | undefined): string =>
+  observed === undefined
+    ? `the page store holds lines from a newer schema version than this build's ${PAGE_STORE_SCHEMA_VERSION}; appends and rotation are halted to leave the newer store untouched`
+    : `the page store holds schemaVersion ${observed} lines but this build writes ${PAGE_STORE_SCHEMA_VERSION}; appends and rotation are halted to leave the newer store untouched`
+
+const recordPageStoreSchemaError = (
+  metrics: MetricsStore,
+  sessionKey: string,
+  sessionBound: number,
+  observed: number | undefined,
+): void =>
+  withSessionMetricsEntry(metrics, sessionKey, sessionBound, (entry) => {
+    entry.pageStoreSchemaError ??= pageStoreSchemaErrorFor(observed)
+  })
+
+// The store's line loop, shared by the recall walk (classify and match in
+// one pass) and the writer's pre-rename observation walk: read and parse
+// failures degrade to visiting nothing, a corrupt or unreadable store being
+// a clean outcome, never a thrown error.
+const pageStoreParsedLines = async (options: ResolvedOptions, visit: (parsed: unknown) => void): Promise<void> => {
   let content: string
   try {
     content = await readFile(options.pageStorePath, "utf8")
   } catch {
-    return []
+    return
   }
-  const matches: PageEntry[] = []
   for (const line of content.split("\n")) {
     const trimmed = line.trim()
     if (trimmed.length === 0) continue
@@ -1617,10 +1665,69 @@ const pageStoreMatchesFor = async (options: ResolvedOptions, subject: string): P
     } catch {
       continue
     }
+    visit(parsed)
+  }
+}
+
+// The observation side effect both walks share: a newer-schema line sets
+// the instance guard permanently and records the observing session's
+// diagnostic, the message keeping the first observed version.
+const observePageStoreSchemaVerdict = (
+  verdict: PageStoreSchemaVerdict,
+  guard: PageStoreGuard,
+  metrics: MetricsStore,
+  sessionKey: string,
+  sessionBound: number,
+): void => {
+  if (verdict.kind !== "newer") return
+  guard.newerSchemaObserved = true
+  recordPageStoreSchemaError(metrics, sessionKey, sessionBound, verdict.observed)
+}
+
+// Cross-session pages for one subject, read fresh per miss (misses are the
+// rare path) in file order, so the last matching line is the newest page.
+// Any read or parse failure degrades to no pages: a corrupt or unreadable
+// store is a clean miss, never a thrown tool error. The same pass classifies
+// each line's schema version: newer-version lines are skipped uninterpreted
+// and flip the instance guard, so this process's writer halts before it can
+// bury them.
+const pageStoreMatchesFor = async (
+  options: ResolvedOptions,
+  subject: string,
+  guard: PageStoreGuard,
+  metrics: MetricsStore,
+  sessionKey: string,
+): Promise<PageEntry[]> => {
+  if (options.pageStore === false) return []
+  const matches: PageEntry[] = []
+  await pageStoreParsedLines(options, (parsed) => {
+    const verdict = pageStoreSchemaVerdictOf(parsed)
+    observePageStoreSchemaVerdict(verdict, guard, metrics, sessionKey, options.metricsSessions)
+    if (verdict.kind !== "admissible") return
     const entry = pageStoreLineOf(parsed)
     if (entry !== undefined && entry.subject === subject) matches.push(entry)
-  }
+  })
   return matches
+}
+
+// The writer's rotation-time observation walk, run immediately before the
+// rotation rename so the sole burying operation can never fire unobserved:
+// an instance that only evicts and never runs an observing recall still
+// halts at its next rotation boundary instead of renaming a newer build's
+// pages out of every reader's reach.
+const pageStoreWalkObservesNewerSchema = async (
+  options: ResolvedOptions,
+  guard: PageStoreGuard,
+  metrics: MetricsStore,
+  sessionKey: string,
+): Promise<boolean> => {
+  let observed = false
+  await pageStoreParsedLines(options, (parsed) => {
+    const verdict = pageStoreSchemaVerdictOf(parsed)
+    observePageStoreSchemaVerdict(verdict, guard, metrics, sessionKey, options.metricsSessions)
+    if (verdict.kind === "newer") observed = true
+  })
+  return observed
 }
 
 const pageStoreOlderLineFor = (subject: string, count: number): string =>
@@ -1647,6 +1754,7 @@ const executeReadEvicted = async (
   options: ResolvedOptions,
   args: unknown,
   toolContext: unknown,
+  pageStoreGuard: PageStoreGuard,
 ): Promise<string> => {
   const source = typeof args === "object" && args !== null ? (args as Record<string, unknown>) : undefined
   const subject = source?.[RECALL_ARG_NAME]
@@ -1656,10 +1764,13 @@ const executeReadEvicted = async (
   const pageStore = pageStores.get(sessionKey)
   const matches = pageStore === undefined ? [] : pageMatchesFor(pageStore, subject)
   if (matches.length === 0) {
-    const pages = await pageStoreMatchesFor(options, subject)
+    const pages = await pageStoreMatchesFor(options, subject, pageStoreGuard, metrics, sessionKey)
     if (pages.length === 0) {
       // The probe's miss answers exactly today's miss text without the
-      // hydration await or the recallMisses increment: zero side effects.
+      // hydration await or the recallMisses increment, so counters and
+      // hydration stay untouched; the walk above can still observe a
+      // newer-schema line, which is the refusal contract firing, not a
+      // probe leak into eviction ordering.
       if (countsOnly) return missResponseFor(subject, pageStore)
       // A first-touch hydration may still be seeding this session: await it
       // so the miss lands on the settled entry instead of vanishing with the
@@ -2020,17 +2131,24 @@ const recordRunOutcome = (metrics: SessionMetrics, run: RunOutcome, rememberedSu
   metrics.processedContextBytes += run.composition.toolPoolBytes + run.composition.textChars
 }
 
-const rotateMetricsLogPastCap = async (path: string, incomingBytes: number, capBytes: number): Promise<void> => {
-  if (capBytes === METRICS_ROTATION_DISABLED_MAX_BYTES) return
+// Whether appending incomingBytes would push the file past its rotation
+// cap: the rename predicate of rotateMetricsLogPastCap, extracted so a
+// caller can act in the exact window a rename would fire without
+// duplicating the size arithmetic.
+const logRotationIsDue = async (path: string, incomingBytes: number, capBytes: number): Promise<boolean> => {
+  if (capBytes === METRICS_ROTATION_DISABLED_MAX_BYTES) return false
   let currentBytes: number
   try {
     currentBytes = (await stat(path)).size
   } catch (error) {
-    if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") return
+    if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") return false
     throw error
   }
-  if (currentBytes + incomingBytes <= capBytes) return
-  await rename(path, `${path}${METRICS_ROTATION_SUFFIX}`)
+  return currentBytes + incomingBytes > capBytes
+}
+
+const rotateMetricsLogPastCap = async (path: string, incomingBytes: number, capBytes: number): Promise<void> => {
+  if (await logRotationIsDue(path, incomingBytes, capBytes)) await rename(path, `${path}${METRICS_ROTATION_SUFFIX}`)
 }
 
 // The disk-copy escape hatch for ingestion hygiene: before a rewritten
@@ -2080,9 +2198,20 @@ const recordPageStoreLines = async (
   metrics: MetricsStore,
   sessionKey: string,
   entries: PageEntry[],
+  pageStoreGuard: PageStoreGuard,
 ): Promise<void> => {
   if (options.pageStore === false || entries.length === 0) return
   if (options.pageStoreRotationMaxBytes === METRICS_ROTATION_DISABLED_MAX_BYTES) return
+  // The downgrade refusal: once this instance has observed a newer-schema
+  // line, both the append and the rotation halt, so this older build can
+  // neither bury newer lines into the .1 generation nor mix its own older
+  // writes into the newer build's store. The diagnostic lands on the
+  // evicting session even when another session's recall set the guard, so
+  // an evict-only session still learns why its pages stopped persisting.
+  if (pageStoreGuard.newerSchemaObserved) {
+    recordPageStoreSchemaError(metrics, sessionKey, options.metricsSessions, undefined)
+    return
+  }
   // One clock read per run: the lines a single eviction produced share one
   // timestamp instead of drifting across the walk.
   const ts = new Date(options.now()).toISOString()
@@ -2091,6 +2220,7 @@ const recordPageStoreLines = async (
       .map((entry) =>
         JSON.stringify({
           ts,
+          schemaVersion: PAGE_STORE_SCHEMA_VERSION,
           session: sessionKey,
           tool: entry.tool,
           subject: entry.subject,
@@ -2102,7 +2232,17 @@ const recordPageStoreLines = async (
         }),
       )
       .join("\n")}\n`
-    await rotateMetricsLogPastCap(options.pageStorePath, Buffer.byteLength(pageStoreJsonLine), options.pageStoreRotationMaxBytes)
+    // The schema-classification walk rides the rotation boundary only: it
+    // runs exactly when a rename is about to fire, so the sole burying
+    // operation can never fire unobserved while ordinary appends pay one
+    // size stat instead of a full-store walk. The pending line is not yet
+    // in the file, so the walk sees exactly what a rename would bury, and
+    // an observation stops the run before either half fires.
+    const incomingBytes = Buffer.byteLength(pageStoreJsonLine)
+    if (await logRotationIsDue(options.pageStorePath, incomingBytes, options.pageStoreRotationMaxBytes)) {
+      if (await pageStoreWalkObservesNewerSchema(options, pageStoreGuard, metrics, sessionKey)) return
+      await rotateMetricsLogPastCap(options.pageStorePath, incomingBytes, options.pageStoreRotationMaxBytes)
+    }
     await appendFile(options.pageStorePath, pageStoreJsonLine)
     const entry = touchMapEntry(metrics, sessionKey)
     if (entry !== undefined) delete entry.pageStoreWriteError
@@ -2510,6 +2650,7 @@ const executeStatsTool = (source: StatsSource, toolContext: unknown): string => 
     ...(metrics.stateWriteError === undefined ? {} : { stateWriteError: metrics.stateWriteError }),
     ...(metrics.hygieneWriteError === undefined ? {} : { hygieneWriteError: metrics.hygieneWriteError }),
     ...(metrics.pageStoreWriteError === undefined ? {} : { pageStoreWriteError: metrics.pageStoreWriteError }),
+    ...(metrics.pageStoreSchemaError === undefined ? {} : { pageStoreSchemaError: metrics.pageStoreSchemaError }),
   }
   return JSON.stringify(report, null, JSON_INDENT_SPACES)
 }
@@ -2892,6 +3033,7 @@ type TransformHookDeps = {
   hintBySession: Map<string, string>
   pruneThrottle: PruneThrottle
   pluginSession: string
+  pageStoreGuard: PageStoreGuard
   options: ResolvedOptions
 }
 
@@ -2984,7 +3126,7 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
   }
   sessionMetrics.lastRetention = retentionBreakdownOf(candidates, messages, options, sessionMetrics.faultCounts)
   storeHint(deps.hintBySession, sessionKey, eviction.hotSubjects, options.hintSubjects, options.hintSessions)
-  await recordPageStoreLines(options, deps.metricsBySession, sessionKey, pageStoreEntries)
+  await recordPageStoreLines(options, deps.metricsBySession, sessionKey, pageStoreEntries, deps.pageStoreGuard)
   await recordMetricsLine(options, sessionMetrics, sessionKey, deps.pluginSession, contextLimit, runOutcome)
   await recordSessionCheckpoint(options, sessionKey, contextLimit, sessionMetrics, sessionPageStore, eviction.hotSubjects, deps.pruneThrottle)
 }
@@ -3150,6 +3292,7 @@ const server = (async (_input, rawOptions) => {
   const metricsHydrationBySession: MetricsHydration = new Map()
   const pruneThrottle: PruneThrottle = { lastScanMs: PRUNE_SCAN_NEVER }
   const pluginSession = randomUUID()
+  const pageStoreGuard: PageStoreGuard = { newerSchemaObserved: false }
   const persistedTotalsForSession = (sessionKey: string): Promise<PersistedTotals | undefined> =>
     newestPersistedTotalsOf(options, sessionKey)
   // Hoisted per plugin instance: every run passes the same deps object to
@@ -3164,6 +3307,7 @@ const server = (async (_input, rawOptions) => {
     hintBySession,
     pruneThrottle,
     pluginSession,
+    pageStoreGuard,
     options,
   }
 
@@ -3180,7 +3324,7 @@ const server = (async (_input, rawOptions) => {
   // { type: "string" } schema below is sufficient. If this file ever ships
   // somewhere @opencode-ai/plugin resolves, switch back to tool().
   const recallTool = async (args: unknown, toolContext: unknown): Promise<string> =>
-    executeReadEvicted(pageStoreBySession, metricsBySession, metricsHydrationBySession, persistedTotalsForSession, options.metricsSessions, options, args, toolContext)
+    executeReadEvicted(pageStoreBySession, metricsBySession, metricsHydrationBySession, persistedTotalsForSession, options.metricsSessions, options, args, toolContext, pageStoreGuard)
 
   const describeTool = async (_args: unknown, toolContext: unknown): Promise<string> =>
     executeStatsTool({ options, limits: contextLimits, modelKeys: modelKeyBySession, pageStores: pageStoreBySession, metrics: metricsBySession }, toolContext)

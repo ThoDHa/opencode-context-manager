@@ -11,6 +11,7 @@ import contextManagerEntry, {
   DEFAULT_PAGE_STORE_ROTATION_MAX_BYTES,
   METRIC_NUMBER_KEYS,
   METRICS_CURSOR_KEYS,
+  PAGE_STORE_SCHEMA_VERSION,
   RAW_COUNTER_KEYS,
 } from "../plugin/context-manager.ts"
 import { loadPanelData, PANEL_COMMAND_CATEGORY, PANEL_COMMAND_NAME, PANEL_COMMAND_NAMESPACE, PANEL_COMMAND_SLASH_NAME } from "../plugin/panel-data.ts"
@@ -9882,6 +9883,11 @@ const PAGE_STORE_STALE_ROTATED_CONTENT = "stale rotated pages\n"
 const PAGE_STORE_CUSTOM_PATH_TAIL = "custom-pages.jsonl"
 const PAGE_STORE_CUSTOM_ROTATION_CAP = 4096
 const PAGE_STORE_INVALID_ROTATION_CAPS = [-1, Number.NaN, Number.POSITIVE_INFINITY]
+const PAGE_STORE_SCHEMA_NEWER_SUBJECT = "/data/page-store-schema-newer.txt"
+const PAGE_STORE_SCHEMA_LEGACY_SUBJECT = "/data/page-store-schema-legacy.txt"
+const PAGE_STORE_SCHEMA_GARBAGE_SUBJECT = "/data/page-store-schema-garbage.txt"
+const PAGE_STORE_SCHEMA_NEWER_OUTPUT = "newer-schema output that must never surface"
+const PAGE_STORE_SCHEMA_GARBAGE_OUTPUT = "garbage-schema output that must never surface"
 
 const pageStorePathIn = (dir: string): string => join(dir, PAGE_STORE_LOG_FILE_NAME)
 
@@ -10157,6 +10163,130 @@ test("a page store holding corrupt lines skips them and still serves the well-fo
       await recallTool(hooks, PAGE_STORE_CORRUPT_SUBJECT, SESSION_ID),
       `${PAGE_STORE_CORRUPT_GOOD_OUTPUT}\n${PAGE_STORE_RESTORED_LINE}`,
     )
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a stashed page line carries the store's current schema version", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const hooks = await loadPluginHooksWithPageStore(storePath)
+
+    await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+
+    const lines = pageLinesIn(storePath)
+    assert.equal(lines.length, 1)
+    assert.equal(lines[0].schemaVersion, PAGE_STORE_SCHEMA_VERSION)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a legacy page line without a schema version still serves through recall", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const hooks = await loadPluginHooksWithPageStore(storePath)
+    seedPageStore(storePath, [pageLineOf(PAGE_STORE_SCHEMA_LEGACY_SUBJECT, outputOfBytes(MIN_EVICTABLE_BYTES))])
+
+    assert.equal(
+      await recallTool(hooks, PAGE_STORE_SCHEMA_LEGACY_SUBJECT, SESSION_ID),
+      `${outputOfBytes(MIN_EVICTABLE_BYTES)}\n${PAGE_STORE_RESTORED_LINE}`,
+    )
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a newer-schema page line is skipped for matching while the known-version page still serves and describe carries the diagnostic", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const hooks = await loadPluginHooksWithPageStore(storePath)
+    seedPageStore(storePath, [
+      pageLineOf(PAGE_STORE_SCHEMA_NEWER_SUBJECT, outputOfBytes(MIN_EVICTABLE_BYTES), { schemaVersion: PAGE_STORE_SCHEMA_VERSION }),
+      pageLineOf(PAGE_STORE_SCHEMA_NEWER_SUBJECT, PAGE_STORE_SCHEMA_NEWER_OUTPUT, { schemaVersion: PAGE_STORE_SCHEMA_VERSION + 1 }),
+    ])
+
+    assert.equal(
+      await recallTool(hooks, PAGE_STORE_SCHEMA_NEWER_SUBJECT, SESSION_ID),
+      `${outputOfBytes(MIN_EVICTABLE_BYTES)}\n${PAGE_STORE_RESTORED_LINE}`,
+    )
+    const stats = await readStats(hooks, SESSION_ID)
+    assert.equal(typeof stats.pageStoreSchemaError, "string")
+    assert.ok((stats.pageStoreSchemaError as string).includes(String(PAGE_STORE_SCHEMA_VERSION + 1)))
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("an eviction after another session observed a newer schema appends and rotates nothing and carries the halt diagnostic", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    seedPageStore(storePath, [
+      pageLineOf(PAGE_STORE_SCHEMA_NEWER_SUBJECT, outputOfBytes(MIN_EVICTABLE_BYTES), { schemaVersion: PAGE_STORE_SCHEMA_VERSION + 1 }),
+    ])
+    const hooks = await loadPluginHooksWithPageStore(storePath, {
+      pageStoreRotationMaxBytes: statSync(storePath).size,
+    })
+    await recallTool(hooks, PAGE_STORE_SCHEMA_NEWER_SUBJECT, SESSION_ID)
+    const storeBefore = readFileSync(storePath, "utf8")
+
+    const bundle = await runPageStoreEviction(hooks, SESSION_ID_B, PAGE_STORE_EVICTED_SUBJECT)
+
+    assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+    assert.equal(readFileSync(storePath, "utf8"), storeBefore)
+    assert.equal(existsSync(rotatedPageStorePathIn(pagesDir)), false)
+    const stats = await readStats(hooks, SESSION_ID_B)
+    assert.equal(typeof stats.pageStoreSchemaError, "string")
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("an eviction against a near-cap store holding a newer-schema line renames and appends nothing without any prior recall", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const seedContent = `${JSON.stringify(
+      pageLineOf(PAGE_STORE_SCHEMA_NEWER_SUBJECT, outputOfBytes(MIN_EVICTABLE_BYTES), { schemaVersion: PAGE_STORE_SCHEMA_VERSION + 1 }),
+    )}\n`
+    writeFileSync(storePath, seedContent)
+
+    const hooks = await loadPluginHooksWithPageStore(storePath, {
+      pageStoreRotationMaxBytes: Buffer.byteLength(seedContent),
+    })
+    const bundle = await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+
+    assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+    assert.equal(readFileSync(storePath, "utf8"), seedContent)
+    assert.equal(existsSync(rotatedPageStorePathIn(pagesDir)), false)
+    const stats = await readStats(hooks, SESSION_ID)
+    assert.equal(typeof stats.pageStoreSchemaError, "string")
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a garbage schemaVersion skips the line as invalid without a flag while the well-formed page still serves", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const hooks = await loadPluginHooksWithPageStore(storePath)
+    seedPageStore(storePath, [
+      pageLineOf(PAGE_STORE_SCHEMA_GARBAGE_SUBJECT, outputOfBytes(MIN_EVICTABLE_BYTES)),
+      pageLineOf(PAGE_STORE_SCHEMA_GARBAGE_SUBJECT, PAGE_STORE_SCHEMA_GARBAGE_OUTPUT, { schemaVersion: "two" }),
+    ])
+
+    assert.equal(
+      await recallTool(hooks, PAGE_STORE_SCHEMA_GARBAGE_SUBJECT, SESSION_ID),
+      `${outputOfBytes(MIN_EVICTABLE_BYTES)}\n${PAGE_STORE_RESTORED_LINE}`,
+    )
+    const stats = await readStats(hooks, SESSION_ID)
+    assert.equal(stats.pageStoreSchemaError, undefined)
   } finally {
     cleanupMetricsDir(pagesDir)
   }
