@@ -24,6 +24,7 @@ An [opencode](https://opencode.ai) plugin that manages context windows with leas
     - [Metrics and live state](#metrics-and-live-state)
   - [Full sample configuration](#full-sample-configuration)
 - [What this plugin does](#what-this-plugin-does)
+- [Eviction policy](#eviction-policy)
 - [Honest limits](#honest-limits)
 - [Compatibility](#compatibility)
 - [Versioning](#versioning)
@@ -211,6 +212,22 @@ Loaded through the install's `opencode.json` entry, the core plugin runs in ever
 | watermark eviction | replaces the coldest completed tool outputs with `[ctx-evicted]` tombstones until the estimate falls under the watermark | a context limit is known, the estimate crosses half of it, and an evictable candidate exists |
 
 The passes in one line each, with the deep dive a click away: the no-loss passes (dedup with range-read collapse and attachment dedup, the errored-input purge, reasoning expiry) run on pattern presence alone and never need a context limit ([DESIGN.md, Mechanisms](docs/DESIGN.md#5-mechanisms)); watermark eviction sorts candidates coldest first by last touch with fault-based deferral and evicts only down to the watermark, writing tombstones whose digests and page-store pointers make the loss reversible ([Watermark eviction](docs/DESIGN.md#52-watermark-eviction)); the session page store and `recall` reload evicted originals verbatim across restarts and sessions ([The session page store and recall](docs/DESIGN.md#53-the-session-page-store-and-recall)); fence eviction, the one default-off pass, restores removed code blocks byte for byte ([User-fence eviction](docs/DESIGN.md#54-user-fence-eviction)); ingestion hygiene strips terminal escape noise once at tool completion ([Ingestion hygiene](docs/DESIGN.md#56-ingestion-hygiene)); and native compaction is enriched so its summary names what can still be reloaded ([Compaction enrichment](docs/DESIGN.md#55-compaction-enrichment)). The observation surface is `describe` (every counter, the resolved options, the newest run's omissions and advisory preview) plus the panel and the sidebar, both fed by the metrics log and the session checkpoint ([Observability](docs/DESIGN.md#6-observability)).
+
+## Eviction policy
+
+Watermark eviction is the one always-on pass that gives up live, unique content for tombstones, and its decisions follow one ordering, documented here exactly as shipped ([DESIGN.md's watermark eviction](docs/DESIGN.md#52-watermark-eviction) carries the deeper account of the same mechanisms). The evictable pool holds exactly one structural kind: completed tool outputs of at least `minEvictableBytes` (2048 by default) that are not already tombstones. User text and reasoning are never candidates (the scan reads tool parts only; reasoning expiry deletes outright, and fence eviction, default off, is a separate pass with its own restore rule), and outputs last touched inside the recent window are shielded wholesale, so current-turn content is structurally out of reach. Re-fetchability is likewise not a scoring input: every eviction stores the original verbatim for `recall` to reload ([The session page store and recall](docs/DESIGN.md#53-the-session-page-store-and-recall)), and each reload or post-eviction re-reference of a subject records a fault the sort key honors.
+
+A candidate that clears the pool definition then passes three filters, and the survivors sort coldest first:
+
+1. **Protected tools:** an output whose tool is listed in `protectedTools` (`["task", "todowrite"]` by default) is never a candidate.
+2. **Hot window:** an output last touched within the last `recentWindow` messages (4 by default) stays; any later call against the same subject refreshes the touch, so re-read content keeps moving away from eviction.
+3. **Protected patterns:** a subject matched by a `protectedPatterns` glob (`[]` by default) stays; a bash command's subject is the command string, so the same globs guard commands.
+
+The sort key is effective recency, the output's last touch plus five messages of deferral per recorded fault on its subject (a fixed constant, not an option), oldest first, ties broken by size largest first. The fault shift is why reloaded content resists re-eviction under equal pressure while staying evictable when the deficit is real.
+
+One walk then visits the candidates in sorted order and applies one of two dispositions to each: the aged read tier evicts a read-family output (a tool carrying a file path or pattern subject; bash is excluded) whose birth position, its own message rather than its refreshed touch, is older than `agedReadEvictionMessages` from the list tail, budget-independently (unset disables the tier); the watermark tier evicts the remaining candidates only while the reclaim still falls short of the deficit, the token estimate over the effective watermark (`watermarkTokens` when set, otherwise the context limit, captured from the model or set through `modelContextTokens` and `defaultContextTokens`, times `watermark`, 0.5 by default). The walk stands down entirely under `manualMode`, or when no effective watermark exists and the aged read tier is unset; the advisory band (`advisoryBandRatio`, 0.85 by default) previews proximity to the watermark without evicting anything. Every knob named here is documented with its validation in [Context limit and eviction](#context-limit-and-eviction) and [Exemptions and hints](#exemptions-and-hints).
+
+There is no per-kind weight table, and that is the policy rather than an omission: with one structural kind in the pool, a class weight would only reorder tool outputs against each other, and the fault shift already supplies the one evidence-based demotion the ordering needs. If `describe`'s fault and recall figures ever show a class of outputs systematically re-referenced after eviction in a pattern no existing knob can express, a per-class weight is the recorded next step; until such evidence appears, the ordering above is the whole policy.
 
 ## Honest limits
 
