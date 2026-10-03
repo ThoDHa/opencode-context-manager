@@ -2601,7 +2601,8 @@ const evictionCandidatesOf = (messages: MessageBundle[], options: ResolvedOption
 // Reasons are not exclusive: an entry matching several counts under each,
 // so the sums read as diagnostic, never as a total. Fault-shielded
 // reports the sort-key shift the recorded faults bought at classify time,
-// the maximum FAULT_PENALTY_MESSAGES bought, not a survival guarantee
+// taken from the fault adjustment itself so the magnitude cannot drift
+// from the mechanism, not a survival guarantee
 // (pressure still evicts a faulted entry); zero when no entry is faulted.
 // A pool of zero is the caller's absence signal: describe and the panel
 // render no retention surface for a run that scanned no live outputs.
@@ -2617,7 +2618,7 @@ const retentionBreakdownOf = (candidates: EvictionCandidates, messages: MessageB
     const faulted = faultCounts.get(primaryRenderedSubjectOf(entry)) ?? 0
     if (faulted > 0) {
       reasons.faultShielded += 1
-      maxFaultShieldedShift = Math.max(maxFaultShieldedShift, faulted * FAULT_PENALTY_MESSAGES)
+      maxFaultShieldedShift = Math.max(maxFaultShieldedShift, faultAdjustedLastTouchOf(entry, faultCounts) - entry.lastTouch)
     }
   }
   return { pool: candidates.entries.length, reasons, faultShieldedShiftMessages: maxFaultShieldedShift }
