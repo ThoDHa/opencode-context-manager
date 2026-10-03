@@ -4190,6 +4190,13 @@ test("describe counts recall hits and misses from recall and leaves invalid subj
 const OMISSIONS_TOOL_SUBJECT = "/data/omissions-tool.txt"
 const OMISSIONS_FENCE_TAG = "omissions"
 const OMISSIONS_QUIET_SUBJECT = "/data/omissions-quiet.txt"
+// The composite run's advisory figures: the effective watermark is the
+// fractional one (captured budget times the watermark ratio), the band
+// start the ratio times it, and the estimate the pre-eviction candidates
+// figure (the evictor replaces the candidate with its tombstone only
+// after the advisory read it), probed once from a live run.
+const OMISSIONS_COMPOSITE_WATERMARK_TOKENS = WATERMARK_PROBE_CONTEXT_LIMIT * WATERMARK_RATIO
+const OMISSIONS_COMPOSITE_PRE_EVICT_TOKENS = 572
 
 const omissionsCompositeBundle = (): StrictBundle => ({
   messages: [
@@ -4231,6 +4238,33 @@ test("describe reports the newest run's declared omissions by category with the 
     fenceBlocks: 1,
     reloadTool: RECALL_TOOL_NAME,
   })
+})
+
+test("describe pins the omissions block and the advisory preview in one evicting run's payload in emission order", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true } })
+  await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
+
+  const bundle = omissionsCompositeBundle()
+  await runTransform(hooks, bundle)
+  assert.ok(toolPartAt(bundle.messages[0], 1).state.output.startsWith(TOMBSTONE_MARKER))
+
+  const stats = await readStats(hooks, SESSION_ID)
+  assert.deepEqual(stats.omissions, {
+    toolEvictions: 1,
+    reasoningParts: 1,
+    fenceBlocks: 1,
+    reloadTool: RECALL_TOOL_NAME,
+  })
+  assert.deepEqual(stats.advisory, {
+    ratio: ADVISORY_BAND_RATIO_DEFAULT,
+    bandStartTokens: ADVISORY_BAND_RATIO_DEFAULT * OMISSIONS_COMPOSITE_WATERMARK_TOKENS,
+    estimatedTokens: OMISSIONS_COMPOSITE_PRE_EVICT_TOKENS,
+    deficitTokens: OMISSIONS_COMPOSITE_PRE_EVICT_TOKENS - OMISSIONS_COMPOSITE_WATERMARK_TOKENS,
+    subjects: [OMISSIONS_TOOL_SUBJECT],
+  })
+  const keys = Object.keys(stats)
+  assert.ok(keys.indexOf("omissions") < keys.indexOf("advisory"), "omissions must emit before advisory")
+  assert.ok(keys.indexOf("advisory") < keys.indexOf("composition"), "advisory must emit before composition")
 })
 
 test("describe carries no omissions block for a session before any transform run", async () => {

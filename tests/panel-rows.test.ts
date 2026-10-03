@@ -290,6 +290,31 @@ test("panelRows renders the staleness sentence as the final row with the transfo
   assert.ok(rows[rows.length - 2].text.startsWith("last evicted:"))
 })
 
+test("panelRows pins the full row order for a snapshot carrying an advisory with the staleness clock", () => {
+  const checkpoint = parseCheckpoint(JSON.stringify(makeSnapshot({ advisory: makeAdvisory() })))
+  assert.ok(checkpoint !== undefined)
+  const data = {
+    source: "/tmp/metrics.jsonl",
+    activeSession: SESSION_A,
+    current: snapshotSessionPanel(checkpoint, [logLineStaleAgainstSnapshot()], SESSION_A),
+    global: globalTotals([]),
+    error: undefined,
+  }
+
+  const rows = panelRows(data, { nowMs: STALENESS_NOW_MS })
+
+  const countersText = `counters: ${TOTALS_EVICTIONS} evictions (12 kB reclaimed, 3.1k tokens saved), ${TOTALS_DEDUPED_UNIQUE} dedup (2.3k tokens saved), ${TOTALS_RECALL_HITS + TOTALS_RECALL_MISSES} recalls (${TOTALS_RECALL_HITS} hits)`
+  assert.deepEqual(rows, [
+    { text: "Context Manager (manual)", tone: "header" },
+    { text: "context limit: 200k tokens (per-model limit)", tone: "normal" },
+    { text: "last run: 123.5k estimated vs 100k watermark (over by 23.5k)", tone: "normal" },
+    { text: advisoryRowText(), tone: "warning" },
+    { text: countersText, tone: "normal" },
+    { text: `last evicted: read /data/a.txt (3 kB, ${EVICTED_MESSAGES_AGO} msgs ago)`, tone: "info" },
+    { text: "last transform 30 minutes ago; metrics last written 1 hour ago", tone: "info" },
+  ])
+})
+
 test("panelRows renders only the metrics age for a log-fallback session and omits the staleness row when neither timestamp is available", () => {
   const logOnlyCurrent = sessionPanelData([logLineStaleAgainstSnapshot()], SESSION_A)
   assert.ok(logOnlyCurrent !== undefined)

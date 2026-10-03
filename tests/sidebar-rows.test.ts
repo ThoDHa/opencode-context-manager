@@ -19,6 +19,7 @@ import {
   type SubagentChild,
 } from "../plugin/panel-data.ts"
 import {
+  DEFICIT_TOKENS,
   EVICTED_BYTES,
   EVICTED_MESSAGES_AGO,
   EXPECTED_DEDUPED_STAT,
@@ -56,6 +57,7 @@ const LONG_ADVISORY_SUBJECT = `/data/${"c".repeat(60)}.txt`
 
 const ADVISORY_ROW_PREFIX = "Advisory:"
 const ADVISORY_BAND_START_FRAGMENT = `${SNAPSHOT_ADVISORY_RATIO} of watermark (${formatTokenCount(SNAPSHOT_ADVISORY_BAND_START_TOKENS)}`
+const OVER_ADVISORY_DEFICIT_TOKENS = 23000
 
 const sidebarDataWithAdvisory = (advisory: Record<string, unknown>): PanelData => ({
   source: "/tmp/metrics.jsonl",
@@ -97,6 +99,30 @@ test("sidebarRows truncates an over-long Advisory row to the column limit and om
     error: undefined,
   })
   assert.ok(!withoutAdvisory.some((row) => row.text.startsWith(ADVISORY_ROW_PREFIX)))
+})
+
+test("sidebarRows composes the Advisory row with the Over-by row when the in-band estimate sits above the watermark", () => {
+  const overAdvisory = { ...makeAdvisory(), deficitTokens: OVER_ADVISORY_DEFICIT_TOKENS }
+  const rows = sidebarRowsWithinWidth(sidebarDataWithAdvisory(overAdvisory))
+
+  const watermarkIndex = rows.findIndex((row) => row.text.startsWith("Watermark:"))
+  const overByIndex = rows.findIndex((row) => row.text.startsWith("Over by:"))
+  const windowIndex = rows.findIndex((row) => row.text.startsWith("Window:"))
+  const advisoryIndex = rows.findIndex((row) => row.text.startsWith(ADVISORY_ROW_PREFIX))
+  const tokensIndex = rows.findIndex((row) => row.text.startsWith("Tokens processed:"))
+  assert.ok(watermarkIndex !== -1)
+  assert.ok(overByIndex !== -1)
+  assert.ok(windowIndex !== -1)
+  assert.ok(advisoryIndex !== -1)
+  assert.ok(tokensIndex !== -1)
+  assert.ok(
+    watermarkIndex < overByIndex && overByIndex < windowIndex && windowIndex < advisoryIndex && advisoryIndex < tokensIndex,
+    `Over-by must sit between Watermark and Window and Advisory after Window: ${JSON.stringify(rows)}`,
+  )
+  assert.deepEqual(rows[overByIndex], { text: `Over by: ${formatTokenCount(DEFICIT_TOKENS)}`, tone: "warning" })
+  assert.equal(rows[advisoryIndex].tone, "warning")
+  assert.ok(rows[advisoryIndex].text.includes(ADVISORY_BAND_START_FRAGMENT))
+  assert.ok(rows[advisoryIndex].text.includes(SNAPSHOT_ADVISORY_SUBJECTS[0]) === false, "the Advisory row must be truncated before the subjects")
 })
 
 const sidebarRowsWithinWidth = (data: PanelData): PanelRow[] => {
