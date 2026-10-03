@@ -52,7 +52,7 @@ Then register the two entries from [Full sample configuration](#full-sample-conf
 
 ### How it runs
 
-The clone plus the two config entries are the whole deployment: the `opencode.json` tuple runs the core plugin in every opencode session, interactive and subagent alike, and the `tui.json` tuple serves the `/context` panel and the session sidebar. In a session, the surfaces to check are the ones [What this plugin does](#what-this-plugin-does) lists: `describe` reports the live counters, the panel and sidebar surface the same session data, eventful flushes append to `~/.local/share/opencode/context-metrics.jsonl`, and every run rewrites the session's checkpoint under `~/.local/share/opencode/context-state/`; an install updating from the previous `lru-*` names migrates its stored data automatically.
+The clone plus the two config entries are the whole deployment: the `opencode.json` tuple runs the core plugin in every opencode session, interactive and subagent alike, and the `tui.json` tuple serves the `/context` panel and the session sidebar. In a session, the surfaces to check are the ones [What this plugin does](#what-this-plugin-does) lists: `describe` reports the live counters, the panel and sidebar surface the same session data, eventful flushes append to `~/.local/share/opencode/context-metrics.jsonl`, and every run with a last-run record rewrites the session's checkpoint under `~/.local/share/opencode/context-state/`; an install updating from the previous `lru-*` names migrates its stored data automatically.
 
 ### Staying updated
 
