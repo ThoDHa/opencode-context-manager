@@ -27,10 +27,8 @@ after(() => {
 const { createTuiApiMock } = await import("./tui/api-mock.ts")
 const { nodeText, renderTree, settleUntil } = await import("./tui/opentui-stub.ts")
 const { assertTempHomeOwnsPaths, writeMetricsLog, writeSessionSnapshot } = await import("./tui/fixtures.ts")
-const { EXPECTED_TOKENS_PROCESSED_STAT, makeAdvisory, makeLine, makeTotals } = await import("./panel-fixtures.ts")
-const { SNAPSHOT_ADVISORY_BAND_START_TOKENS, SNAPSHOT_ADVISORY_RATIO } = await import("./panel-fixtures.ts")
-const { formatTokenCount } = await import("../plugin/panel-data.ts")
-const { DEFAULT_LIVE_STATE_DIR, DEFAULT_METRICS_PATH } = await import("../plugin/panel-data.ts")
+const { EXPECTED_TOKENS_PROCESSED_STAT, makeAdvisory, makeLine, makeTotals, SNAPSHOT_ADVISORY_BAND_START_TOKENS, SNAPSHOT_ADVISORY_RATIO } = await import("./panel-fixtures.ts")
+const { DEFAULT_LIVE_STATE_DIR, DEFAULT_METRICS_PATH, formatTokenCount } = await import("../plugin/panel-data.ts")
 
 const POLL_INTERVAL_MS = 5000
 const HALF_POLL_INTERVAL_MS = POLL_INTERVAL_MS / 2

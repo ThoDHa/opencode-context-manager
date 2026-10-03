@@ -4240,6 +4240,21 @@ test("describe reports the newest run's declared omissions by category with the 
     fenceBlocks: 1,
     reloadTool: RECALL_TOOL_NAME,
   })
+
+  const quietHooks = await loadPluginHooks()
+  await setContextLimit(
+    quietHooks,
+    SESSION_ID,
+    contextForWatermarkTokens(tokensForChars(STANDARD_BUNDLE_CHARS) + HEADROOM_TOKENS),
+  )
+  await runTransform(quietHooks, buildStandardBundle(SESSION_ID, OMISSIONS_QUIET_SUBJECT))
+
+  assert.deepEqual((await readStats(quietHooks, SESSION_ID)).omissions, {
+    toolEvictions: 0,
+    reasoningParts: 0,
+    fenceBlocks: 0,
+    reloadTool: RECALL_TOOL_NAME,
+  })
 })
 
 test("describe pins the omissions block and the advisory preview in one evicting run's payload in emission order", async () => {
@@ -7234,12 +7249,6 @@ test("the compacting hook appends the standing-omissions footer exactly when the
   await quietHooks["experimental.session.compacting"]({ sessionID: SESSION_ID }, quietOutput)
 
   assert.equal(quietOutput.context.length, 0)
-  assert.deepEqual((await readStats(quietHooks, SESSION_ID)).omissions, {
-    toolEvictions: 0,
-    reasoningParts: 0,
-    fenceBlocks: 0,
-    reloadTool: RECALL_TOOL_NAME,
-  })
 })
 
 test("a frozen context array degrades through the fault boundary with the native prompt left unmodified", async () => {
@@ -10242,6 +10251,9 @@ test("an eviction after another session observed a newer schema appends and rota
     assert.equal(existsSync(rotatedPageStorePathIn(pagesDir)), false)
     const stats = await readStats(hooks, SESSION_ID_B)
     assert.equal(typeof stats.pageStoreSchemaError, "string")
+    const haltDiagnostic = stats.pageStoreSchemaError as string
+    assert.ok(haltDiagnostic.includes(String(PAGE_STORE_SCHEMA_VERSION)))
+    assert.ok(!haltDiagnostic.includes(String(PAGE_STORE_SCHEMA_VERSION + 1)))
   } finally {
     cleanupMetricsDir(pagesDir)
   }

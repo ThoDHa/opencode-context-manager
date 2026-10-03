@@ -1170,6 +1170,10 @@ test("loadPanelData degrades a malformed snapshot ts to a metrics-only staleness
 
     assert.equal(data.error, undefined)
     assert.ok(data.current !== undefined)
+    assert.equal(data.current.contextLimitTokens, BUDGET_TOKENS_MODEL)
+    assert.equal(data.current.manualMode, true)
+    assert.deepEqual(data.current.pageStore, { entries: SNAPSHOT_PAGE_STORE_ENTRIES, capacity: SNAPSHOT_PAGE_STORE_CAPACITY })
+    assert.deepEqual(data.current.hotSubjects, SNAPSHOT_HOT_SUBJECTS)
     assert.equal(data.current.lastTransformAtMs, undefined)
     assert.equal(data.current.lastMetricsLineAtMs, Date.parse(LOG_LINE_TS_STALE))
 
