@@ -13,6 +13,12 @@ export const DEFAULT_LIVE_STATE_DIR_BASENAME = "context-state"
 // Shared by both entry modules so their registrations never drift.
 export const PLUGIN_ID = "context-manager"
 
+// Stamped onto every metrics line beside the session id so a log read
+// after an upgrade or restart attributes each line to the release and
+// writing process that produced it; the stamp is its only consumer, so
+// a release bumps it and no UI surface echoes it.
+export const PLUGIN_VERSION = "0.1.0"
+
 // Raw counters a session's persisted totals carry and seed. A key must be
 // a finite number in every persisted record: the producer seeds from this
 // list, the parser requires every key, so a new counter is added here and

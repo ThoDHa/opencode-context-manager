@@ -27,7 +27,7 @@ import {
   snapshotSessionPanel,
   type PanelMetricsLine,
 } from "../plugin/panel-data.ts"
-import { TOTALS_KEYS } from "../plugin/schema.ts"
+import { PLUGIN_VERSION, TOTALS_KEYS } from "../plugin/schema.ts"
 import contextManagerEntry from "../plugin/context-manager.ts"
 import {
   BUDGET_TOKENS_MODEL,
@@ -625,6 +625,8 @@ test("parseMetricsLine consumes the line's ts and accepts the plugin's remaining
     recallsSinceLastLine: 3,
     wouldEvictThisRun: 4,
     wouldEvictBytesThisRun: 12288,
+    pluginVersion: PLUGIN_VERSION,
+    pluginSession: "plugin-session-stamp",
     toolPoolBytes: 9500,
     textChars: 1800,
     reasoningInWindowBytes: 512,

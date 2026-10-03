@@ -14,7 +14,7 @@ import contextManagerEntry, {
   RAW_COUNTER_KEYS,
 } from "../plugin/context-manager.ts"
 import { loadPanelData, PANEL_COMMAND_CATEGORY, PANEL_COMMAND_NAME, PANEL_COMMAND_NAMESPACE, PANEL_COMMAND_SLASH_NAME } from "../plugin/panel-data.ts"
-import { PLUGIN_ID, TOTALS_KEYS } from "../plugin/schema.ts"
+import { PLUGIN_ID, PLUGIN_VERSION, TOTALS_KEYS } from "../plugin/schema.ts"
 
 const contextManagerFactory = contextManagerEntry.server
 
@@ -3842,6 +3842,7 @@ const METRICS_PROBE_SESSION_ID = "ctx-metrics-probe-session"
 const METRICS_PROBE_MISS_SUBJECT = "/data/metrics-probe-miss.txt"
 const METRICS_LINES_AFTER_RELOAD = 2
 const METRICS_LINES_AFTER_RECOVERY = 1
+const METRICS_SHARED_INSTANCE_LINE_COUNT = 2
 const METRICS_ROTATION_SUFFIX = ".1"
 const DEFAULT_METRICS_MIN_LINE_INTERVAL_MS = 60 * 1000
 const METRICS_MIN_LINE_INTERVAL_INVALID_VALUES = [-1, Number.NaN, Number.POSITIVE_INFINITY, "soon"]
@@ -4663,6 +4664,48 @@ test("metrics log appends one eventful jsonl line with expected fields and nothi
     assert.equal(metricsLinesIn(metricsLogPathIn(metricsDir)).length, STATS_LOG_FILE_LINES)
   } finally {
     cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("metrics log stamps each flushed line with the plugin version constant and a non-empty plugin session id", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const hooks = await loadPluginHooksWithMetricsLog(metricsLogPathIn(metricsDir))
+    await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+    const bundle = buildStandardBundle(SESSION_ID, STATS_LOGGED_SUBJECT)
+    await runTransform(hooks, bundle)
+
+    const lines = metricsLinesIn(metricsLogPathIn(metricsDir))
+    assert.equal(lines.length, STATS_LOG_FILE_LINES)
+    assert.equal(lines[0].pluginVersion, PLUGIN_VERSION)
+    assert.equal(typeof lines[0].pluginSession, "string")
+    assert.ok((lines[0].pluginSession as string).length > 0)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("metrics log shares one plugin session id across host sessions and draws a distinct one per plugin instance", async () => {
+  const sharedMetricsDir = makeMetricsDir()
+  const secondMetricsDir = makeMetricsDir()
+  try {
+    const hooks = await loadPluginHooksWithMetricsLog(metricsLogPathIn(sharedMetricsDir))
+    await storeMetricsSession(hooks, 0)
+    await storeMetricsSession(hooks, 1)
+
+    const secondHooks = await loadPluginHooksWithMetricsLog(metricsLogPathIn(secondMetricsDir))
+    await storeMetricsSession(secondHooks, 0)
+
+    const sharedLines = metricsLinesIn(metricsLogPathIn(sharedMetricsDir))
+    const secondLines = metricsLinesIn(metricsLogPathIn(secondMetricsDir))
+    assert.equal(sharedLines.length, METRICS_SHARED_INSTANCE_LINE_COUNT)
+    assert.equal(secondLines.length, STATS_LOG_FILE_LINES)
+    assert.equal(sharedLines[0].pluginSession, sharedLines[1].pluginSession)
+    assert.notEqual(sharedLines[0].pluginSession, secondLines[0].pluginSession)
+  } finally {
+    cleanupMetricsDir(sharedMetricsDir)
+    cleanupMetricsDir(secondMetricsDir)
   }
 })
 

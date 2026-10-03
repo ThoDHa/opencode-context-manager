@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto"
 import { appendFile, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
@@ -7,6 +8,7 @@ import {
   DEFAULT_METRICS_DIR_SEGMENTS,
   DEFAULT_METRICS_FILE_BASENAME,
   PLUGIN_ID,
+  PLUGIN_VERSION,
   RAW_COUNTER_KEYS as SCHEMA_RAW_COUNTER_KEYS,
   TOTALS_KEYS,
   type DerivedCounterKey as TotalsDerivedKey,
@@ -2115,6 +2117,7 @@ const recordMetricsLine = async (
   options: ResolvedOptions,
   metrics: SessionMetrics,
   sessionKey: string,
+  pluginSession: string,
   contextLimit: ContextLimit,
   run: RunOutcome,
 ): Promise<void> => {
@@ -2147,6 +2150,8 @@ const recordMetricsLine = async (
   const line = {
     ts: new Date(nowMs).toISOString(),
     session: sessionKey,
+    pluginVersion: PLUGIN_VERSION,
+    pluginSession,
     contextLimit: contextLimit.tokens,
     contextLimitSource: contextLimit.source,
     contextLimitModelKey: contextLimit.modelKey ?? null,
@@ -2886,6 +2891,7 @@ type TransformHookDeps = {
   pageStoreBySession: PageStoreBySession
   hintBySession: Map<string, string>
   pruneThrottle: PruneThrottle
+  pluginSession: string
   options: ResolvedOptions
 }
 
@@ -2979,7 +2985,7 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
   sessionMetrics.lastRetention = retentionBreakdownOf(candidates, messages, options, sessionMetrics.faultCounts)
   storeHint(deps.hintBySession, sessionKey, eviction.hotSubjects, options.hintSubjects, options.hintSessions)
   await recordPageStoreLines(options, deps.metricsBySession, sessionKey, pageStoreEntries)
-  await recordMetricsLine(options, sessionMetrics, sessionKey, contextLimit, runOutcome)
+  await recordMetricsLine(options, sessionMetrics, sessionKey, deps.pluginSession, contextLimit, runOutcome)
   await recordSessionCheckpoint(options, sessionKey, contextLimit, sessionMetrics, sessionPageStore, eviction.hotSubjects, deps.pruneThrottle)
 }
 
@@ -3143,6 +3149,7 @@ const server = (async (_input, rawOptions) => {
   const metricsBySession: MetricsStore = new Map()
   const metricsHydrationBySession: MetricsHydration = new Map()
   const pruneThrottle: PruneThrottle = { lastScanMs: PRUNE_SCAN_NEVER }
+  const pluginSession = randomUUID()
   const persistedTotalsForSession = (sessionKey: string): Promise<PersistedTotals | undefined> =>
     newestPersistedTotalsOf(options, sessionKey)
   // Hoisted per plugin instance: every run passes the same deps object to
@@ -3156,6 +3163,7 @@ const server = (async (_input, rawOptions) => {
     pageStoreBySession,
     hintBySession,
     pruneThrottle,
+    pluginSession,
     options,
   }
 
