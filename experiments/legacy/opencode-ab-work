@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Apparatus for the opencode plugin usage A/B (task LRU-81): a fixed
+# standardized coding exercise run identically in both arms.
+#
+# reset    - lay down a pristine exercise tree at /tmp/opencode/ab-work and
+#            print the paste-prompt for the solving session
+# verify   - run the exercise suite, print the runner summary, log the counts
+# redcheck - determinism proof: the template stubs must fail the suite and
+#            the reference solution must pass it, in one freshly copied tree
+
+TEMPLATE_DIR="$HOME/.local/share/opencode/ab-work-template"
+REFERENCE_DIR="$HOME/.local/share/opencode/ab-work-reference"
+WORK_DIR="/tmp/opencode/ab-work"
+REDCHECK_SCRATCH_GLOB="/tmp/opencode/ab-redcheck*"
+LOG_FILE="$HOME/.local/share/opencode/ab-work.log"
+# Honors the driver's NODE_BIN export so the suite runs under cron PATHs
+# where bare `node` is not resolvable (nvm-managed installs).
+NODE_CMD="${NODE_BIN:-node}"
+PASTE_PROMPT="Complete the coding task in /tmp/opencode/ab-work: read its README, implement until node --test is green, then summarize what you built. Do not modify anything under tests/; the spec files are frozen."
+SPEC_FILES=(
+  "tests/rotator.test.mjs"
+  "README.md"
+  "package.json"
+)
+
+die() {
+  printf 'opencode-ab-work: %s\n' "$1" >&2
+  exit 1
+}
+
+log_line() {
+  printf '%s %s\n' "$(date -Iseconds)" "$1" >> "$LOG_FILE"
+}
+
+# Captures the suite run in the given tree: sets SUITE_STATUS to the suite
+# exit status and SUITE_OUTPUT to the full captured output.
+run_suite() {
+  local dir="$1"
+  [ -f "$dir/tests/rotator.test.mjs" ] || die "no suite at $dir/tests/rotator.test.mjs"
+  SUITE_STATUS=0
+  SUITE_OUTPUT=$(cd "$dir" && "$NODE_CMD" --test tests/*.test.mjs 2>&1) || SUITE_STATUS=$?
+}
+
+# Spec tamper gate: byte-compares the frozen spec files against the template.
+# A missing template copy is an apparatus defect; a missing or changed work
+# copy means the solve touched the spec, and verify must fail.
+check_spec_integrity() {
+  local rel
+  for rel in "${SPEC_FILES[@]}"; do
+    [ -f "$TEMPLATE_DIR/$rel" ] || die "template missing spec file: $rel"
+    if ! cmp -s "$TEMPLATE_DIR/$rel" "$WORK_DIR/$rel"; then
+      log_line "verify: spec tampered: $rel differs from template"
+      printf 'opencode-ab-work: spec tampered: %s differs from template\n' "$rel" >&2
+      exit 1
+    fi
+  done
+}
+
+# Contamination guard: redcheck scratch leftovers beside the exercise tree
+# mean the work tree lineage is not pristine.
+assert_no_redcheck_scratch() {
+  local leftover
+  leftover=$(compgen -G "$REDCHECK_SCRATCH_GLOB" | head -n 1 || true)
+  [ -z "$leftover" ] || die "redcheck scratch present: $leftover (contamination guard)"
+}
+
+# Prints the six runner-reported count lines from captured suite output.
+print_summary() {
+  printf '%s\n' "$1" | grep -E '^ℹ (tests|pass|fail|cancelled|skipped|todo)' || true
+}
+
+cmd_reset() {
+  assert_no_redcheck_scratch
+  [ -f "$TEMPLATE_DIR/src/rotator.mjs" ] || die "template missing at $TEMPLATE_DIR"
+  [ ! -d "$TEMPLATE_DIR/ab-work-reference" ] || die "reference dir leaked inside the template source"
+  rm -rf "$WORK_DIR"
+  mkdir -p /tmp/opencode
+  cp -r "$TEMPLATE_DIR" "$WORK_DIR"
+  [ ! -d "$WORK_DIR/ab-work-reference" ] || die "reference dir leaked inside the work copy"
+  log_line "reset"
+  printf '%s\n' "$PASTE_PROMPT"
+}
+
+cmd_verify() {
+  [ -d "$WORK_DIR" ] || die "no exercise tree at $WORK_DIR; run reset first"
+  check_spec_integrity
+  run_suite "$WORK_DIR"
+  print_summary "$SUITE_OUTPUT"
+  local passed failed
+  passed=$(printf '%s\n' "$SUITE_OUTPUT" | sed -n 's/^ℹ pass //p')
+  failed=$(printf '%s\n' "$SUITE_OUTPUT" | sed -n 's/^ℹ fail //p')
+  if [ -n "$passed" ] && [ -n "$failed" ]; then
+    log_line "verify: pass=$passed fail=$failed (exit $SUITE_STATUS)"
+  else
+    log_line "verify: unreadable runner summary (exit $SUITE_STATUS)"
+  fi
+  return "$SUITE_STATUS"
+}
+
+cmd_redcheck() {
+  [ -f "$REFERENCE_DIR/src/rotator.mjs" ] || die "reference solution missing at $REFERENCE_DIR/src/rotator.mjs"
+  [ -f "$TEMPLATE_DIR/src/rotator.mjs" ] || die "template missing at $TEMPLATE_DIR"
+  # Global (not local): the EXIT trap below fires at script end, outside
+  # this function's scope, and must still resolve the path under set -u.
+  mkdir -p /tmp/opencode
+  redcheck_dir=$(mktemp -d /tmp/opencode/ab-redcheck.XXXXXX)
+  trap 'rm -rf "$redcheck_dir"' EXIT
+
+  cp -r "$REFERENCE_DIR/." "$redcheck_dir"
+
+  cp "$TEMPLATE_DIR/src/rotator.mjs" "$redcheck_dir/src/rotator.mjs"
+  run_suite "$redcheck_dir"
+  local red_status="$SUITE_STATUS"
+  local red_summary
+  red_summary=$(print_summary "$SUITE_OUTPUT")
+  printf 'redcheck: template stub src in the reference tree\n%s\n' "$red_summary"
+  if [ "$red_status" -eq 0 ]; then
+    printf 'redcheck: FAIL - stubs unexpectedly passed\n'
+    exit 1
+  fi
+  printf 'redcheck: OK - stubs fail as required\n\n'
+
+  cp "$REFERENCE_DIR/src/rotator.mjs" "$redcheck_dir/src/rotator.mjs"
+  run_suite "$redcheck_dir"
+  local green_status="$SUITE_STATUS"
+  local green_summary
+  green_summary=$(print_summary "$SUITE_OUTPUT")
+  printf 'redcheck: reference solution restored in the same tree\n%s\n' "$green_summary"
+  if [ "$green_status" -ne 0 ]; then
+    printf 'redcheck: FAIL - reference solution unexpectedly failed\n'
+    exit 1
+  fi
+  printf 'redcheck: OK - reference passes\n\n'
+  printf 'redcheck: determinism proven (stub red, reference green)\n'
+}
+
+case "${1:-}" in
+  reset)
+    cmd_reset
+    ;;
+  verify)
+    cmd_verify
+    ;;
+  redcheck)
+    cmd_redcheck
+    ;;
+  *)
+    printf 'usage: opencode-ab-work {reset|verify|redcheck}\n' >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,783 @@
+#!/usr/bin/env bash
+# opencode-ab-block: run exactly one block of the LRU-82 deep usage A/B
+# experiment (three arms, mirrored-rotation chain).
+#
+# Derives the next block position from the flip log alone, flips the arm via
+# opencode-ab, asserts the live config matches the intended arm (including
+# the manualMode boolean), resets the deep standardized exercise, spawns the
+# solve as a fresh headless opencode process, verifies the result, gates on
+# quota parks and the optional per-run credit ceiling, and appends everything
+# to one per-block log. Designed for unattended invocation.
+#
+# Deep 19-run schedule over the shared flip log: 1 calibration block
+# (arm CAL-ON-FULL, runs exactly once, its own invocation) followed by 18
+# data blocks in six mirrored rotations (three runs per rotation, one per
+# arm; odd rotations OFF, ON-FULL, ON-DRY; even rotations the mirror
+# ON-DRY, ON-FULL, OFF):
+#   1: OFF ON-FULL ON-DRY   2: ON-DRY ON-FULL OFF
+#   3: OFF ON-FULL ON-DRY   4: ON-DRY ON-FULL OFF
+#   5: OFF ON-FULL ON-DRY   6: ON-DRY ON-FULL OFF
+# Every arm's six run indices form three pairs that each sum to 19, so every
+# arm's mean run index is exactly 9.5; ON-FULL additionally holds the
+# mid-rotation position (position 2) in all six rotations (named residual of
+# the mirrored scheme).
+# The deep era of the flip log begins at the first CAL-ON-FULL line; earlier
+# lines (the LRU-81 ON/OFF experiment) are history and never gate this chain.
+# The calibration and the data chain are two separate invocations; the
+# self-limit is derived from the flip-log state at launch (calibration: 0
+# blocks may exist; data: the 18-block total), never hardcoded to a run
+# count the log does not imply.
+#
+# Quota park-and-resume: a solve-session failure whose evidence shows
+# quota/limit exhaustion (nonzero spawn exit, timeout excluded, plus the
+# pinned quota markers in the solve log or spawn stderr) parks the chain
+# BEFORE the next flip: a " PARKED quota-exhaustion" marker line lands in
+# the flip log and is treated by the era counts as a CANCELLATION of the
+# preceding flip, so the block is unconsumed and resume (re-invoking the
+# driver) re-runs the same arm position. The chain exits with the distinct
+# park status 20: a normal pause, not a chain stop. Any other failure class
+# keeps the existing never-retry semantics: the block is counted collected
+# and the analysis proceeds at achieved n.
+#
+# A solve that fails, times out, or finishes nongreen for non-quota reasons
+# is logged, never retried; the chain moves to the next block and the failed
+# run stays reportable. Infra failures (flip, arm assertion, flip-advance
+# guard, reset, scratch contamination, lock, credit-computation failure,
+# ceiling exceedance, flip-log history inconsistency) stop the chain nonzero
+# before the next flip.
+#
+# Chain mode (--chain or CHAIN=1): takes the lock once, then runs single
+# blocks back to back until the schedule is complete (logged as
+# chain-complete, exit 0), a quota park (chain-parked, exit 20), or an infra
+# failure (chain-stopped, exit = the failure rc). A 5s settle sleep
+# separates the blocks.
+#
+# Calibration mode (--calibration or AB_CALIBRATION=1): the single next
+# block is the CAL-ON-FULL calibration run; refuses once calibration exists.
+#
+# Credit ceiling (default OFF per the cost-posture amendment): when
+# AB_CREDIT_CEILING is set (a number), every completed run's solve-session
+# credits are computed from the opencode DB by spawn session id with the
+# frozen formula (GLM-5.3 6.9 input / 1.7 output / 24 cache-write per 10k
+# tokens, flash-family models at one third, promotion factor 0.5); a
+# computation failure (sqlite error, zero rows) is surfaced as a dedicated
+# credits-error infra line and stops the chain, never a phantom zero; an
+# exceedance logs a dedicated ceiling-abort line and exits nonzero before
+# the next flip. Unset, the check is logged as skipped (calibration
+# invocation runs this way; the ceiling is derived from the calibration
+# price afterwards).
+#
+# Environment overrides (defaults keep the live experiment paths):
+#   AB_HOME       base dir for all A/B logs (default ~/.local/share/opencode)
+#   AB_CONFIG     live opencode config the arm assertion reads
+#                 (default ~/.config/opencode/opencode.json)
+#   AB_DB_PATH    opencode SQLite DB the credits are computed from
+#                 (default ~/.local/share/opencode/opencode.db)
+#   AB_FLIP_CMD   arm-flip command       (default opencode-ab)
+#   AB_WORK_CMD   exercise apparatus     (default opencode-ab-work-deep)
+#   AB_WORK_DIR   solve work tree passed to --dir and to the apparatus reset
+#                 (default the pinned /tmp/opencode/ab-work-deep; proofs
+#                 target a scratch path so the pinned tree is never the
+#                 proof substrate)
+#   AB_SOLVE_MODEL
+#                 frozen solve model pin passed as `-m` to the solve session
+#                 (default zai-coding-plan/glm-5.3-flash; the pin is part of
+#                 the pre-registered spawn geometry)
+#   OPENCODE_BIN  solve-session binary   (default: resolved opencode)
+#   AB_SPAWN_TIMEOUT / AB_SPAWN_KILL_AFTER
+#                 solve-session time limits (defaults 2h / 5m; set
+#                 AB_SPAWN_TIMEOUT to max(2h, 2x calibration duration) at
+#                 data-chain launch; a timeout kill is a spawn failure under
+#                 the never-retry semantics)
+#   AB_CREDIT_CEILING
+#                 per-run credit abort ceiling (see above; unset skips)
+#   AB_CALIBRATION=1  calibration mode, same as passing --calibration
+#   CHAIN=1       chain mode, same as passing --chain
+#   AB_SETTLE_SECONDS
+#                 chain-only pause between blocks (default 5)
+
+set -euo pipefail
+
+AB_HOME="${AB_HOME:-$HOME/.local/share/opencode}"
+FLIP_LOG="$AB_HOME/ab-flip.log"
+BLOCK_LOG="$AB_HOME/ab-block.log"
+SPAWN_LOG="$AB_HOME/ab-spawn.log"
+LOCK_FILE="$AB_HOME/ab-block.lock"
+ON_SEED="$AB_HOME/ab-plugin-on.json"
+ON_DRY_SEED="$AB_HOME/ab-plugin-on-dry.json"
+CONFIG_PATH="${AB_CONFIG:-$HOME/.config/opencode/opencode.json}"
+AB_DB_PATH="${AB_DB_PATH:-$HOME/.local/share/opencode/opencode.db}"
+WORK_DIR="${AB_WORK_DIR:-/tmp/opencode/ab-work-deep}"
+AB_SOLVE_MODEL="${AB_SOLVE_MODEL:-zai-coding-plan/glm-5.3-flash}"
+
+TOTAL_DATA_BLOCKS=18
+CAL_ARM="CAL-ON-FULL"
+DATA_ARMS=("OFF" "ON-FULL" "ON-DRY")
+COMPLETION_MARKER="experiment-complete"
+SESSION_TITLE_PREFIX="ab-solve block"
+REDCHECK_SCRATCH_GLOB="/tmp/opencode/ab-redcheck*"
+SPAWN_SCRATCH_GLOB="/tmp/opencode/ab-spawn-*"
+SPAWN_TIMEOUT="${AB_SPAWN_TIMEOUT:-2h}"
+SPAWN_KILL_AFTER="${AB_SPAWN_KILL_AFTER:-5m}"
+TIMEOUT_EXIT_STATUS=124
+SETTLE_SECONDS="${AB_SETTLE_SECONDS:-5}"
+CREDIT_CEILING="${AB_CREDIT_CEILING:-}"
+PARK_REASON="quota-exhaustion"
+# Pinned quota markers (see is_quota_failure). The 429 alternative is
+# anchored to non-digit boundaries so numbers like 1429 or 4290 cannot fire.
+QUOTA_MARKER_REGEX='(^|[^0-9])429([^0-9]|$)|quota|rate.?limit|usage.?limit|credits? (exhausted|exceeded)|exceeded your'
+# The failure tail of the solve log scanned for quota markers (lines); solve
+# prose earlier in the session cannot trigger a park.
+QUOTA_TAIL_LINES=40
+# run_single_block return codes; the caller maps them per mode.
+RC_BLOCK_OK=0
+RC_SEQ_COMPLETE=10
+RC_NOT_ALTERNATING=11
+RC_SCRATCH_LEFTOVER=12
+RC_FLIP_FAILED=13
+RC_RESET_FAILED=14
+RC_CREDIT_ABORT=15
+RC_CREDITS_FAILED=16
+RC_LOG_INCONSISTENT=17
+RC_PARKED=20
+RC_PARK_ESCALATION=21
+CHAIN_COMPLETE_MARKER="chain-complete"
+CALIBRATION_COMPLETE_MARKER="calibration-complete"
+LOCAL_BIN="$HOME/.local/bin"
+OPENCODE_INSTALL_DIR="$HOME/.opencode/bin"
+
+FLIP_CMD="${AB_FLIP_CMD:-}"
+WORK_CMD="${AB_WORK_CMD:-}"
+OPENCODE_BIN="${OPENCODE_BIN:-}"
+NODE_BIN="${NODE_BIN:-}"
+CHAIN_MODE=false
+CALIBRATION_MODE=false
+if [ "${CHAIN:-0}" = "1" ]; then
+  CHAIN_MODE=true
+fi
+if [ "${AB_CALIBRATION:-0}" = "1" ]; then
+  CALIBRATION_MODE=true
+fi
+for arg in "$@"; do
+  case "$arg" in
+    --chain) CHAIN_MODE=true ;;
+    --calibration) CALIBRATION_MODE=true ;;
+  esac
+done
+
+now() {
+  date -Iseconds
+}
+
+log_block() {
+  printf '%s\n' "$1" >> "$BLOCK_LOG"
+}
+
+# Resolves a command: env override, then PATH lookup, then a fallback
+# install dir for cron environments whose PATH misses user bin dirs.
+# Prints the resolved path or nothing when unresolvable.
+resolve_cmd() {
+  local name="$1" fallback_dir="$2" resolved
+  resolved=$(command -v "$name" 2>/dev/null || true)
+  if [ -z "$resolved" ] && [ -x "$fallback_dir/$name" ]; then
+    resolved="$fallback_dir/$name"
+  fi
+  printf '%s' "$resolved"
+}
+
+require_tool() {
+  local path="$1" what="$2"
+  if [ -z "$path" ]; then
+    log_block "infra-error=$(now) missing required tool: $what"
+    printf 'opencode-ab-block: missing required tool: %s\n' "$what" >&2
+    exit 1
+  fi
+}
+
+# Reads the deep era of the flip log ONCE per block into globals (the
+# pre-flight and the post-flip guard are the only two reads). The era begins
+# at the first CAL-ON-FULL line. ERA_FLIPS holds the era's flip sequence as
+# space-separated arm tokens (CAL-ON-FULL, OFF, ON-FULL, ON-DRY); a
+# " PARKED <reason>" marker line cancels the immediately preceding flip
+# (the parked block is unconsumed). ERA_PARKED counts park markers seen;
+# ERA_DOUBLE_PARKED flags a park with no completed flip since the previous
+# park (the same position parked twice without progress, or stray park
+# markers), which the caller escalates to the operator.
+read_deep_era() {
+  ERA_FLIPS=""
+  ERA_PARKED=0
+  ERA_DOUBLE_PARKED=0
+  [ -f "$FLIP_LOG" ] || return 0
+  local in_era=false prev_flip=false line token flips_since_park=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    if ! $in_era; then
+      case "$line" in
+        *" $CAL_ARM") in_era=true ;;
+        *) continue ;;
+      esac
+    fi
+    case "$line" in
+      *" PARKED "*)
+        if $prev_flip; then
+          # Tokens are held space-separated with a leading space until the
+          # final trim, so even a lone token strips cleanly here.
+          ERA_FLIPS="${ERA_FLIPS% *}"
+          prev_flip=false
+        fi
+        ERA_PARKED=$((ERA_PARKED + 1))
+        if [ "$flips_since_park" -le 1 ] && [ "$ERA_PARKED" -ge 2 ]; then
+          ERA_DOUBLE_PARKED=1
+        fi
+        flips_since_park=0
+        ;;
+      *)
+        token="${line##* }"
+        case "$token" in
+          "$CAL_ARM"|OFF|"ON-FULL"|"ON-DRY")
+            ERA_FLIPS="$ERA_FLIPS $token"
+            prev_flip=true
+            flips_since_park=$((flips_since_park + 1))
+            ;;
+        esac
+        ;;
+    esac
+  done < "$FLIP_LOG"
+  ERA_FLIPS="${ERA_FLIPS# }"
+}
+
+# Counts era flip tokens equal to the given arm.
+count_era_tokens() {
+  local wanted="$1" token n=0
+  for token in $ERA_FLIPS; do
+    [ "$token" = "$wanted" ] && n=$((n + 1))
+  done
+  printf '%s' "$n"
+}
+
+# Counts era data-block flips (every token that is not the calibration arm).
+era_data_count() {
+  local token n=0
+  for token in $ERA_FLIPS; do
+    [ "$token" != "$CAL_ARM" ] && n=$((n + 1))
+  done
+  printf '%s' "$n"
+}
+
+# Prints the arm for a 1-based deep data block number under the mirrored
+# six-rotation schedule: rotation r (0-based) runs the base cycle
+# OFF,ON-FULL,ON-DRY forward on even r and mirrored on odd r, so
+# arm = DATA_ARMS[pos] when r is even, DATA_ARMS[2-pos] when r is odd.
+# This reproduces the pinned schedule exactly; the schedule's index
+# invariant is that each arm's six run indices form three pairs each
+# summing to 19 (mean run index exactly 9.5), with ON-FULL holding the
+# mid-rotation position in all six rotations as the named residual.
+arm_for_data_block() {
+  local block_num="$1" r pos
+  r=$(( (block_num - 1) / 3 ))
+  pos=$(( (block_num - 1) % 3 ))
+  if (( r % 2 == 0 )); then
+    printf '%s' "${DATA_ARMS[$pos]}"
+  else
+    printf '%s' "${DATA_ARMS[$((2 - pos))]}"
+  fi
+}
+
+# Validates EVERY deep-era data flip against the rotation formula (not just
+# the last line): a deleted or duplicated mid-log line shifts every
+# subsequent position and must refuse rather than pass. On the first
+# mismatch prints "<arm> <position> <expected>" and returns 1. (Index
+# invariant of the mirrored schedule: each arm's six run indices pair up to
+# sum 19, giving every arm mean index exactly 9.5.)
+validate_deep_rotation() {
+  local position=0 token expected
+  for token in $ERA_FLIPS; do
+    [ "$token" = "$CAL_ARM" ] && continue
+    position=$((position + 1))
+    expected=$(arm_for_data_block "$position")
+    if [ "$token" != "$expected" ]; then
+      printf '%s %s %s' "$token" "$position" "$expected"
+      return 1
+    fi
+  done
+  return 0
+}
+
+refuse() {
+  local reason="$1"
+  log_block "=== refused $(now) reason: $reason ==="
+  printf 'opencode-ab-block: refused: %s\n' "$reason"
+}
+
+# Post-flip arm assertion: the live config's plugin entry must equal the
+# intended arm's seed entry exactly (deep equality carries the manualMode
+# boolean, the watermark, and every companion key); OFF means an empty
+# plugin list. A mismatch is an infra stop, never a silent no-op.
+assert_config_for_arm() {
+  local arm="$1"
+  case "$arm" in
+    OFF)
+      jq -e '.plugin == []' "$CONFIG_PATH" >/dev/null 2>&1
+      ;;
+    ON-FULL|"$CAL_ARM")
+      [ -f "$ON_SEED" ] || return 1
+      jq -e --slurpfile want "$ON_SEED" '.plugin == $want[0]' "$CONFIG_PATH" >/dev/null 2>&1
+      ;;
+    ON-DRY)
+      [ -f "$ON_DRY_SEED" ] || return 1
+      jq -e --slurpfile want "$ON_DRY_SEED" '.plugin == $want[0]' "$CONFIG_PATH" >/dev/null 2>&1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# Contamination guard: a leftover redcheck scratch tree next to the exercise
+# tree means the standardized work is not pristine; the block must not spawn.
+# Spawn event files (stdout/stderr mktemp prefixes) count as the same
+# contamination: a leftover means a previous spawn was interrupted mid-write.
+assert_no_redcheck_scratch() {
+  local leftover glob
+  for glob in "$REDCHECK_SCRATCH_GLOB" "$SPAWN_SCRATCH_GLOB"; do
+    leftover=$(compgen -G "$glob" | head -n 1 || true)
+    if [ -n "$leftover" ]; then
+      log_block "infra-error=$(now) scratch leftover present: $leftover; clean it before running a block"
+      printf 'opencode-ab-block: scratch leftover present: %s; clean it before running a block\n' "$leftover" >&2
+      return "$RC_SCRATCH_LEFTOVER"
+    fi
+  done
+}
+
+# Spawn-log coverage gate: every data block 1..N must have a spawn-log
+# entry. Logs one completion-check FAILED line per missing block and
+# returns 1 when coverage has gaps, 0 when complete. Shared by the final
+# block's completion path and the marker-missing re-invocation path.
+check_spawn_coverage() {
+  local idx ok=true
+  if [ ! -f "$SPAWN_LOG" ]; then
+    log_block "completion-check: FAILED (spawn log missing at $SPAWN_LOG; completion marker withheld)"
+    return 1
+  fi
+  for ((idx = 1; idx <= TOTAL_DATA_BLOCKS; idx++)); do
+    if ! grep -q "block=$idx arm=" "$SPAWN_LOG"; then
+      log_block "completion-check: FAILED (spawn log has no entry for block $idx; completion marker withheld)"
+      ok=false
+    fi
+  done
+  $ok
+}
+
+# Extracts the session id from captured JSON event lines; prints "unknown"
+# when nothing parseable is found.
+extract_session_id() {
+  local events_file="$1" session_id
+  session_id=$(jq -r 'select(.sessionID != null) | .sessionID' "$events_file" 2>/dev/null | head -n 1 || true)
+  [ -n "$session_id" ] || session_id="unknown"
+  printf '%s' "$session_id"
+}
+
+# Pins quota/limit exhaustion from the solve evidence: a nonzero spawn exit
+# (the timeout kill excluded; it is its own never-retry class) plus the
+# pinned marker set in the failure tail (last QUOTA_TAIL_LINES lines) of the
+# solve log, which carries the captured spawn stderr at its end. The LRU-81
+# solve logs contain no real provider error shape to pin (all eight spawns
+# exited 0), so the pin is this marker set, kept tight because solve prose
+# can contain the words innocuously: case-insensitive boundary-anchored 429,
+# quota, rate limit, usage limit, credit(s) exhausted/exceeded, exceeded
+# your. Only the tail is scanned: an innocuous mention early in a long
+# session cannot park the chain.
+is_quota_failure() {
+  local solve_log="$1" spawn_status="$2"
+  [ "$spawn_status" -ne 0 ] || return 1
+  [ "$spawn_status" -ne "$TIMEOUT_EXIT_STATUS" ] || return 1
+  tail -n "$QUOTA_TAIL_LINES" "$solve_log" | grep -qiE "$QUOTA_MARKER_REGEX"
+}
+
+# Computes one solve session's credits from the opencode DB by spawn session
+# id using the frozen formula: GLM-5.3 at 6.9 input / 1.7 output / 24
+# cache-write credits per 10k tokens, flash-family models at one third,
+# promotion factor 0.5 applied to the total. Sets CREDITS_VALUE (four
+# decimals) and returns 0 on success; on failure logs a dedicated infra line
+# (the sqlite exit status, or the zero-row count) and returns 1, so a broken
+# DB can never pass as a phantom 0.0000. The exit status is captured with
+# the `|| sql_status=$?` guard shape so the function is self-contained under
+# set -e in any future call site. The session id must have been validated by
+# the caller.
+compute_session_credits() {
+  local session_id="$1" rows sql_status=0 err_file
+  err_file=$(mktemp /tmp/opencode/ab-credits-err.XXXXXX)
+  rows=$(sqlite3 -readonly "$AB_DB_PATH" "
+    SELECT json_extract(data,'\$.tokens.input'),
+           json_extract(data,'\$.tokens.output'),
+           json_extract(data,'\$.tokens.cache.write'),
+           coalesce(json_extract(data,'\$.modelID'),'')
+    FROM message
+    WHERE session_id = '$session_id'
+      AND json_extract(data,'\$.role') = 'assistant';" 2>"$err_file") || sql_status=$?
+  if [ "$sql_status" -ne 0 ]; then
+    log_block "credits: ERROR (sqlite3 exit $sql_status for session $session_id: $(tail -n 1 "$err_file"))"
+    rm -f "$err_file"
+    return 1
+  fi
+  rm -f "$err_file"
+  if [ -z "$rows" ]; then
+    log_block "credits: ERROR (zero assistant-message rows for session $session_id in $AB_DB_PATH; session id or DB mismatch)"
+    return 1
+  fi
+  CREDITS_VALUE=$(printf '%s\n' "$rows" |
+  awk -F'|' '
+    {
+      input = $1 + 0; output = $2 + 0; cache_write = $3 + 0; model = $4
+      rate_input = 6.9; rate_output = 1.7; rate_cache = 24
+      if (model ~ /flash/) { rate_input /= 3; rate_output /= 3; rate_cache /= 3 }
+      total += (input * rate_input + output * rate_output + cache_write * rate_cache) / 10000
+    }
+    END { printf "%.4f", total * 0.5 }')
+  return 0
+}
+
+# Credit-ceiling gate (optional, default OFF): after the run, the solve
+# session's credits are computed from the DB; a computation failure is an
+# infra stop (rc RC_CREDITS_FAILED) so an armed ceiling can never silently
+# pass on a broken DB; an exceedance returns RC_CREDIT_ABORT so the caller
+# stops the chain before the next flip. Unset ceiling or a non-parseable
+# session id (failed spawn) is logged as skipped, not an abort: a run with
+# no session has no billable turns.
+check_credit_ceiling() {
+  local session_id="$1"
+  if [ -z "$CREDIT_CEILING" ]; then
+    log_block "ceiling-check: skipped (AB_CREDIT_CEILING unset)"
+    return 0
+  fi
+  if [ "$session_id" = "unknown" ] || ! [[ "$session_id" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    log_block "ceiling-check: skipped (no parseable solve session id)"
+    return 0
+  fi
+  if ! compute_session_credits "$session_id"; then
+    return "$RC_CREDITS_FAILED"
+  fi
+  log_block "ceiling-check: session=$session_id credits=$CREDITS_VALUE ceiling=$CREDIT_CEILING"
+  if awk -v credits="$CREDITS_VALUE" -v ceiling="$CREDIT_CEILING" 'BEGIN { exit !(credits > ceiling) }'; then
+    log_block "ceiling-abort=$(now) session=$session_id credits=$CREDITS_VALUE ceiling=$CREDIT_CEILING (per-run credit ceiling exceeded; aborting before the next flip)"
+    return "$RC_CREDIT_ABORT"
+  fi
+  return 0
+}
+
+# Resolves the node binary: env override, then PATH, then the newest
+# nvm-managed node (cron PATHs typically lack the nvm bin dir). Sets NODE_BIN.
+resolve_node() {
+  if [ -n "$NODE_BIN" ]; then
+    return 0
+  fi
+  NODE_BIN=$(command -v node 2>/dev/null || true)
+  if [ -z "$NODE_BIN" ]; then
+    NODE_BIN=$(compgen -G "$HOME/.nvm/versions/node/*/bin/node" | sort -V | tail -n 1 || true)
+  fi
+}
+
+# Prepends the resolved node directory to PATH: the solve child's shell and
+# the verify suite must find node even when the inherited PATH does not.
+node_path_prefix() {
+  printf '%s' "PATH=$(dirname "$NODE_BIN"):$PATH"
+}
+
+# Runs the pre-flight, takes the lock once, then either runs one block
+# (default) or loops single blocks until the schedule is complete (chain).
+main() {
+  mkdir -p "$AB_HOME"
+
+  if [ -n "$CREDIT_CEILING" ] && ! [[ "$CREDIT_CEILING" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    log_block "infra-error=$(now) invalid AB_CREDIT_CEILING: $CREDIT_CEILING"
+    printf 'opencode-ab-block: invalid AB_CREDIT_CEILING: %s\n' "$CREDIT_CEILING" >&2
+    exit 1
+  fi
+
+  if [ -z "$FLIP_CMD" ]; then
+    FLIP_CMD=$(resolve_cmd opencode-ab "$LOCAL_BIN")
+  fi
+  if [ -z "$WORK_CMD" ]; then
+    WORK_CMD=$(resolve_cmd opencode-ab-work-deep "$LOCAL_BIN")
+  fi
+  if [ -z "$OPENCODE_BIN" ]; then
+    OPENCODE_BIN=$(resolve_cmd opencode "$OPENCODE_INSTALL_DIR")
+  fi
+  require_tool "$FLIP_CMD" "opencode-ab (arm flip)"
+  require_tool "$WORK_CMD" "opencode-ab-work-deep (exercise apparatus)"
+  require_tool "$OPENCODE_BIN" "opencode (solve session)"
+  require_tool "$(command -v jq 2>/dev/null || true)" "jq"
+  require_tool "$(command -v flock 2>/dev/null || true)" "flock"
+  require_tool "$(command -v timeout 2>/dev/null || true)" "timeout"
+  require_tool "$(command -v sqlite3 2>/dev/null || true)" "sqlite3"
+  require_tool "$(command -v awk 2>/dev/null || true)" "awk"
+  resolve_node
+  require_tool "$NODE_BIN" "node (suite runner and solve shell)"
+  export NODE_BIN
+
+  # Single-instance guard: a nonblocking exclusive lock held for the whole
+  # invocation; in chain mode it spans every block of the chain.
+  exec 9>"$LOCK_FILE"
+  if ! flock -n 9; then
+    refuse "another driver instance is active (lock: $LOCK_FILE)"
+    exit 0
+  fi
+
+  local rc
+  if [ "$CHAIN_MODE" = true ]; then
+    while :; do
+      rc=$RC_BLOCK_OK
+      run_single_block || rc=$?
+      if [ "$rc" -eq "$RC_BLOCK_OK" ]; then
+        if [ "$CALIBRATION_MODE" = true ]; then
+          log_block "=== $CALIBRATION_COMPLETE_MARKER $(now): calibration flip exists in the flip log ==="
+          printf '%s: the calibration block ran; price the series from it and commit arms at the user gate\n' "$CALIBRATION_COMPLETE_MARKER"
+          exit 0
+        fi
+        sleep "$SETTLE_SECONDS"
+        continue
+      fi
+      if [ "$rc" -eq "$RC_SEQ_COMPLETE" ]; then
+        if [ "$CALIBRATION_MODE" = true ]; then
+          log_block "=== $CALIBRATION_COMPLETE_MARKER $(now): calibration flip exists in the flip log ==="
+          printf '%s: the calibration flip exists; nothing left to run\n' "$CALIBRATION_COMPLETE_MARKER"
+        else
+          log_block "=== $CHAIN_COMPLETE_MARKER $(now): $TOTAL_DATA_BLOCKS data blocks exist in the flip log (calibration included) ==="
+          printf '%s: %s data blocks exist; nothing left to run\n' "$CHAIN_COMPLETE_MARKER" "$TOTAL_DATA_BLOCKS"
+        fi
+        exit 0
+      fi
+      if [ "$rc" -eq "$RC_PARKED" ]; then
+        log_block "=== chain-parked $(now): quota/limit exhaustion; the current block is not consumed; re-invoke the driver to resume the same arm position ==="
+        exit "$RC_PARKED"
+      fi
+      log_block "=== chain-stopped $(now) rc=$rc ==="
+      exit "$rc"
+    done
+  fi
+
+  rc=$RC_BLOCK_OK
+  run_single_block || rc=$?
+  case "$rc" in
+    "$RC_BLOCK_OK"|"$RC_SEQ_COMPLETE"|"$RC_NOT_ALTERNATING") exit 0 ;;
+    "$RC_PARKED") exit "$RC_PARKED" ;;
+    "$RC_PARK_ESCALATION") exit "$RC_PARK_ESCALATION" ;;
+    "$RC_LOG_INCONSISTENT") exit "$RC_LOG_INCONSISTENT" ;;
+    *) exit 1 ;;
+  esac
+}
+
+# Runs the next block if one is due. Never exits; communicates through the
+# RC_* return codes so chain mode can decide between continuing, completing,
+# parking, and stopping. All block logging and log formats are as they have
+# always been; spawn/verify failures land in the logs and return
+# RC_BLOCK_OK (never-retry), quota failures park (RC_PARKED, block
+# unconsumed).
+run_single_block() {
+  local cal_done data_done block_num arm
+  read_deep_era
+  if [ "$ERA_DOUBLE_PARKED" -eq 1 ]; then
+    refuse "the same position parked twice without progress (or stray park markers present: $ERA_PARKED park markers in the flip log); inspect the provider situation and the flip log before re-invoking"
+    return "$RC_PARK_ESCALATION"
+  fi
+  cal_done=$(count_era_tokens "$CAL_ARM")
+  data_done=$(era_data_count)
+
+  if [ "$CALIBRATION_MODE" = true ]; then
+    if [ "$cal_done" -gt 0 ]; then
+      refuse "calibration already ran (CAL-ON-FULL flip logged); it runs exactly once"
+      return "$RC_SEQ_COMPLETE"
+    fi
+    if [ "$data_done" -gt 0 ]; then
+      refuse "deep data blocks already exist; calibration runs before any data block and cannot run after"
+      return "$RC_NOT_ALTERNATING"
+    fi
+    block_num="cal"
+    arm="$CAL_ARM"
+  else
+    if [ "$cal_done" -eq 0 ]; then
+      refuse "no calibration flip in the flip log; the CAL-ON-FULL calibration block must run before any data block"
+      return "$RC_NOT_ALTERNATING"
+    fi
+    if [ "$cal_done" -gt 1 ]; then
+      refuse "multiple calibration flips ($cal_done CAL-ON-FULL lines in the deep era); inspect before continuing"
+      return "$RC_NOT_ALTERNATING"
+    fi
+    if [ "$data_done" -ge "$TOTAL_DATA_BLOCKS" ]; then
+      if grep -q "$COMPLETION_MARKER" "$SPAWN_LOG" 2>/dev/null; then
+        refuse "all $TOTAL_DATA_BLOCKS data blocks already ran and completion is logged"
+        return "$RC_SEQ_COMPLETE"
+      fi
+      # Completion marker missing on a full flip log: never claim
+      # completion. Re-run the coverage gate and leave a distinct
+      # completion-withheld terminal for the operator (nonzero exit; the
+      # chain-complete banner is reserved for genuine completions).
+      refuse "all $TOTAL_DATA_BLOCKS data blocks already ran but the completion marker is missing; re-checking spawn-log coverage"
+      if ! check_spawn_coverage; then
+        log_block "=== completion-withheld $(now): flip log says $TOTAL_DATA_BLOCKS data blocks but spawn-log coverage has gaps; inspect the logs before any completion ==="
+      else
+        log_block "=== completion-withheld $(now): coverage complete but the completion marker is missing (interrupted final block); inspect and resolve manually ==="
+      fi
+      return "$RC_LOG_INCONSISTENT"
+    fi
+    local bad
+    if ! bad=$(validate_deep_rotation); then
+      local bad_arm bad_pos want_arm
+      read -r bad_arm bad_pos want_arm <<< "$bad"
+      refuse "flip log position $bad_pos carries arm $bad_arm, expected $want_arm per the pre-registered rotation; inspect before continuing"
+      return "$RC_NOT_ALTERNATING"
+    fi
+    block_num=$(( data_done + 1 ))
+    arm=$(arm_for_data_block "$block_num")
+  fi
+
+  assert_no_redcheck_scratch || return "$?"
+
+  log_block "================================================================================"
+  log_block "=== block=$block_num arm=$arm start=$(now) ==="
+
+  # [2] Flip the arm per the sequence position (flip command takes the
+  # lowercase arm name: off | on-full | on-dry | cal-on-full).
+  local flip_output flip_status=0
+  flip_output=$("$FLIP_CMD" "${arm,,}" 9>&- 2>&1) || flip_status=$?
+  if [ "$flip_status" -ne 0 ]; then
+    log_block "flip: FAILED (exit $flip_status)"
+    log_block "$flip_output"
+    log_block "=== block=$block_num end=$(now) status=flip-failed ==="
+    printf 'opencode-ab-block: flip failed (exit %s)\n' "$flip_status" >&2
+    return "$RC_FLIP_FAILED"
+  fi
+  log_block "flip: $flip_output"
+
+  # Post-flip arm assertion: the live config must now carry exactly the
+  # intended arm's plugin entry, including the manualMode boolean. A
+  # mismatch is an infra stop: a solve spawned against the wrong arm would
+  # be unattributable data.
+  if ! assert_config_for_arm "$arm"; then
+    log_block "arm-assert: FAILED (live config does not match arm $arm; manualMode or companion keys differ)"
+    log_block "=== block=$block_num end=$(now) status=arm-assert-failed ==="
+    printf 'opencode-ab-block: arm assertion failed for %s\n' "$arm" >&2
+    return "$RC_FLIP_FAILED"
+  fi
+  log_block "arm-assert: OK ($arm)"
+
+  # Flip-advance guard: a flip subcall can succeed while writing nothing
+  # (miswired command, broken log path), which would silently desynchronize
+  # the sequence. The flip line is the experiment's ground truth; the deep
+  # era counts (park markers canceling their preceding flip) must now name
+  # this block's position.
+  local flips_after
+  read_deep_era
+  if [ "$CALIBRATION_MODE" = true ]; then
+    flips_after=$(count_era_tokens "$CAL_ARM")
+    if [ "$flips_after" -ne 1 ]; then
+      log_block "flip: NO-OP detected (calibration count $flips_after, expected 1); treating as flip failure"
+      log_block "=== block=$block_num end=$(now) status=flip-failed ==="
+      printf 'opencode-ab-block: flip no-op detected (calibration count %s, expected 1)\n' "$flips_after" >&2
+      return "$RC_FLIP_FAILED"
+    fi
+  else
+    flips_after=$(era_data_count)
+    if [ "$flips_after" -ne "$block_num" ]; then
+      log_block "flip: NO-OP detected (flip count $flips_after, expected $block_num); treating as flip failure"
+      log_block "=== block=$block_num end=$(now) status=flip-failed ==="
+      printf 'opencode-ab-block: flip no-op detected (count %s, expected %s)\n' "$flips_after" "$block_num" >&2
+      return "$RC_FLIP_FAILED"
+    fi
+  fi
+
+  # [3] Reset the standardized exercise and take its paste-prompt verbatim.
+  local prompt reset_status=0
+  prompt=$("$WORK_CMD" reset 9>&- 2>&1) || reset_status=$?
+  if [ "$reset_status" -ne 0 ] || [ -z "$prompt" ] || [[ "$prompt" == *$'\n'* ]]; then
+    log_block "reset: FAILED (exit $reset_status, output not a single-line prompt)"
+    log_block "$prompt"
+    log_block "=== block=$block_num end=$(now) status=reset-failed ==="
+    printf 'opencode-ab-block: reset failed or returned no single-line prompt\n' >&2
+    return "$RC_RESET_FAILED"
+  fi
+  log_block "reset: prompt=\"$prompt\""
+
+  # Spawn the solve as a fresh opencode process reading the new arm's config.
+  mkdir -p /tmp/opencode
+  local solve_log="$AB_HOME/ab-solve-$block_num.log"
+  local spawn_start spawn_stdout spawn_stderr spawn_status=0
+  spawn_start=$(now)
+  spawn_stdout=$(mktemp /tmp/opencode/ab-spawn-stdout.XXXXXX)
+  spawn_stderr=$(mktemp /tmp/opencode/ab-spawn-stderr.XXXXXX)
+  trap 'rm -f "$spawn_stdout" "$spawn_stderr"' EXIT
+  timeout --kill-after="$SPAWN_KILL_AFTER" "$SPAWN_TIMEOUT" \
+    env "$(node_path_prefix)" \
+    "$OPENCODE_BIN" run \
+    --format json \
+    -m "$AB_SOLVE_MODEL" \
+    --title "$SESSION_TITLE_PREFIX $block_num" \
+    --dir "$WORK_DIR" \
+    "$prompt" 9>&- >"$spawn_stdout" 2>"$spawn_stderr" || spawn_status=$?
+
+  local session_id
+  session_id=$(extract_session_id "$spawn_stdout")
+  {
+    printf 'block=%s arm=%s started=%s\n' "$block_num" "$arm" "$spawn_start"
+    cat "$spawn_stdout"
+    printf '\n--- stderr ---\n'
+    cat "$spawn_stderr"
+  } > "$solve_log"
+  rm -f "$spawn_stdout" "$spawn_stderr"
+  trap - EXIT
+
+  printf '%s block=%s arm=%s started=%s solve-session=%s exit=%s\n' \
+    "$(now)" "$block_num" "$arm" "$spawn_start" "$session_id" "$spawn_status" >> "$SPAWN_LOG"
+  if [ "$spawn_status" -eq "$TIMEOUT_EXIT_STATUS" ]; then
+    log_block "spawn: TIMEOUT after ${SPAWN_TIMEOUT} (kill-after ${SPAWN_KILL_AFTER}); solve-session=$session_id solve-log=$solve_log"
+  fi
+  log_block "spawn: exit=$spawn_status session=$session_id solve-log=$solve_log"
+
+  # [4] Verify the exercise suite; a red result is logged, never retried.
+  local verify_output verify_status=0
+  verify_output=$(env "$(node_path_prefix)" "$WORK_CMD" verify 9>&- 2>&1) || verify_status=$?
+  log_block "verify: exit=$verify_status"
+  log_block "$verify_output"
+
+  # [5] Quota park gate: quota/limit exhaustion parks the chain BEFORE the
+  # next flip. The PARKED marker cancels this block's flip line in the era
+  # counts, so the block is unconsumed and resume re-runs this arm position;
+  # the incomplete session stays census-excludable via its spawn-log session
+  # id (incomplete-run class). The gate's outcome is logged on every
+  # nonzero non-timeout spawn exit so a false-negative miss (real quota
+  # failure whose text missed the pinned markers) is visible at census time.
+  if is_quota_failure "$solve_log" "$spawn_status"; then
+    log_block "quota-gate: MARKED (spawn exit $spawn_status matched the pinned quota markers in the failure tail of $solve_log)"
+    printf '%s PARKED %s\n' "$(now)" "$PARK_REASON" >> "$FLIP_LOG"
+    log_block "park: quota/limit exhaustion detected (spawn exit $spawn_status, markers in $solve_log); PARKED marker written, block $block_num NOT consumed; re-invoke the driver to resume this arm position"
+    log_block "=== block=$block_num end=$(now) status=parked ==="
+    log_block "================================================================================"
+    return "$RC_PARKED"
+  fi
+  if [ "$spawn_status" -ne 0 ] && [ "$spawn_status" -ne "$TIMEOUT_EXIT_STATUS" ]; then
+    log_block "quota-gate: no-marker-in-tail (spawn exit $spawn_status carried no pinned quota markers in the last $QUOTA_TAIL_LINES lines of $solve_log; never-retry applies; if this was really a quota failure the census must catch it as a flag)"
+  fi
+
+  # [6] Credit-ceiling gate (optional): a computation failure is an infra
+  # stop; a per-run exceedance aborts the chain before the next flip with a
+  # dedicated log line.
+  check_credit_ceiling "$session_id" || return "$?"
+
+  # [7] After the final data block's verify, cross-check spawn-log block
+  # coverage (every block 1..N must have spawned) before writing the
+  # completion marker; a gap means the logs disagree with the flip log and
+  # the marker must be withheld.
+  if [ "$CALIBRATION_MODE" != true ] && [ "$block_num" == "$TOTAL_DATA_BLOCKS" ]; then
+    if ! check_spawn_coverage; then
+      return "$RC_LOG_INCONSISTENT"
+    fi
+    printf '%s %s\n' "$(now)" "$COMPLETION_MARKER" >> "$SPAWN_LOG"
+    log_block "=== $COMPLETION_MARKER $(now): $TOTAL_DATA_BLOCKS data blocks ran ($arm finished last) ==="
+    printf 'experiment-complete: all %s data blocks ran; final block=%s arm=%s spawn-exit=%s verify-exit=%s\n' \
+      "$TOTAL_DATA_BLOCKS" "$block_num" "$arm" "$spawn_status" "$verify_status"
+  fi
+
+  log_block "=== block=$block_num end=$(now) status=spawn-exit=$spawn_status verify-exit=$verify_status ==="
+  log_block "================================================================================"
+}
+
+main "$@"

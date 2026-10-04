@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# opencode-ab: flip the context-manager plugin A/B arm (LRU-81/82 protocol)
+# Usage: opencode-ab on-full|on-dry|off|cal-on-full|status
+#   on is accepted as an alias for on-full (LRU-81 spelling).
+# Every flip requires a FULL quit and relaunch of opencode to take effect.
+# Arm flip lines in ab-flip.log carry the arm name: ON-FULL, ON-DRY, OFF,
+# and CAL-ON-FULL for the one calibration run of the LRU-82 deep experiment.
+# cal-on-full writes the same config as on-full; only its flip line differs,
+# so the census can exclude the calibration block mechanically.
+
+set -euo pipefail
+
+CONFIG="$HOME/.config/opencode/opencode.json"
+SHARE="$HOME/.local/share/opencode"
+SEED="$SHARE/ab-plugin-on.json"
+SEED_DRY="$SHARE/ab-plugin-on-dry.json"
+LOG="$SHARE/ab-flip.log"
+BACKUP_DIR="/tmp/opencode"
+
+ON_ENTRY='[["./opencode-context-manager/plugin/context-manager.ts", {"manualMode": false, "watermarkTokens": 250000, "agedReadEvictionMessages": 30, "reasoningRetentionMessages": 16}]]'
+ON_DRY_ENTRY='[["./opencode-context-manager/plugin/context-manager.ts", {"manualMode": true, "watermarkTokens": 250000, "agedReadEvictionMessages": 30, "reasoningRetentionMessages": 16}]]'
+
+# Writes the plugin entry from the given seed file into the live config.
+apply_plugin_from_seed() {
+  local seed_file="$1"
+  jq --slurpfile plugin "$seed_file" '.plugin = $plugin[0]' "$CONFIG" > "$CONFIG.new"
+}
+
+backup_config() {
+  cp "$CONFIG" "$BACKUP_DIR/opencode.json.$(date +%s).bak"
+}
+
+log_flip() {
+  printf '%s %s\n' "$(date -Iseconds)" "$1" >> "$LOG"
+}
+
+ensure_seed() {
+  local seed_file="$1" entry="$2"
+  mkdir -p "$(dirname "$seed_file")"
+  [ -f "$seed_file" ] || printf '%s\n' "$entry" > "$seed_file"
+}
+
+case "${1:-}" in
+  on|on-full)
+    mkdir -p "$BACKUP_DIR"
+    ensure_seed "$SEED" "$ON_ENTRY"
+    backup_config
+    apply_plugin_from_seed "$SEED"
+    mv "$CONFIG.new" "$CONFIG"
+    log_flip "ON-FULL"
+    echo "Arm ON-FULL: plugin enabled (manualMode false, frozen policy keys). Now FULLY quit and relaunch opencode."
+    ;;
+  on-dry)
+    mkdir -p "$BACKUP_DIR"
+    ensure_seed "$SEED_DRY" "$ON_DRY_ENTRY"
+    backup_config
+    apply_plugin_from_seed "$SEED_DRY"
+    mv "$CONFIG.new" "$CONFIG"
+    log_flip "ON-DRY"
+    echo "Arm ON-DRY: plugin enabled (manualMode true, always-on passes only; eviction stood down). Now FULLY quit and relaunch opencode."
+    ;;
+  cal-on-full)
+    mkdir -p "$BACKUP_DIR"
+    ensure_seed "$SEED" "$ON_ENTRY"
+    backup_config
+    apply_plugin_from_seed "$SEED"
+    mv "$CONFIG.new" "$CONFIG"
+    log_flip "CAL-ON-FULL"
+    echo "Arm CAL-ON-FULL: calibration run on the ON-full config (manualMode false, frozen policy keys). Now FULLY quit and relaunch opencode."
+    ;;
+  off)
+    mkdir -p "$BACKUP_DIR"
+    backup_config
+    jq '.plugin = []' "$CONFIG" > "$CONFIG.new"
+    mv "$CONFIG.new" "$CONFIG"
+    log_flip "OFF"
+    echo "Arm OFF: plugin disabled (sidebar/panel go dark this block). Now FULLY quit and relaunch opencode."
+    ;;
+  status)
+    echo "plugin entry: $(jq -c '.plugin' "$CONFIG")"
+    if [ -f "$LOG" ]; then echo "last flips:"; tail -n 5 "$LOG"; else echo "no flips logged yet"; fi
+    ;;
+  *)
+    echo "Usage: opencode-ab on-full|on-dry|off|cal-on-full|status (on accepted as alias for on-full)" >&2
+    exit 1
+    ;;
+esac

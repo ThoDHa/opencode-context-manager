@@ -3,9 +3,12 @@ PLUGIN_SRC := $(addprefix plugin/,$(PLUGIN_FILES))
 PLUGIN_TARGET_DIR := $(HOME)/.config/opencode/context-manager
 TUI_HOOK := $(CURDIR)/tests/tui/hooks.mjs
 NODE_TEST_ENV := NODE_OPTIONS="--import $(TUI_HOOK)"
-TEST_FILES := tests/context-manager.test.ts tests/panel-data.test.ts tests/panel-rows.test.ts tests/sidebar-rows.test.ts tests/sidebar-subagents.test.ts tests/tui-harness.test.ts tests/tui-registration.test.ts tests/tui-panel.test.ts tests/tui-sidebar.test.ts
+TEST_FILES := tests/context-manager.test.ts tests/panel-data.test.ts tests/panel-rows.test.ts tests/sidebar-rows.test.ts tests/sidebar-subagents.test.ts tests/tui-harness.test.ts tests/tui-registration.test.ts tests/tui-panel.test.ts tests/tui-sidebar.test.ts tests/integration/ab/ab-apparatus.test.ts
 
-.PHONY: all test ci install uninstall help
+ABX_BIN_DIR := $(HOME)/.local/bin
+ABX_SHARE_DIR := $(HOME)/.local/share/opencode
+
+.PHONY: all test ci install uninstall ab-install ab-uninstall help
 
 # Default target
 all: test
@@ -91,6 +94,60 @@ uninstall:
 	done
 	@echo "Uninstalled plugin files from $(PLUGIN_TARGET_DIR)"
 
+# Symlink the A/B experiment framework's operational entry points into the
+# user paths, mirroring make install: the runner CLI as opencode-abx, the
+# exercise reset/verify/redcheck tool as opencode-abx-work, and the fixture
+# template/reference trees into the opencode share dir under abx- prefixed
+# names (distinct from the legacy bash apparatus's live directories).
+# Idempotent like make install: existing symlinks are replaced in place; a
+# regular file or directory at a target path aborts the install.
+ab-install:
+	@mkdir -p $(ABX_BIN_DIR) $(ABX_SHARE_DIR)
+	@set -e; \
+	link_abx() { \
+		target_name=$$1; src_rel=$$2; \
+		case "$${target_name}" in \
+			abx-*) target=$(ABX_SHARE_DIR)/$${target_name} ;; \
+			*) target=$(ABX_BIN_DIR)/$${target_name} ;; \
+		esac; \
+		src=$(CURDIR)/$${src_rel}; \
+		if [ -e "$$target" ] && [ ! -L "$$target" ]; then \
+			echo "ERROR: $$target exists and is not a symlink; remove it, then rerun 'make ab-install'" >&2; \
+			exit 1; \
+		fi; \
+		ln -sfn "$$src" "$$target"; \
+		echo "  linked $${target_name}"; \
+	}; \
+	link_abx opencode-abx experiments/cli.ts; \
+	link_abx opencode-abx-work experiments/exercise-cli.ts; \
+	link_abx abx-work-rotator-template experiments/fixtures/rotator/template; \
+	link_abx abx-work-rotator-reference experiments/fixtures/rotator/reference; \
+	link_abx abx-work-deep-template experiments/fixtures/deep/template; \
+	link_abx abx-work-deep-reference experiments/fixtures/deep/reference
+	@echo "Installed A/B experiment entry points to $(ABX_BIN_DIR) and $(ABX_SHARE_DIR)"
+
+# Remove the A/B experiment framework's symlinks from the user paths. Only
+# symlinks are removed; regular files or directories are left untouched.
+ab-uninstall:
+	@remove_abx() { \
+		target_name=$$1; \
+		case "$${target_name}" in \
+			abx-*) full=$(ABX_SHARE_DIR)/$${target_name} ;; \
+			*) full=$(ABX_BIN_DIR)/$${target_name} ;; \
+		esac; \
+		if [ -L "$$full" ]; then \
+			rm "$$full"; \
+			echo "  removed $${target_name}"; \
+		fi; \
+	}; \
+	remove_abx opencode-abx; \
+	remove_abx opencode-abx-work; \
+	remove_abx abx-work-rotator-template; \
+	remove_abx abx-work-rotator-reference; \
+	remove_abx abx-work-deep-template; \
+	remove_abx abx-work-deep-reference
+	@echo "Uninstalled A/B experiment entry points from $(ABX_BIN_DIR) and $(ABX_SHARE_DIR)"
+
 help:
 	@echo "opencode-context-manager"
 	@echo "===================="
@@ -99,6 +156,8 @@ help:
 	@echo "  make ci        - Per-file CI guard: every suite loads, counts sum to the aggregate"
 	@echo "  make install   - Symlink the plugin files into $(PLUGIN_TARGET_DIR)/"
 	@echo "  make uninstall - Remove the plugin symlinks from $(PLUGIN_TARGET_DIR)/"
+	@echo "  make ab-install   - Symlink the A/B experiment entry points into ~/.local/bin and ~/.local/share/opencode"
+	@echo "  make ab-uninstall - Remove the A/B experiment symlinks"
 	@echo "  make help      - Show this help"
 	@echo ""
 	@echo "npm ci is a prerequisite for test targets: test dependencies are dev-only"
