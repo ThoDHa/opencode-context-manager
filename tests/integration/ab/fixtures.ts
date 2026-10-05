@@ -19,6 +19,14 @@ export const SCHEDULE = [
   "OFF", "ON-FULL", "ON-DRY", "ON-DRY", "ON-FULL", "OFF",
 ] as const
 
+// The lever-series schedule's independent literal statement: the same
+// mirrored six-rotation scheme over the lever triple OFF, ON-FULL, LEVER.
+export const LEVER_SCHEDULE = [
+  "OFF", "ON-FULL", "LEVER", "LEVER", "ON-FULL", "OFF",
+  "OFF", "ON-FULL", "LEVER", "LEVER", "ON-FULL", "OFF",
+  "OFF", "ON-FULL", "LEVER", "LEVER", "ON-FULL", "OFF",
+] as const
+
 export const T0 = "2026-10-04T10:00:00.000Z"
 
 // Formats a fixture timestamp as offset minutes from T0.
@@ -77,11 +85,12 @@ export const workLogText = (verifies: readonly { label: string; passed: number; 
     .map((entry) => `${at(entry.minute)} verify: pass=${entry.passed} fail=${entry.failed} (exit ${entry.exit ?? 0})`)
     .join("\n") + "\n"
 
-export type MetricsLineOptions = { minute: number; sessionId: string; generation: 1 | 2 }
+export type MetricsLineOptions = { minute: number; sessionId: string; generation: 1 | 2; evictions?: number }
 
 /**
  * Builds a metrics JSONL text: one event per option, generation 2 carrying
- * `wouldEvictThisRun`.
+ * `wouldEvictThisRun`, and `evictedThisRun` holding one eviction-shaped
+ * entry per `evictions` (empty when omitted, the builder's historical shape).
  *
  * @param events the events to emit
  * @returns the metrics-log text
@@ -96,7 +105,13 @@ export const metricsLogText = (events: readonly MetricsLineOptions[]): string =>
         estimatedTokens: 50000,
         modelContextTokensSource: "model",
         ...(event.generation === 2 ? { wouldEvictThisRun: 0, wouldEvictBytesThisRun: 0 } : { watermarkTokens: 500000, deficitTokens: -450000 }),
-        evictedThisRun: [],
+        evictedThisRun: Array.from({ length: event.evictions ?? 0 }, (_, index) => ({
+          tool: `tool-${index}`,
+          subject: `subject-${index}`,
+          bytes: 16,
+          attachmentBytes: 0,
+          messagesAgo: index + 1,
+        })),
         totals: { evictions: 0 },
       }),
     )
@@ -106,6 +121,10 @@ const ON_ENTRY_TEXT =
   '[["./opencode-context-manager/plugin/context-manager.ts",{"manualMode":false,"watermarkTokens":250000,"agedReadEvictionMessages":30,"reasoningRetentionMessages":16}]]'
 const ON_DRY_ENTRY_TEXT =
   '[["./opencode-context-manager/plugin/context-manager.ts",{"manualMode":true,"watermarkTokens":250000,"agedReadEvictionMessages":30,"reasoningRetentionMessages":16}]]'
+const LEVER_ON_FULL_ENTRY_TEXT =
+  '[["./opencode-context-manager/plugin/context-manager.ts",{"manualMode":false,"watermarkTokens":12000,"agedReadEvictionMessages":30,"reasoningRetentionMessages":16}]]'
+const LEVER_LEVER_ENTRY_TEXT =
+  '[["./opencode-context-manager/plugin/context-manager.ts",{"manualMode":false,"watermarkTokens":12000,"agedReadEvictionMessages":30,"reasoningRetentionMessages":16,"cacheAwareHints":true}]]'
 
 export type FakeFlipMode = "correct" | "wrong-bool" | "swapped"
 
@@ -137,6 +156,7 @@ case "${mode}" in
       on-dry) write_entry '${ON_ENTRY_TEXT}'; log_flip "ON-DRY"; echo "flipped to on-dry" ;;
       cal-on-full) write_entry '[]'; log_flip "CAL-ON-FULL"; echo "flipped to cal-on-full" ;;
       off) write_entry '${ON_ENTRY_TEXT}'; log_flip "OFF"; echo "flipped to off" ;;
+      lever) write_entry '${LEVER_ON_FULL_ENTRY_TEXT}'; log_flip "LEVER"; echo "flipped to lever" ;;
     esac
     exit 0
     ;;
@@ -159,6 +179,7 @@ case "$1" in
   on-dry) write_entry '${ON_DRY_ENTRY_TEXT}'; log_flip "ON-DRY"; echo "flipped to on-dry" ;;
   cal-on-full) write_entry '${ON_ENTRY_TEXT}'; log_flip "CAL-ON-FULL"; echo "flipped to cal-on-full" ;;
   off) write_entry '[]'; log_flip "OFF"; echo "flipped to off" ;;
+  lever) write_entry '${LEVER_LEVER_ENTRY_TEXT}'; log_flip "LEVER"; echo "flipped to lever" ;;
   *) echo "fake-flip: usage" >&2; exit 1 ;;
 esac
 `,

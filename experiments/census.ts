@@ -19,7 +19,7 @@
 
 import { DatabaseSync } from "node:sqlite"
 
-import { readDeepEra, CALIBRATION_ARM, type DeepEra, type FlipArm } from "./arms.ts"
+import { readDeepEra, CALIBRATION_ARM, DEEP_PROFILE, type DeepEra, type ExperimentProfile, type FlipArm } from "./arms.ts"
 import { parseSpawnLog, type SpawnLogEntry } from "./spawn.ts"
 
 export const METRICS_LOG_BASENAME = "context-metrics.jsonl"
@@ -47,12 +47,15 @@ export type MetricsEvent = {
   timestampMs: number | null
   sessionId: string
   generation: MetricsGeneration
+  evictedThisRun: boolean
 }
 
 /**
  * Parses a metrics JSONL log's text into events, dropping lines that do not
  * parse or do not carry a recognized generation (a truncated trailing write
- * must not poison the census).
+ * must not poison the census). Each event records whether its line's
+ * `evictedThisRun` array is nonempty (real evictions happened this run),
+ * the lever profile's full-mode corroboration signal.
  *
  * @param metricsLogText the raw metrics-log content
  * @returns the recognized events in log order
@@ -65,13 +68,14 @@ export const parseMetricsLog = (metricsLogText: string): MetricsEvent[] => {
       const parsed: unknown = JSON.parse(line)
       const generation = classifyMetricsGeneration(parsed)
       if (generation === null) continue
-      const record = parsed as { ts: string; session: string }
+      const record = parsed as { ts: string; session: string; evictedThisRun?: unknown }
       const timestampMs = Date.parse(record.ts)
       events.push({
         timestamp: record.ts,
         timestampMs: Number.isNaN(timestampMs) ? null : timestampMs,
         sessionId: record.session,
         generation,
+        evictedThisRun: Array.isArray(record.evictedThisRun) && record.evictedThisRun.length > 0,
       })
     } catch {
       // Unparseable lines (including a truncated trailing write) are dropped.
@@ -217,6 +221,7 @@ export type CensusInputs = {
   workLogText: string
   metricsLogText: string
   turns: TurnSource
+  profile?: ExperimentProfile
 }
 
 export const CALIBRATION_BLOCK_LABEL = "cal"
@@ -245,12 +250,15 @@ const verifyForBlock = (entries: WorkLogEntry[], startedMs: number | null): Work
  * classes. The metrics events attributed to a block are its session's events
  * inside the block's window (the block's spawn start through the next
  * block's spawn start); everything else belongs to the neighboring blocks.
+ * Arm labels come from the era-position join under the inputs' profile: the
+ * n-th data flip of the era names block n's arm.
  *
- * @param inputs the joined log texts and the turn source
+ * @param inputs the joined log texts, the turn source, and the experiment
+ *   profile (the frozen deep profile when omitted)
  * @returns one census row per spawn-log block, in spawn-log order
  */
 export const buildCensus = (inputs: CensusInputs): CensusRow[] => {
-  const era: DeepEra = readDeepEra(inputs.flipLogText)
+  const era: DeepEra = readDeepEra(inputs.flipLogText, inputs.profile ?? DEEP_PROFILE)
   const spawns: SpawnLogEntry[] = parseSpawnLog(inputs.spawnLogText)
   const work = parseWorkLog(inputs.workLogText)
   const metrics = parseMetricsLog(inputs.metricsLogText)
@@ -347,4 +355,32 @@ export const buildCensus = (inputs: CensusInputs): CensusRow[] => {
       exclusion,
     }
   })
+}
+
+/**
+ * The full-mode profiles' metrics corroboration: every ON-arm data block
+ * must carry at least one metrics event whose `evictedThisRun` array is
+ * nonempty (the plugin ran in full mode and really evicted), and every OFF
+ * block must carry no metrics events at all (the plugin is absent; ANY
+ * metrics line on an OFF block is a leak, be it a dry-mode projection or a
+ * quiet full-mode line). Returns the failing blocks' labels in census order;
+ * an empty list corroborates the series. The calibration block is exempt
+ * (it prices the series and never counts as data); every other exclusion
+ * class still gets judged, because the corroboration is an
+ * apparatus-integrity check, not an endpoint gate.
+ *
+ * @param rows the census rows of a full-mode-corroborated series
+ * @returns the labels of blocks failing the corroboration
+ */
+export const uncorroboratedFullModeBlocks = (rows: readonly CensusRow[]): string[] => {
+  const failures: string[] = []
+  for (const row of rows) {
+    if (row.exclusion === "calibration") continue
+    if (row.arm === "OFF") {
+      if (row.metricsEvents.length > 0) failures.push(row.blockLabel)
+      continue
+    }
+    if (!row.metricsEvents.some((event) => event.evictedThisRun)) failures.push(row.blockLabel)
+  }
+  return failures
 }

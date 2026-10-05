@@ -10,13 +10,15 @@
  * the hermetic suite proves the deterministic core against doubles.
  */
 
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync } from "node:fs"
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { delimiter, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { spawnSync } from "node:child_process"
 import {
+  applyArmToConfig,
   armForDataBlock,
+  ARM_BY_FLIP_ARG,
   BLOCK_LOCK_BASENAME,
   BLOCK_LOG_BASENAME,
   CALIBRATION_ARM,
@@ -24,10 +26,14 @@ import {
   CHAIN_COMPLETE_MARKER,
   configMatchesArm,
   countEraFlips,
+  DEEP_PROFILE,
   eraDataCount,
+  EXPERIMENT_PROFILES,
   FLIP_ARG_BY_ARM,
   FLIP_LOG_BASENAME,
+  formatFlipLine,
   formatParkLine,
+  isExperimentProfileName,
   PARK_REASON_QUOTA,
   readDeepEra,
   RC,
@@ -37,6 +43,7 @@ import {
   WORK_LOG_DEEP_BASENAME,
   type BlockLabel,
   type DeepEra,
+  type ExperimentProfile,
   type FlipArm,
 } from "./arms.ts"
 import {
@@ -53,9 +60,19 @@ import {
   SPAWN_TIMEOUT_MS,
   TIMEOUT_EXIT_STATUS,
 } from "./spawn.ts"
-import { buildCensus, openTurnDatabase } from "./census.ts"
-import { computeCredits, computeEndpoints, CreditsError, formatCredits } from "./endpoints.ts"
-import { renderReadout, writeReadoutFile, type ReadoutInputs } from "./report.ts"
+import { buildCensus, METRICS_LOG_BASENAME, openTurnDatabase, uncorroboratedFullModeBlocks } from "./census.ts"
+import {
+  computeCredits,
+  computeDepthBucketTable,
+  computeEndpoints,
+  computeEvictionAlignedView,
+  computeTurnPrimary,
+  CreditsError,
+  formatCredits,
+  fullModeArms,
+  gatePrimaryEndpoint,
+} from "./endpoints.ts"
+import { renderReadout, writeReadoutFile, type ReadoutAnalysis, type ReadoutInputs } from "./report.ts"
 
 export const AB_HOME_DEFAULT = join(homedir(), ".local", "share", "opencode")
 export const CONFIG_PATH_DEFAULT = join(homedir(), ".config", "opencode", "opencode.json")
@@ -71,6 +88,26 @@ export const SETTLE_SECONDS_DEFAULT = 5
 // instance; distinct from every nested CLI exit so a refusal is recognizable.
 export const FLOCK_CONFLICT_EXIT = 99
 const LOCK_HELD_ENV = "ABX_LOCKED"
+// The experiment-profile selection: AB_EXPERIMENT=lever1 runs the lever
+// series; unset or "deep" runs the frozen deep profile; anything else is an
+// infra error (a silently-wrong profile would collect unattributable data).
+export const EXPERIMENT_PROFILE_ENV = "AB_EXPERIMENT"
+// The self-flip sentinel: the lever profile's default flip command. The
+// legacy bash flip tool has no lever case and writes 250k seeds, so the
+// lever series flips through this CLI's own atomic apply instead.
+export const SELF_FLIP_COMMAND = "self"
+
+/**
+ * The runBlock status label for a failed flip: a self-flip failure names
+ * what actually failed (the flip itself, whose specific reason the block
+ * log carries on the self-flip: FAILED line above it), while the legacy
+ * flip path keeps the historical arm-assert label for both its failure
+ * stages.
+ *
+ * @param flipCmd the config's flip command
+ * @returns the status label for the block-end line
+ */
+export const flipFailureStatus = (flipCmd: string): string => (flipCmd === SELF_FLIP_COMMAND ? "self-flip-failed" : "arm-assert-failed")
 
 export type CliConfig = {
   home: string
@@ -87,9 +124,16 @@ export type CliConfig = {
   settleSeconds: number
   chainMode: boolean
   calibrationMode: boolean
+  profile: ExperimentProfile
 }
 
 const envOr = (value: string | undefined, fallback: string): string => (value === undefined || value.length === 0 ? fallback : value)
+
+// Refusal paths echo the offending operator-supplied value into the block
+// log and stderr; control characters are stripped first so a hostile value
+// cannot forge log lines or mangle terminals.
+const CONTROL_CHARACTERS_PATTERN = /[\u0000-\u001f\u007f]/g
+const stripControlCharacters = (value: string): string => value.replace(CONTROL_CHARACTERS_PATTERN, "")
 
 // Formats milliseconds as the timeout(1) duration string (2h, 5m) the frozen
 // spawn geometry uses.
@@ -122,8 +166,11 @@ export const resolveCmd = (name: string, fallbackDir: string): string => {
  * experiment paths as defaults: AB_HOME, AB_CONFIG, AB_DB_PATH,
  * AB_WORK_DIR, AB_FLIP_CMD, AB_WORK_CMD, OPENCODE_BIN, AB_SOLVE_MODEL,
  * AB_SPAWN_TIMEOUT, AB_SPAWN_KILL_AFTER, AB_CREDIT_CEILING,
- * AB_SETTLE_SECONDS, plus the --chain/--calibration flags (CHAIN=1 and
- * AB_CALIBRATION=1 accepted as aliases).
+ * AB_SETTLE_SECONDS, AB_EXPERIMENT (the experiment profile; deep when
+ * unset), plus the --chain/--calibration flags (CHAIN=1 and AB_CALIBRATION=1
+ * accepted as aliases). The flip command defaults to the legacy bash tool,
+ * except under the lever profile where it defaults to the self flip (the
+ * bash tool has no lever case); AB_FLIP_CMD overrides in both profiles.
  *
  * @param argv the CLI argument vector
  * @param env the process environment
@@ -137,12 +184,14 @@ export const resolveCliConfig = (argv: readonly string[], env: NodeJS.ProcessEnv
     if (arg === "--calibration") calibrationMode = true
   }
   const home = envOr(env.AB_HOME, AB_HOME_DEFAULT)
+  const profileName = envOr(env[EXPERIMENT_PROFILE_ENV], DEEP_PROFILE.name)
+  const profile = isExperimentProfileName(profileName) ? EXPERIMENT_PROFILES[profileName] : DEEP_PROFILE
   return {
     home,
     configPath: envOr(env.AB_CONFIG, CONFIG_PATH_DEFAULT),
     dbPath: envOr(env.AB_DB_PATH, DB_PATH_DEFAULT),
     workDir: envOr(env.AB_WORK_DIR, WORK_DIR_DEFAULT),
-    flipCmd: envOr(env.AB_FLIP_CMD, resolveCmd("opencode-ab", LOCAL_BIN_DIR)),
+    flipCmd: envOr(env.AB_FLIP_CMD, profile.name === "lever1" ? SELF_FLIP_COMMAND : resolveCmd("opencode-ab", LOCAL_BIN_DIR)),
     workCmd: envOr(env.AB_WORK_CMD, resolveCmd("opencode-ab-work-deep", LOCAL_BIN_DIR)),
     opencodeBin: envOr(env.OPENCODE_BIN, resolveCmd("opencode", OPENCODE_INSTALL_DIR)),
     solveModel: envOr(env.AB_SOLVE_MODEL, SOLVE_MODEL_DEFAULT),
@@ -152,6 +201,7 @@ export const resolveCliConfig = (argv: readonly string[], env: NodeJS.ProcessEnv
     settleSeconds: Number(envOr(env.AB_SETTLE_SECONDS, String(SETTLE_SECONDS_DEFAULT))),
     chainMode,
     calibrationMode,
+    profile,
   }
 }
 
@@ -184,19 +234,21 @@ export type NextBlockDecision =
  * and the completion-marker presence alone. The pre-registered rules: the
  * calibration runs exactly once before any data block; the self-limit is the
  * flip-log state (18 data blocks); every historical data flip is validated
- * against the mirrored rotation (a deleted or duplicated mid-log line
- * refuses rather than passes); a full flip log without the completion marker
- * withholds completion (never claims it); the same position parking twice
- * without progress escalates to the operator.
+ * against the profile's mirrored rotation (a deleted or duplicated mid-log
+ * line refuses rather than passes); a full flip log without the completion
+ * marker withholds completion (never claims it); the same position parking
+ * twice without progress escalates to the operator.
  *
  * @param era the parsed deep era of the flip log
  * @param calibrationMode true for a --calibration invocation
  * @param completionLogged whether the spawn log carries the completion
  *   marker
+ * @param profile the experiment profile whose rotation and arm schedule
+ *   govern the series (the frozen deep profile when omitted)
  * @returns the run decision (label and arm), the withheld-completion
  *   re-check, or the refusal (rc and reason)
  */
-export const decideNextBlock = (era: DeepEra, calibrationMode: boolean, completionLogged: boolean): NextBlockDecision => {
+export const decideNextBlock = (era: DeepEra, calibrationMode: boolean, completionLogged: boolean, profile: ExperimentProfile = DEEP_PROFILE): NextBlockDecision => {
   if (era.doubleParked) {
     return {
       kind: "refuse",
@@ -235,7 +287,7 @@ export const decideNextBlock = (era: DeepEra, calibrationMode: boolean, completi
     }
     return { kind: "completion-withheld" }
   }
-  const mismatch = validateDeepRotation(era)
+  const mismatch = validateDeepRotation(era, profile)
   if (mismatch !== null) {
     return {
       kind: "refuse",
@@ -243,7 +295,7 @@ export const decideNextBlock = (era: DeepEra, calibrationMode: boolean, completi
       reason: `flip log position ${mismatch.position} carries arm ${mismatch.carried}, expected ${mismatch.expected} per the pre-registered rotation; inspect before continuing`,
     }
   }
-  return { kind: "run", blockLabel: String(dataDone + 1), arm: armForDataBlock(dataDone + 1) }
+  return { kind: "run", blockLabel: String(dataDone + 1), arm: armForDataBlock(dataDone + 1, profile) }
 }
 
 /**
@@ -269,23 +321,83 @@ export const findScratchLeftover = (scratchDir: string): string | null => {
 }
 
 /**
+ * The self flip: applies the active profile's seed for the arm to the live
+ * config atomically (stage, then rename within the config's directory) and
+ * appends the arm's flip line to the flip log, so the era readers and the
+ * post-flip assertion see exactly what the legacy bash flip tool produced.
+ * The config document keeps every non-plugin key.
+ *
+ * @param config the resolved CLI configuration
+ * @param arm the arm to flip to
+ * @returns the confirmation line, or null after logging the failure
+ */
+export const selfFlip = (config: CliConfig, arm: FlipArm): string | null => {
+  let liveConfig: unknown = null
+  try {
+    liveConfig = JSON.parse(readFileSync(config.configPath, "utf8"))
+  } catch {
+    liveConfig = null
+  }
+  if (liveConfig === null) {
+    logBlock(config, `self-flip: FAILED (live config at ${config.configPath} is not parseable JSON)`)
+    return null
+  }
+  let seeded: unknown
+  try {
+    seeded = applyArmToConfig(liveConfig, arm, config.profile)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    logBlock(config, `self-flip: FAILED (${detail})`)
+    return null
+  }
+  const stagedPath = `${config.configPath}.self-flip-staged`
+  try {
+    writeFileSync(stagedPath, `${JSON.stringify(seeded, null, 2)}\n`)
+    renameSync(stagedPath, config.configPath)
+    appendFileSync(flipLogPath(config), `${formatFlipLine(nowIso(), arm)}\n`)
+  } catch (error) {
+    // A rename failure leaves the staged file behind; a successful rename
+    // leaves nothing for the removal to find. The cleanup must not mask
+    // the flip failure with its own.
+    try {
+      unlinkSync(stagedPath)
+    } catch {
+      // Nothing staged to remove (already renamed away, or never written).
+    }
+    const detail = error instanceof Error ? error.message : String(error)
+    logBlock(config, `self-flip: FAILED (cannot write the flip: ${detail})`)
+    return null
+  }
+  return `flipped to ${FLIP_ARG_BY_ARM[arm]} (self)`
+}
+
+/**
  * Runs the flip command for the arm and asserts the live config matches the
- * arm's seed entry (deep equality carries the manualMode boolean and every
- * companion key). Exported for the hermetic suite's runner-shell cases
- * against doubles.
+ * arm's seed entry (deep equality carries the manualMode boolean, the
+ * watermark, and every companion key, including the lever profile's
+ * cacheAwareHints discriminator). A flip command of `self` (the lever
+ * profile's default) performs the flip in-process through `selfFlip`
+ * instead of spawning the legacy bash tool. Exported for the hermetic
+ * suite's runner-shell cases against doubles.
  *
  * @param config the resolved CLI configuration
  * @param arm the arm to flip to
  * @returns the flip command's output, or null after logging the failure
  */
 export const flipArmAndAssert = (config: CliConfig, arm: FlipArm): string | null => {
-  const flipped = spawnSync(config.flipCmd, [FLIP_ARG_BY_ARM[arm]], { encoding: "utf8" })
-  if (flipped.status !== 0) {
-    logBlock(config, `flip: FAILED (exit ${flipped.status})`)
-    logBlock(config, `${flipped.stdout ?? ""}${flipped.stderr ?? ""}`)
-    return null
+  let output: string | null
+  if (config.flipCmd === SELF_FLIP_COMMAND) {
+    output = selfFlip(config, arm)
+  } else {
+    const flipped = spawnSync(config.flipCmd, [FLIP_ARG_BY_ARM[arm]], { encoding: "utf8" })
+    if (flipped.status !== 0) {
+      logBlock(config, `flip: FAILED (exit ${flipped.status})`)
+      logBlock(config, `${flipped.stdout ?? ""}${flipped.stderr ?? ""}`)
+      return null
+    }
+    output = flipped.stdout ?? ""
   }
-  const output = flipped.stdout ?? ""
+  if (output === null) return null
   logBlock(config, `flip: ${output.trimEnd()}`)
   let liveConfig: unknown = null
   try {
@@ -293,7 +405,7 @@ export const flipArmAndAssert = (config: CliConfig, arm: FlipArm): string | null
   } catch {
     liveConfig = null
   }
-  if (!configMatchesArm(liveConfig, arm)) {
+  if (!configMatchesArm(liveConfig, arm, config.profile)) {
     logBlock(config, `arm-assert: FAILED (live config does not match arm ${arm}; manualMode or companion keys differ)`)
     return null
   }
@@ -375,9 +487,9 @@ export const missingCoverageBlocks = (spawnLogText: string): number[] => {
  * @returns the block's return code (the bash RC_* semantics)
  */
 export const runBlock = (config: CliConfig): number => {
-  const era = readDeepEra(readTextOrEmpty(flipLogPath(config)))
+  const era = readDeepEra(readTextOrEmpty(flipLogPath(config)), config.profile)
   const completionLogged = hasCompletionMarker(readTextOrEmpty(spawnLogPath(config)))
-  const decision = decideNextBlock(era, config.calibrationMode, completionLogged)
+  const decision = decideNextBlock(era, config.calibrationMode, completionLogged, config.profile)
   if (decision.kind === "refuse") {
     logBlock(config, `=== refused ${nowIso()} reason: ${decision.reason} ===`)
     process.stdout.write(`refused: ${decision.reason}\n`)
@@ -409,11 +521,11 @@ export const runBlock = (config: CliConfig): number => {
   logBlock(config, `=== block=${blockLabel} arm=${arm} start=${nowIso()} ===`)
 
   if (flipArmAndAssert(config, arm) === null) {
-    logBlock(config, `=== block=${blockLabel} end=${nowIso()} status=arm-assert-failed ===`)
+    logBlock(config, `=== block=${blockLabel} end=${nowIso()} status=${flipFailureStatus(config.flipCmd)} ===`)
     return RC.FLIP_FAILED
   }
 
-  const eraAfter = readDeepEra(readTextOrEmpty(flipLogPath(config)))
+  const eraAfter = readDeepEra(readTextOrEmpty(flipLogPath(config)), config.profile)
   const flipsAfter = config.calibrationMode ? countEraFlips(eraAfter, CALIBRATION_ARM) : eraDataCount(eraAfter)
   const expectedAfter = config.calibrationMode ? 1 : Number(blockLabel)
   if (flipsAfter !== expectedAfter) {
@@ -554,8 +666,11 @@ export const acquireLockOrRefuse = (config: CliConfig, argv: readonly string[], 
 
 /**
  * Renders and deposits the readout: the census over the live logs and DB,
- * the per-arm endpoints, and the Report File Template shape, written under
- * the experiment home as `abx-readout.md`.
+ * the per-arm endpoints under the config's experiment profile over the
+ * gate-cleared population, the per-turn analysis views (the frozen-rule
+ * instruments), the full-mode metrics corroboration (as caveats when it
+ * fails), and the Report File Template shape, written under the experiment
+ * home as `abx-readout.md`.
  *
  * @param config the resolved CLI configuration
  * @returns the deposit path
@@ -567,31 +682,50 @@ export const runReadout = (config: CliConfig): string => {
     flipLogText: readTextOrEmpty(flipLogPath(config)),
     spawnLogText: readTextOrEmpty(spawnLogPath(config)),
     workLogText: readTextOrEmpty(join(config.home, WORK_LOG_DEEP_BASENAME)),
-    metricsLogText: readTextOrEmpty(join(config.home, "context-metrics.jsonl")),
+    metricsLogText: readTextOrEmpty(join(config.home, METRICS_LOG_BASENAME)),
     turns: openTurnDatabase(config.dbPath),
+    profile: config.profile,
   })
   for (const row of census) {
     try {
       const credits = computeCredits(row.turns)
       creditsByBlock.set(row.blockLabel, credits)
-      rowsWithCredits.push({ ...row, credits })
+      // The endpoint population feeds the summaries, contrasts, and
+      // per-turn analysis views; the per-block credits table above keeps
+      // every row, but only gate-clearing rows (no exclusion class, credits
+      // computable) may influence an endpoint.
+      const gate = gatePrimaryEndpoint(row, credits)
+      if (gate.gated === false) rowsWithCredits.push({ ...row, credits })
     } catch {
       // Blocks without computable credits (incomplete runs) stay in the
       // census table and out of the endpoint summaries.
     }
   }
-  const { summaries, contrasts } = computeEndpoints(rowsWithCredits)
+  const { summaries, contrasts } = computeEndpoints(rowsWithCredits, config.profile)
+  const analysis: ReadoutAnalysis = {
+    primary: computeTurnPrimary(rowsWithCredits, config.profile),
+    depthBuckets: computeDepthBucketTable(rowsWithCredits, config.profile),
+    evictionAligned: computeEvictionAlignedView(rowsWithCredits, fullModeArms(config.profile)),
+  }
+  const caveats: string[] = []
+  if (config.profile.corroboratesFullModeMetrics) {
+    const uncorroborated = uncorroboratedFullModeBlocks(census)
+    if (uncorroborated.length > 0) {
+      caveats.push(`full-mode metrics corroboration failed for blocks: ${uncorroborated.join(", ")}`)
+    }
+  }
   const inputs: ReadoutInputs = {
     taskFileBasename: "LRU-83",
     slug: "readout",
     from: "opencode-abx",
     date: nowIso().slice(0, 16).replace("T", " "),
-    title: `A/B readout over ${census.length} census rows (generated ${nowIso()}).`,
+    title: `A/B readout over ${census.length} census rows (profile ${config.profile.name}, generated ${nowIso()}).`,
     rows: census,
     creditsByBlock,
     summaries,
     contrasts,
-    caveats: [],
+    caveats,
+    analysis,
   }
   const depositPath = join(config.home, "abx-readout.md")
   mkdirSync(config.home, { recursive: true })
@@ -605,7 +739,7 @@ const CANDIDATE_TOOLS: readonly [string, (config: CliConfig) => string][] = [
   ["opencode (solve session)", (config) => config.opencodeBin],
 ]
 
-const usage = (): string => "usage: opencode-abx {calibrate|chain|readout} (default: single block)"
+const usage = (): string => "usage: opencode-abx {calibrate|chain|readout|flip <arm>} (default: single block)"
 
 /**
  * The CLI main: resolves the configuration and subcommand, validates the
@@ -617,14 +751,22 @@ const usage = (): string => "usage: opencode-abx {calibrate|chain|readout} (defa
  * @returns the process exit code
  */
 export const main = async (argv: readonly string[], env: NodeJS.ProcessEnv): Promise<number> => {
-  const subcommand = argv.find((arg) => arg === "calibrate" || arg === "chain" || arg === "readout") ?? ""
+  const subcommand = argv.find((arg) => arg === "calibrate" || arg === "chain" || arg === "readout" || arg === "flip") ?? ""
   const config = resolveCliConfig(argv, env)
   // Every logging and lock path lands under the experiment home; a fresh
   // environment may not have it yet, so the first touch must create it.
   mkdirSync(config.home, { recursive: true })
   if (config.creditCeiling.length > 0 && !CREDIT_CEILING_PATTERN.test(config.creditCeiling)) {
-    logBlock(config, `infra-error=${nowIso()} invalid AB_CREDIT_CEILING: ${config.creditCeiling}`)
-    process.stderr.write(`invalid AB_CREDIT_CEILING: ${config.creditCeiling}\n`)
+    const ceilingEcho = stripControlCharacters(config.creditCeiling)
+    logBlock(config, `infra-error=${nowIso()} invalid AB_CREDIT_CEILING: ${ceilingEcho}`)
+    process.stderr.write(`invalid AB_CREDIT_CEILING: ${ceilingEcho}\n`)
+    return 1
+  }
+  const profileSelection = env[EXPERIMENT_PROFILE_ENV]
+  if (profileSelection !== undefined && profileSelection.length > 0 && !isExperimentProfileName(profileSelection)) {
+    const profileEcho = stripControlCharacters(profileSelection)
+    logBlock(config, `infra-error=${nowIso()} invalid ${EXPERIMENT_PROFILE_ENV}: ${profileEcho}`)
+    process.stderr.write(`invalid ${EXPERIMENT_PROFILE_ENV}: ${profileEcho}\n`)
     return 1
   }
   for (const [what, resolve] of CANDIDATE_TOOLS) {
@@ -643,6 +785,19 @@ export const main = async (argv: readonly string[], env: NodeJS.ProcessEnv): Pro
 
   if (subcommand === "readout") {
     process.stdout.write(`${runReadout(config)}\n`)
+    return 0
+  }
+
+  if (subcommand === "flip") {
+    const flipArg = argv[argv.indexOf("flip") + 1]
+    const arm = flipArg === undefined ? undefined : ARM_BY_FLIP_ARG[flipArg]
+    if (arm === undefined) {
+      process.stderr.write(`${usage()}\n`)
+      return 1
+    }
+    const output = selfFlip(config, arm)
+    if (output === null) return 1
+    process.stdout.write(`${output}\n`)
     return 0
   }
 

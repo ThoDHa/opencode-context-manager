@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { appendFileSync, chmodSync, cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, isAbsolute, relative } from "node:path"
 import { spawnSync } from "node:child_process"
@@ -8,8 +8,15 @@ import { spawnSync } from "node:child_process"
 import {
   applyArmToConfig,
   armForDataBlock,
+  ARM_BY_FLIP_ARG,
   BLOCK_LOG_BASENAME,
   CALIBRATION_ARM,
+  DEEP_PROFILE,
+  FLIP_LOG_BASENAME,
+  LEVER1_PROFILE,
+  LEVER_ARM_PLUGIN_ENTRY,
+  LEVER_ON_FULL_PLUGIN_ENTRY,
+  SPAWN_LOG_BASENAME,
   WORK_LOG_DEEP_BASENAME,
   WORK_LOG_BASENAME,
   configMatchesArm,
@@ -23,6 +30,7 @@ import {
   readDeepEra,
   TOTAL_DATA_BLOCKS,
   validateDeepRotation,
+  type Arm,
 } from "../../../experiments/arms.ts"
 import {
   buildSolveArgv,
@@ -37,19 +45,25 @@ import {
 import {
   buildCensus,
   classifyMetricsGeneration,
+  METRICS_LOG_BASENAME,
   openTurnDatabase,
   parseMetricsLog,
   parseWorkLog,
+  uncorroboratedFullModeBlocks,
   type CensusRow,
   type TurnRow,
   type TurnSource,
 } from "../../../experiments/census.ts"
 import {
   computeCredits,
+  computeDepthBucketTable,
   computeEndpoints,
+  computeEvictionAlignedView,
+  computeTurnPrimary,
   contrastArms,
   depthBucket,
   formatCredits,
+  fullModeArms,
   gatePrimaryEndpoint,
   summarizeArm,
   CreditsError,
@@ -57,10 +71,23 @@ import {
 import { renderReadout, writeReadoutFile, type ReadoutInputs } from "../../../experiments/report.ts"
 import { checkSpecIntegrity, corpusManifest, resolveExercise, treeManifest } from "../../../experiments/exercise.ts"
 import { findRedcheckLeftover, resetTree, suiteFilesOf, verifyTree, writeWorkLogLine, REDCHECK_SCRATCH_PREFIXES, type ExerciseCliOptions } from "../../../experiments/exercise-cli.ts"
-import { decideNextBlock, flipArmAndAssert, main as runCli, missingCoverageBlocks, resetExercise, type CliConfig } from "../../../experiments/cli.ts"
+import {
+  decideNextBlock,
+  EXPERIMENT_PROFILE_ENV,
+  flipArmAndAssert,
+  flipFailureStatus,
+  main as runCli,
+  missingCoverageBlocks,
+  resetExercise,
+  resolveCliConfig,
+  runReadout,
+  SELF_FLIP_COMMAND,
+  type CliConfig,
+} from "../../../experiments/cli.ts"
 import {
   buildOpencodeDb,
   flipLogText,
+  LEVER_SCHEDULE,
   metricsLogText,
   runExerciseSuite,
   spawnLogText,
@@ -70,6 +97,7 @@ import {
   at,
   writeFakeFlip,
   writeFakeWork,
+  type MetricsLineOptions,
 } from "./fixtures.ts"
 
 const tempDir = (prefix: string): string => mkdtempSync(join(tmpdir(), prefix))
@@ -123,6 +151,7 @@ const cliConfigFor = (home: string, overrides: Partial<CliConfig>): CliConfig =>
   settleSeconds: 0,
   chainMode: false,
   calibrationMode: false,
+  profile: DEEP_PROFILE,
   ...overrides,
 })
 
@@ -324,7 +353,7 @@ test("the primary endpoint gate excludes any classified row and uncomputable cre
   assert.deepEqual(gatePrimaryEndpoint(baseRow, null), { gated: true, reason: "credits-unavailable" })
 })
 
-const endpointRow = (arm: "OFF" | "ON-FULL" | "ON-DRY", credits: number, turnCount: number, blockNumber: number | null): CensusRow & { credits: number } => ({
+const endpointRow = (arm: Arm, credits: number, turnCount: number, blockNumber: number | null): CensusRow & { credits: number } => ({
   blockLabel: blockNumber === null ? "cal" : String(blockNumber),
   blockNumber,
   arm,
@@ -1176,6 +1205,559 @@ test("the CLI main creates a fresh nonexistent experiment home before its first 
     assert.equal(exitCode, 1, "the invalid ceiling refuses with exit 1")
     const blockLog = readFileSync(join(freshHome, BLOCK_LOG_BASENAME), "utf8")
     assert.match(blockLog, /invalid AB_CREDIT_CEILING: not-a-number/)
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Lever-series experiment profile (LRU-85-2).
+// ---------------------------------------------------------------------------
+
+test("the lever profile's seeds pin the 12k geometry and the LEVER arm adds cacheAwareHints", () => {
+  assert.equal(
+    JSON.stringify(ON_PLUGIN_ENTRY),
+    '[["./opencode-context-manager/plugin/context-manager.ts",{"manualMode":false,"watermarkTokens":250000,"agedReadEvictionMessages":30,"reasoningRetentionMessages":16}]]',
+    "the frozen deep ON seed must stay byte-identical",
+  )
+  assert.equal(
+    JSON.stringify(ON_DRY_PLUGIN_ENTRY),
+    '[["./opencode-context-manager/plugin/context-manager.ts",{"manualMode":true,"watermarkTokens":250000,"agedReadEvictionMessages":30,"reasoningRetentionMessages":16}]]',
+    "the frozen deep ON-DRY seed must stay byte-identical",
+  )
+  const leverOnFull = LEVER_ON_FULL_PLUGIN_ENTRY[0]![1]
+  assert.deepEqual(leverOnFull, { manualMode: false, watermarkTokens: 12000, agedReadEvictionMessages: 30, reasoningRetentionMessages: 16 })
+  assert.equal("cacheAwareHints" in leverOnFull, false, "the profile's ON-FULL seed carries no lever keys")
+  assert.deepEqual(LEVER_ARM_PLUGIN_ENTRY[0]![1], {
+    manualMode: false,
+    watermarkTokens: 12000,
+    agedReadEvictionMessages: 30,
+    reasoningRetentionMessages: 16,
+    cacheAwareHints: true,
+  })
+  assert.equal(LEVER_ON_FULL_PLUGIN_ENTRY[0]![0], LEVER_ARM_PLUGIN_ENTRY[0]![0], "both lever seeds point at the same plugin path")
+})
+
+test("configMatchesArm discriminates the lever arms per profile and maps calibration to the profile's ON-FULL seed", () => {
+  assert.equal(configMatchesArm({ plugin: LEVER_ARM_PLUGIN_ENTRY }, "LEVER", LEVER1_PROFILE), true)
+  assert.equal(configMatchesArm({ plugin: LEVER_ON_FULL_PLUGIN_ENTRY }, "LEVER", LEVER1_PROFILE), false, "the missing cacheAwareHints key must fail the LEVER assertion")
+  assert.equal(configMatchesArm({ plugin: LEVER_ON_FULL_PLUGIN_ENTRY }, "ON-FULL", LEVER1_PROFILE), true)
+  assert.equal(configMatchesArm({ plugin: LEVER_ARM_PLUGIN_ENTRY }, "ON-FULL", LEVER1_PROFILE), false)
+  assert.equal(configMatchesArm({ plugin: LEVER_ON_FULL_PLUGIN_ENTRY }, CALIBRATION_ARM, LEVER1_PROFILE), true, "the calibration token maps to the profile's ON-FULL seed")
+  assert.equal(configMatchesArm({ plugin: [] }, "OFF", LEVER1_PROFILE), true)
+  assert.equal(configMatchesArm({ plugin: LEVER_ARM_PLUGIN_ENTRY }, "OFF", LEVER1_PROFILE), false)
+  assert.equal(configMatchesArm({ plugin: ON_PLUGIN_ENTRY }, "ON-FULL", LEVER1_PROFILE), false, "the frozen 250k seed is not a lever-profile seed")
+  assert.equal(configMatchesArm({ plugin: ON_DRY_PLUGIN_ENTRY }, "ON-DRY", LEVER1_PROFILE), false, "ON-DRY is not a lever arm")
+  assert.equal(configMatchesArm(null, "LEVER", LEVER1_PROFILE), false)
+})
+
+test("applyArmToConfig applies the lever profile's seeds and refuses arms outside the profile", () => {
+  const flipped = applyArmToConfig({ model: "test-model", theme: "dark", plugin: [] as unknown[] }, "LEVER", LEVER1_PROFILE) as { model: string; theme: string; plugin: unknown }
+  assert.equal(flipped.model, "test-model")
+  assert.equal(flipped.theme, "dark")
+  assert.deepEqual(flipped.plugin, LEVER_ARM_PLUGIN_ENTRY)
+  const onFull = applyArmToConfig({ plugin: [] }, "ON-FULL", LEVER1_PROFILE) as { plugin: unknown }
+  assert.deepEqual(onFull.plugin, LEVER_ON_FULL_PLUGIN_ENTRY)
+  const off = applyArmToConfig({ plugin: LEVER_ARM_PLUGIN_ENTRY }, "OFF", LEVER1_PROFILE) as { plugin: unknown }
+  assert.deepEqual(off.plugin, [])
+  assert.throws(() => applyArmToConfig({ plugin: [] }, "LEVER", DEEP_PROFILE), /no plugin seed in the deep profile/)
+})
+
+test("the lever profile's mirrored 18-block schedule runs OFF, ON-FULL, LEVER at mean run index 9.5", () => {
+  assert.equal(LEVER_SCHEDULE.length, TOTAL_DATA_BLOCKS)
+  assert.deepEqual(Array.from({ length: TOTAL_DATA_BLOCKS }, (_, index) => armForDataBlock(index + 1, LEVER1_PROFILE)), [...LEVER_SCHEDULE])
+  for (const arm of new Set<string>(LEVER_SCHEDULE)) {
+    const indices = LEVER_SCHEDULE.map((scheduleArm, index) => (scheduleArm === arm ? index + 1 : 0)).filter((index) => index > 0)
+    assert.equal(indices.length, 6, `arm ${arm} holds six runs`)
+    const mean = indices.reduce((sum, index) => sum + index, 0) / indices.length
+    assert.equal(mean, 9.5, `arm ${arm} mean run index`)
+  }
+})
+
+test("readDeepEra recognizes the LEVER token only under the lever profile and neither reader accepts the other's history", () => {
+  const leverEra = readDeepEra(flipLogText(LEVER_SCHEDULE), LEVER1_PROFILE)
+  assert.equal(eraDataCount(leverEra), 18)
+  assert.equal(validateDeepRotation(leverEra, LEVER1_PROFILE), null)
+  const frozenReaderOnLeverLog = readDeepEra(flipLogText(LEVER_SCHEDULE))
+  assert.equal(validateDeepRotation(frozenReaderOnLeverLog) === null, false, "the frozen reader must refuse a lever history")
+  const leverReaderOnFrozenLog = readDeepEra(flipLogText(SCHEDULE), LEVER1_PROFILE)
+  assert.equal(validateDeepRotation(leverReaderOnFrozenLog, LEVER1_PROFILE) === null, false, "the lever reader must refuse a frozen deep history")
+})
+
+test("the census joins lever blocks by era position with six included runs per arm", () => {
+  const spawnEntries = [
+    { label: "cal", arm: CALIBRATION_ARM, sessionId: "ses_cal", exit: 0, minute: 5 },
+    ...LEVER_SCHEDULE.map((arm, index) => ({ label: String(index + 1), arm, sessionId: `ses_${index + 1}`, exit: 0, minute: 15 + index * 10 })),
+  ]
+  const census = buildCensus({
+    flipLogText: flipLogText(LEVER_SCHEDULE),
+    spawnLogText: spawnLogText(spawnEntries, { completion: true }),
+    workLogText: workLogText([
+      { label: "cal", passed: 57, failed: 0, minute: 6 },
+      ...LEVER_SCHEDULE.map((_, index) => ({ label: String(index + 1), passed: 57, failed: 0, minute: 16 + index * 10 })),
+    ]),
+    metricsLogText: "",
+    turns: turnsOf(new Map(spawnEntries.map((entry) => [entry.sessionId, [turn(entry.minute + 1)]]))),
+    profile: LEVER1_PROFILE,
+  })
+  assert.equal(census.length, 19)
+  assert.deepEqual(census.map((row) => row.arm), [CALIBRATION_ARM, ...LEVER_SCHEDULE])
+  const includedByArm: Record<string, number> = {}
+  for (const row of census) {
+    if (row.exclusion === null) includedByArm[row.arm] = (includedByArm[row.arm] ?? 0) + 1
+  }
+  assert.deepEqual(includedByArm, { OFF: 6, "ON-FULL": 6, LEVER: 6 })
+  assert.equal(census.filter((row) => row.exclusion === "calibration").length, 1)
+})
+
+test("parseMetricsLog records whether a metrics line carries real evictions", () => {
+  const events = parseMetricsLog(
+    metricsLogText([
+      { minute: 1, sessionId: "s1", generation: 1, evictions: 2 },
+      { minute: 2, sessionId: "s2", generation: 2 },
+    ]),
+  )
+  assert.equal(events.length, 2)
+  assert.equal(events[0]!.evictedThisRun, true)
+  assert.equal(events[1]!.evictedThisRun, false)
+})
+
+const corroborationCensus = (metricsEvents: readonly MetricsLineOptions[]): CensusRow[] =>
+  buildCensus({
+    flipLogText: flipLogText(["OFF", "ON-FULL", "LEVER"]),
+    spawnLogText: spawnLogText([
+      { label: "cal", arm: CALIBRATION_ARM, sessionId: "ses_cal", exit: 0, minute: 5 },
+      { label: "1", arm: "OFF", sessionId: "ses_off", exit: 0, minute: 15 },
+      { label: "2", arm: "ON-FULL", sessionId: "ses_full", exit: 0, minute: 25 },
+      { label: "3", arm: "LEVER", sessionId: "ses_lever", exit: 0, minute: 35 },
+    ]),
+    workLogText: workLogText([
+      { label: "cal", passed: 57, failed: 0, minute: 6 },
+      { label: "1", passed: 57, failed: 0, minute: 16 },
+      { label: "2", passed: 57, failed: 0, minute: 26 },
+      { label: "3", passed: 57, failed: 0, minute: 36 },
+    ]),
+    metricsLogText: metricsLogText(metricsEvents),
+    turns: turnsOf(new Map([
+      ["ses_cal", [turn(6)]],
+      ["ses_off", [turn(16)]],
+      ["ses_full", [turn(26)]],
+      ["ses_lever", [turn(36)]],
+    ])),
+    profile: LEVER1_PROFILE,
+  })
+
+test("the lever corroboration demands eviction-bearing metrics on ON arms and silence on OFF", () => {
+  const healthy = corroborationCensus([
+    { minute: 26, sessionId: "ses_full", generation: 1, evictions: 1 },
+    { minute: 36, sessionId: "ses_lever", generation: 2, evictions: 1 },
+  ])
+  assert.deepEqual(uncorroboratedFullModeBlocks(healthy), [], "a corroborating series names no blocks")
+  const offWithMetrics = corroborationCensus([
+    { minute: 16, sessionId: "ses_off", generation: 1, evictions: 1 },
+    { minute: 26, sessionId: "ses_full", generation: 1, evictions: 1 },
+    { minute: 36, sessionId: "ses_lever", generation: 2, evictions: 1 },
+  ])
+  assert.deepEqual(uncorroboratedFullModeBlocks(offWithMetrics), ["1"], "an OFF block carrying metrics must be named")
+  const onWithoutEvictions = corroborationCensus([
+    { minute: 26, sessionId: "ses_full", generation: 1 },
+    { minute: 36, sessionId: "ses_lever", generation: 2 },
+  ])
+  assert.deepEqual(uncorroboratedFullModeBlocks(onWithoutEvictions), ["2", "3"], "ON blocks without eviction-bearing lines must be named")
+})
+
+test("the corroboration flags every metrics-line leak class on an OFF block", () => {
+  const dryModeLeak = corroborationCensus([
+    { minute: 16, sessionId: "ses_off", generation: 2 },
+    { minute: 26, sessionId: "ses_full", generation: 1, evictions: 1 },
+    { minute: 36, sessionId: "ses_lever", generation: 2, evictions: 1 },
+  ])
+  assert.deepEqual(uncorroboratedFullModeBlocks(dryModeLeak), ["1"], "a dry-mode projection line on OFF is a leak")
+  const quietFullModeLeak = corroborationCensus([
+    { minute: 16, sessionId: "ses_off", generation: 1 },
+    { minute: 26, sessionId: "ses_full", generation: 1, evictions: 1 },
+    { minute: 36, sessionId: "ses_lever", generation: 2, evictions: 1 },
+  ])
+  assert.deepEqual(uncorroboratedFullModeBlocks(quietFullModeLeak), ["1"], "a quiet full-mode line on OFF is a leak")
+})
+
+test("computeEndpoints emits the lever profile's three contrasts in the pre-registered order", () => {
+  const rows = [endpointRow("OFF", 40, 1, 1), endpointRow("ON-FULL", 60, 1, 2), endpointRow("LEVER", 44, 1, 3)]
+  const { summaries, contrasts } = computeEndpoints(rows, LEVER1_PROFILE)
+  assert.deepEqual(summaries.map((summary) => summary.arm), ["OFF", "ON-FULL", "LEVER"])
+  assert.deepEqual(
+    contrasts.map((contrast) => [contrast.firstArm, contrast.secondArm]),
+    [
+      ["LEVER", "OFF"],
+      ["LEVER", "ON-FULL"],
+      ["ON-FULL", "OFF"],
+    ],
+  )
+  assert.ok(Math.abs(contrasts[0]!.creditsPerTurnDelta! - 4) < 1e-9)
+  assert.ok(Math.abs(contrasts[1]!.creditsPerTurnDelta! + 16) < 1e-9)
+  assert.ok(Math.abs(contrasts[2]!.creditsPerTurnDelta! - 20) < 1e-9)
+})
+
+const costedTurn = (minute: number, inputTokens: number, cacheReadTokens: number): TurnRow => ({ ...turn(minute), inputTokens, cacheReadTokens })
+
+const analysisRow = (arm: Arm, blockNumber: number, turns: readonly TurnRow[]): CensusRow & { credits: number } => ({
+  ...endpointRow(arm, 0, turns.length, blockNumber),
+  turns: [...turns],
+})
+
+const metricsEventAt = (minute: number, evictedThisRun: boolean) => ({
+  timestamp: at(minute),
+  timestampMs: Date.parse(at(minute)),
+  sessionId: "s",
+  generation: 1 as const,
+  evictedThisRun,
+})
+
+test("the per-turn primary averages promoted per-turn credits at position 21+ and contrasts with delta and ratio", () => {
+  const offTurns = Array.from({ length: 25 }, (_, index) => costedTurn(index + 1, 100000, 0))
+  const leverTurns = [...Array.from({ length: 20 }, (_, index) => costedTurn(index + 1, 100000, 0)), costedTurn(21, 200000, 0)]
+  const rows = [analysisRow("OFF", 1, offTurns), analysisRow("LEVER", 3, leverTurns)]
+  const { byArm, contrasts } = computeTurnPrimary(rows, LEVER1_PROFILE)
+  assert.deepEqual(byArm.map((entry) => entry.arm), ["OFF", "ON-FULL", "LEVER"])
+  const off = byArm[0]!
+  const onFull = byArm[1]!
+  const lever = byArm[2]!
+  assert.equal(off.turns, 5, "only the positions 21+ turns enter the primary")
+  assert.ok(Math.abs(off.creditsPerTurnMean! - 41.35) < 1e-9)
+  assert.equal(onFull.turns, 0)
+  assert.equal(onFull.creditsPerTurnMean, null)
+  assert.equal(lever.turns, 1)
+  assert.ok(Math.abs(lever.creditsPerTurnMean! - 75.85) < 1e-9)
+  assert.deepEqual(contrasts.map((contrast) => [contrast.firstArm, contrast.secondArm]), [
+    ["LEVER", "OFF"],
+    ["LEVER", "ON-FULL"],
+    ["ON-FULL", "OFF"],
+  ])
+  assert.ok(Math.abs(contrasts[0]!.creditsPerTurnDelta! - 34.5) < 1e-9)
+  assert.ok(Math.abs(contrasts[0]!.creditsPerTurnRatio! - 1.834341) < 1e-5, "the ratio is the frozen rule's judged quantity")
+  assert.equal(contrasts[1]!.creditsPerTurnDelta, null)
+  assert.equal(contrasts[1]!.creditsPerTurnRatio, null)
+  assert.equal(contrasts[2]!.creditsPerTurnDelta, null)
+})
+
+test("the depth-bucket table aggregates input, cache.read, share, and per-turn credits by turn position", () => {
+  const turns = [
+    ...Array.from({ length: 5 }, (_, index) => costedTurn(index + 1, 100000, 400000)),
+    ...Array.from({ length: 15 }, (_, index) => costedTurn(index + 6, 50000, 150000)),
+    ...Array.from({ length: 2 }, (_, index) => costedTurn(index + 21, 200000, 0)),
+  ]
+  const table = computeDepthBucketTable([analysisRow("LEVER", 3, turns)], LEVER1_PROFILE)
+  assert.equal(table.length, 12, "three lever arms crossed with four buckets")
+  assert.deepEqual(table.map((row) => row.arm), [...Array.from({ length: 4 }, () => "OFF"), ...Array.from({ length: 4 }, () => "ON-FULL"), ...Array.from({ length: 4 }, () => "LEVER")])
+  const leverRows = table.filter((row) => row.arm === "LEVER")
+  assert.deepEqual(leverRows.map((row) => row.bucket), ["1-5", "6-20", "21-50", "51+"])
+  const early = leverRows[0]!
+  assert.equal(early.turns, 5)
+  assert.ok(Math.abs(early.inputTokensMean! - 100000) < 1e-9)
+  assert.ok(Math.abs(early.cacheReadTokensMean! - 400000) < 1e-9)
+  assert.ok(Math.abs(early.cacheShare! - 0.8) < 1e-9, "the share is pooled cache.read over input-side tokens")
+  assert.ok(Math.abs(early.creditsPerTurnMean! - 41.35) < 1e-9)
+  const mid = leverRows[1]!
+  assert.equal(mid.turns, 15)
+  assert.ok(Math.abs(mid.cacheShare! - 0.75) < 1e-9)
+  assert.ok(Math.abs(mid.creditsPerTurnMean! - 24.1) < 1e-9)
+  const deepBucket = leverRows[2]!
+  assert.equal(deepBucket.turns, 2)
+  assert.ok(Math.abs(deepBucket.cacheShare! - 0) < 1e-9)
+  assert.ok(Math.abs(deepBucket.creditsPerTurnMean! - 75.85) < 1e-9)
+  const empty = leverRows[3]!
+  assert.equal(empty.turns, 0)
+  assert.equal(empty.inputTokensMean, null)
+  assert.equal(empty.cacheShare, null)
+  assert.equal(empty.creditsPerTurnMean, null)
+  for (const row of table.filter((entry) => entry.arm !== "LEVER")) {
+    assert.equal(row.turns, 0)
+    assert.equal(row.creditsPerTurnMean, null)
+  }
+})
+
+test("the eviction-aligned view splits turns 2+ by an eviction in the prior inter-turn gap", () => {
+  const turns = [costedTurn(10, 10000, 90000), costedTurn(20, 40000, 60000), costedTurn(30, 100000, 20000), costedTurn(40, 200000, 0)]
+  const row: CensusRow = {
+    ...endpointRow("LEVER", 0, turns.length, 3),
+    turns,
+    metricsEvents: [
+      metricsEventAt(15, true),
+      metricsEventAt(29, true),
+      metricsEventAt(35, false),
+      metricsEventAt(45, true),
+      metricsEventAt(5, true),
+    ],
+  }
+  const view = computeEvictionAlignedView([row], ["LEVER"])
+  assert.equal(view.length, 1)
+  const lever = view[0]!
+  assert.equal(lever.postEvictionTurns, 2, "the turns at 15 and the gap boundary 29 are post-eviction")
+  assert.ok(Math.abs(lever.postEvictionInputMean! - 70000) < 1e-9)
+  assert.ok(Math.abs(lever.postEvictionCacheReadMean! - 40000) < 1e-9)
+  assert.ok(Math.abs(lever.postEvictionCacheShare! - 80000 / 220000) < 1e-9)
+  assert.equal(lever.cleanTurns, 1, "the quiet gap leaves the turn clean; turn 1 and the stray evictions enter nothing")
+  assert.ok(Math.abs(lever.cleanInputMean! - 200000) < 1e-9)
+  assert.ok(Math.abs(lever.cleanCacheShare! - 0) < 1e-9)
+  assert.deepEqual(fullModeArms(LEVER1_PROFILE), ["ON-FULL", "LEVER"])
+  assert.deepEqual(fullModeArms(DEEP_PROFILE), ["ON-FULL"], "the dry arm is not a full-mode arm")
+})
+
+test("decideNextBlock walks the lever schedule and refuses broken lever histories", () => {
+  const afterThree = decideNextBlock(readDeepEra(flipLogText(LEVER_SCHEDULE.slice(0, 3)), LEVER1_PROFILE), false, false, LEVER1_PROFILE)
+  assert.deepEqual(afterThree, { kind: "run", blockLabel: "4", arm: "LEVER" })
+  const broken = decideNextBlock(readDeepEra(flipLogText(["OFF", "OFF"]), LEVER1_PROFILE), false, false, LEVER1_PROFILE)
+  assert.equal(broken.kind === "refuse" ? broken.rc : -1, 11)
+  assert.match(broken.kind === "refuse" ? broken.reason : "", /position 2 carries arm OFF, expected ON-FULL/)
+  const full = decideNextBlock(readDeepEra(flipLogText(LEVER_SCHEDULE), LEVER1_PROFILE), false, false, LEVER1_PROFILE)
+  assert.equal(full.kind, "completion-withheld")
+})
+
+test("resolveCliConfig selects the experiment profile from AB_EXPERIMENT and main refuses unknown values", async () => {
+  assert.equal(EXPERIMENT_PROFILE_ENV, "AB_EXPERIMENT")
+  assert.equal(resolveCliConfig([], { AB_EXPERIMENT: "lever1" }).profile, LEVER1_PROFILE)
+  assert.equal(resolveCliConfig([], { AB_EXPERIMENT: "deep" }).profile, DEEP_PROFILE)
+  assert.equal(resolveCliConfig([], {}).profile, DEEP_PROFILE)
+  const temp = tempDir("ab-lever-env-")
+  try {
+    const exitCode = await runCli(["not-a-subcommand"], { AB_HOME: join(temp, "home"), AB_EXPERIMENT: "bogus" })
+    assert.equal(exitCode, 1, "an unknown profile selection refuses with exit 1")
+    assert.match(readFileSync(join(temp, "home", BLOCK_LOG_BASENAME), "utf8"), /invalid AB_EXPERIMENT: bogus/)
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
+
+test("the refusal paths strip control characters from the echoed values", async () => {
+  const ceilingTemp = tempDir("ab-lever-echo-ceiling-")
+  const profileTemp = tempDir("ab-lever-echo-profile-")
+  try {
+    const ceilingExit = await runCli(["not-a-subcommand"], { AB_HOME: join(ceilingTemp, "home"), AB_CREDIT_CEILING: "bad\u0007value\nnext line" })
+    assert.equal(ceilingExit, 1)
+    const ceilingLog = readFileSync(join(ceilingTemp, "home", BLOCK_LOG_BASENAME), "utf8")
+    assert.match(ceilingLog, /invalid AB_CREDIT_CEILING: badvaluenext line/)
+    assert.equal(ceilingLog.includes("\u0007"), false)
+    assert.equal(ceilingLog.split("\n").some((line) => line.includes("next line") && !line.includes("invalid")), false, "the injected newline must not open a forged log line")
+
+    const profileExit = await runCli(["not-a-subcommand"], { AB_HOME: join(profileTemp, "home"), AB_EXPERIMENT: "bogus\u001b[31m" })
+    assert.equal(profileExit, 1)
+    const profileLog = readFileSync(join(profileTemp, "home", BLOCK_LOG_BASENAME), "utf8")
+    assert.match(profileLog, /invalid AB_EXPERIMENT: bogus\[31m/)
+    assert.equal(profileLog.includes("\u001b"), false)
+  } finally {
+    rmSync(ceilingTemp, { recursive: true, force: true })
+    rmSync(profileTemp, { recursive: true, force: true })
+  }
+})
+
+test("flipArmAndAssert asserts the lever seed under the lever profile and refuses the missing cacheAwareHints key", () => {
+  const ok = tempDir("ab-lever-flip-ok-")
+  const bad = tempDir("ab-lever-flip-bad-")
+  try {
+    assert.equal(FLIP_ARG_BY_ARM["LEVER"], "lever")
+    for (const arm of ["OFF", "ON-FULL", "ON-DRY", "LEVER", CALIBRATION_ARM] as const) {
+      assert.equal(ARM_BY_FLIP_ARG[FLIP_ARG_BY_ARM[arm]], arm, `the flip argument of ${arm} resolves back to it`)
+    }
+    withFakeEnv({ ABX_CONFIG: join(ok, "config.json"), ABX_FLIP_LOG: join(ok, FLIP_LOG_BASENAME) }, () => {
+      const output = flipArmAndAssert(cliConfigFor(ok, { flipCmd: writeFakeFlip(ok, "correct"), profile: LEVER1_PROFILE }), "LEVER")
+      assert.match(output ?? "", /flipped to lever/)
+      assert.match(readFileSync(join(ok, BLOCK_LOG_BASENAME), "utf8"), /arm-assert: OK \(LEVER\)/)
+      assert.match(readFileSync(join(ok, FLIP_LOG_BASENAME), "utf8"), / LEVER\n$/)
+    })
+    withFakeEnv({ ABX_CONFIG: join(bad, "config.json"), ABX_FLIP_LOG: join(bad, FLIP_LOG_BASENAME) }, () => {
+      const output = flipArmAndAssert(cliConfigFor(bad, { flipCmd: writeFakeFlip(bad, "wrong-bool"), profile: LEVER1_PROFILE }), "LEVER")
+      assert.equal(output, null, "the no-hints seed must fail the LEVER arm assertion")
+      assert.match(readFileSync(join(bad, BLOCK_LOG_BASENAME), "utf8"), /arm-assert: FAILED \(live config does not match arm LEVER/)
+    })
+  } finally {
+    rmSync(ok, { recursive: true, force: true })
+    rmSync(bad, { recursive: true, force: true })
+  }
+})
+
+test("the self flip applies the profile seed atomically and logs the flip line", () => {
+  const temp = tempDir("ab-self-flip-")
+  try {
+    const configPath = join(temp, "config.json")
+    writeFileSync(configPath, `${JSON.stringify({ model: "test-model", plugin: [] as unknown[] })}\n`)
+    const config = cliConfigFor(temp, { configPath, profile: LEVER1_PROFILE, flipCmd: SELF_FLIP_COMMAND })
+    // A real lever campaign's flip log anchors its era at the calibration
+    // line; the self flip appends data flips after it.
+    appendFileSync(join(temp, FLIP_LOG_BASENAME), `${formatFlipLine(new Date(Date.parse(T0)).toISOString(), CALIBRATION_ARM)}\n`)
+    const output = flipArmAndAssert(config, "LEVER")
+    assert.match(output ?? "", /flipped to lever \(self\)/)
+    const blockLog = readFileSync(join(temp, BLOCK_LOG_BASENAME), "utf8")
+    assert.match(blockLog, /flip: flipped to lever \(self\)/)
+    assert.match(blockLog, /arm-assert: OK \(LEVER\)/)
+    const seeded = JSON.parse(readFileSync(configPath, "utf8"))
+    assert.equal(seeded.model, "test-model", "every non-plugin config key survives the self flip")
+    assert.deepEqual(seeded.plugin, LEVER_ARM_PLUGIN_ENTRY)
+    assert.equal(existsSync(`${configPath}.self-flip-staged`), false, "the staged write must be renamed into place")
+    assert.match(readFileSync(join(temp, FLIP_LOG_BASENAME), "utf8"), / LEVER\n$/)
+    assert.equal(eraDataCount(readDeepEra(readFileSync(join(temp, FLIP_LOG_BASENAME), "utf8"), LEVER1_PROFILE)), 1, "the self flip logs an era flip the decision reader consumes")
+    const dry = flipArmAndAssert(config, "ON-DRY")
+    assert.equal(dry, null, "an arm outside the profile refuses")
+    assert.match(readFileSync(join(temp, BLOCK_LOG_BASENAME), "utf8"), /self-flip: FAILED \(arm ON-DRY carries no plugin seed in the lever1 profile\)/)
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
+
+test("a failed self flip removes its staged file and labels the failure", () => {
+  const temp = tempDir("ab-self-flip-litter-")
+  try {
+    const configPath = join(temp, "config.json")
+    writeFileSync(configPath, `${JSON.stringify({ model: "m", plugin: [] as unknown[] })}\n`)
+    const stagedPath = `${configPath}.self-flip-staged`
+    writeFileSync(stagedPath, "stale staged content")
+    chmodSync(stagedPath, 0o444)
+    const config = cliConfigFor(temp, { configPath, profile: LEVER1_PROFILE, flipCmd: SELF_FLIP_COMMAND })
+    assert.equal(flipArmAndAssert(config, "LEVER"), null, "the unwritable staged file fails the flip")
+    assert.equal(existsSync(stagedPath), false, "the failed flip must not leave the staged file beside the live config")
+    const blockLog = readFileSync(join(temp, BLOCK_LOG_BASENAME), "utf8")
+    assert.match(blockLog, /self-flip: FAILED \(cannot write the flip:/)
+    assert.equal(JSON.parse(readFileSync(configPath, "utf8")).model, "m", "the live config is untouched by the failed flip")
+    assert.equal(flipFailureStatus(SELF_FLIP_COMMAND), "self-flip-failed")
+    assert.equal(flipFailureStatus("/usr/local/bin/opencode-ab"), "arm-assert-failed")
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
+
+test("the lever profile defaults the flip command to the self flip", () => {
+  assert.equal(resolveCliConfig([], { AB_EXPERIMENT: "lever1" }).flipCmd, SELF_FLIP_COMMAND)
+  assert.equal(resolveCliConfig([], { AB_EXPERIMENT: "lever1", AB_FLIP_CMD: "/bin/true" }).flipCmd, "/bin/true")
+  assert.notEqual(resolveCliConfig([], {}).flipCmd, SELF_FLIP_COMMAND, "the frozen deep default keeps the legacy flip path")
+})
+
+test("the flip subcommand applies the active profile's seed and refuses unknown or out-of-profile arms", async () => {
+  const temp = tempDir("ab-flip-cmd-")
+  try {
+    const configPath = join(temp, "config.json")
+    writeFileSync(configPath, `${JSON.stringify({ model: "test-model", plugin: [] as unknown[] })}\n`)
+    const env = { AB_HOME: join(temp, "home"), AB_CONFIG: configPath, AB_EXPERIMENT: "lever1", AB_WORK_CMD: "/bin/true", OPENCODE_BIN: "/bin/true" }
+    assert.equal(await runCli(["flip", "lever"], env), 0)
+    assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")).plugin, LEVER_ARM_PLUGIN_ENTRY)
+    assert.match(readFileSync(join(temp, "home", FLIP_LOG_BASENAME), "utf8"), / LEVER\n$/)
+    assert.equal(existsSync(`${configPath}.self-flip-staged`), false)
+    assert.equal(await runCli(["flip", "on-dry"], env), 1, "ON-DRY has no seed under the lever profile")
+    assert.equal(await runCli(["flip", "bogus"], env), 1, "an unknown flip argument refuses")
+    assert.equal(await runCli(["flip"], env), 1, "a missing flip argument refuses")
+    // AB_FLIP_CMD is pinned so the tools gate never depends on a
+    // host-installed legacy flip tool (the CI runner has none); the flip
+    // subcommand calls the self flip regardless of the flip command.
+    const deepEnv = { ...env, AB_EXPERIMENT: undefined, AB_FLIP_CMD: "/bin/true" }
+    assert.equal(await runCli(["flip", "lever"], deepEnv), 1, "the deep profile has no LEVER arm")
+    assert.match(readFileSync(join(temp, "home", BLOCK_LOG_BASENAME), "utf8"), /self-flip: FAILED \(arm LEVER carries no plugin seed in the deep profile\)/)
+    assert.equal(await runCli(["flip", "on-full"], deepEnv), 0, "a deep arm flips through the self flip with the deep seed")
+    assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")).plugin, ON_PLUGIN_ENTRY)
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
+
+test("the lever readout emits the three contrasts and reports corroboration failures as caveats", () => {
+  const temp = tempDir("ab-lever-readout-")
+  try {
+    const dbPath = join(temp, "opencode.db")
+    const blocks = [
+      { label: "1", arm: "OFF", sessionId: "ses_off", minute: 15 },
+      { label: "2", arm: "ON-FULL", sessionId: "ses_full", minute: 25 },
+      { label: "3", arm: "LEVER", sessionId: "ses_lever", minute: 35 },
+    ]
+    buildOpencodeDb(
+      dbPath,
+      blocks.map((block) => ({ sessionId: block.sessionId, minute: block.minute + 1, modelId: "glm-5.3", input: 100000, output: 10000, cacheWrite: 5000 })),
+    )
+    writeFileSync(join(temp, FLIP_LOG_BASENAME), flipLogText(blocks.map((block) => block.arm)))
+    writeFileSync(
+      join(temp, SPAWN_LOG_BASENAME),
+      spawnLogText(blocks.map((block) => ({ label: block.label, arm: block.arm, sessionId: block.sessionId, exit: 0, minute: block.minute }))),
+    )
+    writeFileSync(
+      join(temp, WORK_LOG_DEEP_BASENAME),
+      workLogText(blocks.map((block) => ({ label: block.label, passed: 57, failed: 0, minute: block.minute + 1 }))),
+    )
+    const config = cliConfigFor(temp, { dbPath, profile: LEVER1_PROFILE })
+    const healthyMetrics = metricsLogText([
+      { minute: 26, sessionId: "ses_full", generation: 1, evictions: 1 },
+      { minute: 36, sessionId: "ses_lever", generation: 2, evictions: 1 },
+    ])
+    writeFileSync(join(temp, METRICS_LOG_BASENAME), healthyMetrics)
+    const healthy = readFileSync(runReadout(config), "utf8")
+    assert.match(healthy, /\| 3 \| LEVER \|/)
+    assert.match(healthy, /- contrast LEVER - OFF: creditsPerTurn delta=/)
+    assert.match(healthy, /- contrast LEVER - ON-FULL: creditsPerTurn delta=/)
+    assert.match(healthy, /- contrast ON-FULL - OFF: creditsPerTurn delta=/)
+    assert.match(healthy, /### per-turn primary \(credits per turn, turns 21\+\)/)
+    assert.match(healthy, /- primary contrast LEVER\/OFF: creditsPerTurn delta=n\/a ratio=n\/a/)
+    assert.match(healthy, /\| arm \| bucket \| turns \| input\/turn \| cache.read\/turn \| cache share \| credits\/turn \|/)
+    assert.match(healthy, /\| LEVER \| 1-5 \| 1 \| 100000 \| 0 \| 0\.0% \| 41\.35 \|/)
+    assert.match(healthy, /\| LEVER \| post-eviction \| 0 \| n\/a \| n\/a \| n\/a \|/)
+    assert.match(healthy, /### eviction-aligned view \(turns 2\+, full-mode arms\)/)
+    assert.equal(healthy.includes("corroboration"), false, "a corroborating series carries no corroboration caveat")
+    writeFileSync(
+      join(temp, METRICS_LOG_BASENAME),
+      metricsLogText([
+        { minute: 16, sessionId: "ses_off", generation: 1, evictions: 1 },
+        { minute: 26, sessionId: "ses_full", generation: 1, evictions: 1 },
+        { minute: 36, sessionId: "ses_lever", generation: 2, evictions: 1 },
+      ]),
+    )
+    runReadout(config)
+    assert.match(readFileSync(join(temp, "abx-readout.md"), "utf8"), /caveat: full-mode metrics corroboration failed for blocks: 1/)
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
+
+test("excluded census rows keep their table row but never enter the endpoint population", () => {
+  const temp = tempDir("ab-lever-gate-")
+  try {
+    const dbPath = join(temp, "opencode.db")
+    buildOpencodeDb(dbPath, [
+      { sessionId: "ses_off", minute: 16, modelId: "glm-5.3", input: 100000, output: 10000, cacheWrite: 5000 },
+      { sessionId: "ses_full", minute: 26, modelId: "glm-5.3", input: 100000, output: 10000, cacheWrite: 5000 },
+      ...Array.from({ length: 25 }, (_, index) => ({
+        sessionId: "ses_lever",
+        minute: 36 + index,
+        modelId: "glm-5.3",
+        input: 100000,
+        output: 10000,
+        cacheWrite: 5000,
+      })),
+    ])
+    writeFileSync(join(temp, FLIP_LOG_BASENAME), flipLogText(["OFF", "ON-FULL", "LEVER"]))
+    writeFileSync(
+      join(temp, SPAWN_LOG_BASENAME),
+      spawnLogText([
+        { label: "1", arm: "OFF", sessionId: "ses_off", exit: 0, minute: 15 },
+        { label: "2", arm: "ON-FULL", sessionId: "ses_full", exit: 0, minute: 25 },
+        { label: "3", arm: "LEVER", sessionId: "ses_lever", exit: 0, minute: 35 },
+      ]),
+    )
+    // Block 3's verify is red: the census classifies it incomplete-run and
+    // its 25 turns (5 of them at position 21+) must not reach any endpoint.
+    writeFileSync(
+      join(temp, WORK_LOG_DEEP_BASENAME),
+      workLogText([
+        { label: "1", passed: 57, failed: 0, minute: 16 },
+        { label: "2", passed: 57, failed: 0, minute: 26 },
+        { label: "3", passed: 0, failed: 57, minute: 36 },
+      ]),
+    )
+    writeFileSync(
+      join(temp, METRICS_LOG_BASENAME),
+      metricsLogText([
+        { minute: 26, sessionId: "ses_full", generation: 1, evictions: 1 },
+        { minute: 40, sessionId: "ses_lever", generation: 2, evictions: 1 },
+      ]),
+    )
+    const content = readFileSync(runReadout(cliConfigFor(temp, { dbPath, profile: LEVER1_PROFILE })), "utf8")
+    assert.match(content, /\| 3 \| LEVER \| 25 \| \d+\.\d{4} \| 0\/1 \| incomplete-run \|/, "the excluded block keeps its census table row with its credits")
+    assert.match(content, /- LEVER: n=0 creditsPerTurn mean=n\/a/, "the red block is out of the arm summaries")
+    assert.match(content, /- contrast LEVER - OFF: creditsPerTurn delta=n\/a/)
+    assert.match(content, /- primary LEVER: turns=0 creditsPerTurn mean=n\/a/, "the red block's 21+ turns are out of the per-turn primary")
   } finally {
     rmSync(temp, { recursive: true, force: true })
   }

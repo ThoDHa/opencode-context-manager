@@ -1,15 +1,20 @@
 /**
- * Arm control for the standardized-experiment framework: the arm set, the
- * frozen plugin config seeds, the flip-log deep-era reader (park-aware), the
- * mirrored-rotation schedule with its full-history validator, and the
- * post-flip config assertion. Ported from the bash apparatus
+ * Arm control for the standardized-experiment framework: the experiment
+ * profiles (the frozen deep profile and the lever series), the arm sets, the
+ * frozen plugin config seeds, the park-aware flip-log deep-era reader
+ * (profile-scoped in its arm-token recognition), the mirrored-rotation
+ * schedule with its full-history validator, and the post-flip config
+ * assertion. Ported from the bash apparatus
  * (`experiments/legacy/opencode-ab`, `experiments/legacy/opencode-ab-block`),
  * which stays operational for LRU-82 and is the legacy reference from LRU-84
  * onward.
  */
 
 export const ARMS = ["OFF", "ON-FULL", "ON-DRY"] as const
-export type Arm = (typeof ARMS)[number]
+// The lever-series triple rides the same mirrored rotation; LEVER is not a
+// frozen deep-era token (readDeepEra recognizes arm tokens per profile).
+export const LEVER_DATA_ARMS = ["OFF", "ON-FULL", "LEVER"] as const
+export type Arm = (typeof ARMS | typeof LEVER_DATA_ARMS)[number]
 
 export const CALIBRATION_ARM = "CAL-ON-FULL"
 export type FlipArm = Arm | typeof CALIBRATION_ARM
@@ -36,7 +41,13 @@ export const COMPLETION_MARKER = "experiment-complete"
 export const CHAIN_COMPLETE_MARKER = "chain-complete"
 export const CALIBRATION_COMPLETE_MARKER = "calibration-complete"
 
-export type PluginEntryOption = { manualMode: boolean; watermarkTokens: number; agedReadEvictionMessages: number; reasoningRetentionMessages: number }
+export type PluginEntryOption = {
+  manualMode: boolean
+  watermarkTokens: number
+  agedReadEvictionMessages: number
+  reasoningRetentionMessages: number
+  cacheAwareHints?: boolean
+}
 export type PluginEntry = [string, PluginEntryOption]
 
 // The frozen arm seeds, byte-equal to the bash apparatus's ON_ENTRY and
@@ -56,12 +67,104 @@ export const ON_DRY_PLUGIN_ENTRY: readonly PluginEntry[] = [
   ],
 ]
 
-export const FLIP_ARG_BY_ARM: Readonly<Record<FlipArm, string>> = {
+// The lever-series seeds: every ON arm runs the 12k-watermark measurement
+// geometry the lever protocol pre-registered, and the LEVER arm adds the
+// lever-1 keys (cacheAwareHints) on top of the profile's ON-FULL seed.
+export const LEVER_ON_FULL_PLUGIN_ENTRY: readonly PluginEntry[] = [
+  [
+    "./opencode-context-manager/plugin/context-manager.ts",
+    { manualMode: false, watermarkTokens: 12000, agedReadEvictionMessages: 30, reasoningRetentionMessages: 16 },
+  ],
+]
+export const LEVER_ARM_PLUGIN_ENTRY: readonly PluginEntry[] = [
+  [
+    "./opencode-context-manager/plugin/context-manager.ts",
+    { manualMode: false, watermarkTokens: 12000, agedReadEvictionMessages: 30, reasoningRetentionMessages: 16, cacheAwareHints: true },
+  ],
+]
+
+export const FLIP_ARG_BY_ARM = {
   OFF: "off",
   "ON-FULL": "on-full",
   "ON-DRY": "on-dry",
+  LEVER: "lever",
   "CAL-ON-FULL": "cal-on-full",
+} as const satisfies Readonly<Record<FlipArm, string>>
+
+// The inverse lookup, derived from FLIP_ARG_BY_ARM: the mapped type forces
+// a key for every flip argument the forward map defines (and only those),
+// so the two directions cannot drift, and the index-signature side answers
+// arbitrary-string lookups (an unknown flip argument) with undefined.
+export type ArmByFlipArg = {
+  readonly [flipArg in (typeof FLIP_ARG_BY_ARM)[FlipArm]]: FlipArm
+} & Readonly<Record<string, FlipArm | undefined>>
+
+export const ARM_BY_FLIP_ARG: ArmByFlipArg = {
+  off: "OFF",
+  "on-full": "ON-FULL",
+  "on-dry": "ON-DRY",
+  lever: "LEVER",
+  "cal-on-full": CALIBRATION_ARM,
 }
+
+// An experiment profile fixes the data-arm triple, the per-arm plugin seeds
+// (the OFF arm is the empty plugin list and carries no seed), whether the
+// readout runs the full-mode metrics corroboration, and the pre-registered
+// readout contrasts. The deep profile is the frozen LRU-82 shape and stays
+// the default everywhere; a profile parameter omitted means deep.
+export type ExperimentProfile = {
+  name: "deep" | "lever1"
+  dataArms: readonly Arm[]
+  pluginSeedByArm: Readonly<Partial<Record<FlipArm, readonly PluginEntry[]>>>
+  corroboratesFullModeMetrics: boolean
+  contrasts: readonly (readonly [Arm, Arm])[]
+}
+
+export const DEEP_PROFILE: ExperimentProfile = {
+  name: "deep",
+  dataArms: ARMS,
+  pluginSeedByArm: {
+    "ON-FULL": ON_PLUGIN_ENTRY,
+    "ON-DRY": ON_DRY_PLUGIN_ENTRY,
+    "CAL-ON-FULL": ON_PLUGIN_ENTRY,
+  },
+  corroboratesFullModeMetrics: false,
+  contrasts: [
+    ["ON-FULL", "OFF"],
+    ["ON-DRY", "OFF"],
+    ["ON-DRY", "ON-FULL"],
+  ],
+}
+
+export const LEVER1_PROFILE: ExperimentProfile = {
+  name: "lever1",
+  dataArms: LEVER_DATA_ARMS,
+  pluginSeedByArm: {
+    "ON-FULL": LEVER_ON_FULL_PLUGIN_ENTRY,
+    LEVER: LEVER_ARM_PLUGIN_ENTRY,
+    "CAL-ON-FULL": LEVER_ON_FULL_PLUGIN_ENTRY,
+  },
+  corroboratesFullModeMetrics: true,
+  contrasts: [
+    ["LEVER", "OFF"],
+    ["LEVER", "ON-FULL"],
+    ["ON-FULL", "OFF"],
+  ],
+}
+
+export const EXPERIMENT_PROFILES: Readonly<Record<ExperimentProfile["name"], ExperimentProfile>> = {
+  deep: DEEP_PROFILE,
+  lever1: LEVER1_PROFILE,
+}
+
+/**
+ * Whether a raw profile-selection value names a known experiment profile.
+ *
+ * @param value the raw selection (an env value or CLI input)
+ * @returns true for the profile names in EXPERIMENT_PROFILES
+ */
+export const isExperimentProfileName = (value: string): value is ExperimentProfile["name"] =>
+  Object.hasOwn(EXPERIMENT_PROFILES, value)
 
 // run_single_block return codes; the caller maps them per mode. Shared with
 // the bash driver's RC_* values so logs and exit statuses stay join-able
@@ -88,9 +191,11 @@ export type DeepEra = {
   doubleParked: boolean
 }
 
-const ERA_ARM_TOKENS: readonly string[] = [CALIBRATION_ARM, ...ARMS]
-
-const isFlipArm = (value: string): value is FlipArm => ERA_ARM_TOKENS.includes(value)
+// A profile's era tokens: the calibration arm plus the profile's data arms.
+// The frozen deep set is [CAL-ON-FULL, OFF, ON-FULL, ON-DRY]; the lever set
+// swaps ON-DRY for LEVER, so each reader ignores the other era's tokens (the
+// unrecognized-line tolerance keeps old-log reads safe in both directions).
+const eraArmTokens = (profile: ExperimentProfile): readonly string[] => [CALIBRATION_ARM, ...profile.dataArms]
 
 /**
  * Reads the deep era of a flip log's text: every line from the first
@@ -101,10 +206,14 @@ const isFlipArm = (value: string): value is FlipArm => ERA_ARM_TOKENS.includes(v
  * and unrecognized in-era lines are ignored.
  *
  * @param flipLogText the raw flip-log content
+ * @param profile the experiment profile whose arm tokens are recognized
+ *   (the frozen deep profile when omitted)
  * @returns the era's flip sequence with timestamps, park count, and the
  *   double-park flag
  */
-export const readDeepEra = (flipLogText: string): DeepEra => {
+export const readDeepEra = (flipLogText: string, profile: ExperimentProfile = DEEP_PROFILE): DeepEra => {
+  const eraTokens = eraArmTokens(profile)
+  const isEraArm = (value: string): value is FlipArm => eraTokens.includes(value)
   const flips: EraFlip[] = []
   let parkedCount = 0
   let doubleParked = false
@@ -127,7 +236,7 @@ export const readDeepEra = (flipLogText: string): DeepEra => {
       continue
     }
     const token = line.slice(line.lastIndexOf(" ") + 1)
-    if (isFlipArm(token)) {
+    if (isEraArm(token)) {
       const timestamp = line.slice(0, line.lastIndexOf(" "))
       flips.push({ timestamp, arm: token })
       prevFlip = true
@@ -157,21 +266,24 @@ export const eraDataCount = (era: DeepEra): number =>
   era.flips.filter((flip) => flip.arm !== CALIBRATION_ARM).length
 
 /**
- * Prints the arm for a 1-based deep data block number under the mirrored
- * six-rotation schedule: rotation r (0-based) runs the base cycle OFF,
- * ON-FULL, ON-DRY forward on even r and mirrored on odd r. Each arm's six
- * run indices form three pairs that each sum to 19, so every arm's mean run
- * index is exactly 9.5; ON-FULL additionally holds the mid-rotation position
- * in all six rotations (the named residual of the mirrored scheme).
+ * Prints the arm for a 1-based data block number under the mirrored
+ * six-rotation schedule: rotation r (0-based) runs the profile's arm triple
+ * forward on even r and mirrored on odd r. Each arm's six run indices form
+ * three pairs that each sum to 19, so every arm's mean run index is exactly
+ * 9.5; the middle arm additionally holds the mid-rotation position in all
+ * six rotations (the named residual of the mirrored scheme).
  *
  * @param blockNumber the 1-based data block position
+ * @param profile the experiment profile whose arm triple the rotation runs
+ *   (the frozen deep profile when omitted)
  * @returns the arm pre-registered for that position
  */
-export const armForDataBlock = (blockNumber: number): Arm => {
-  const rotation = Math.floor((blockNumber - 1) / 3)
-  const position = (blockNumber - 1) % 3
-  const index = rotation % 2 === 0 ? position : 2 - position
-  return ARMS[index]!
+export const armForDataBlock = (blockNumber: number, profile: ExperimentProfile = DEEP_PROFILE): Arm => {
+  const arms = profile.dataArms
+  const rotation = Math.floor((blockNumber - 1) / arms.length)
+  const position = (blockNumber - 1) % arms.length
+  const index = rotation % 2 === 0 ? position : arms.length - 1 - position
+  return arms[index]!
 }
 
 export type RotationMismatch = { position: number; carried: FlipArm; expected: Arm }
@@ -182,15 +294,17 @@ export type RotationMismatch = { position: number; carried: FlipArm; expected: A
  * subsequent position and must refuse rather than pass.
  *
  * @param era the parsed deep era
+ * @param profile the experiment profile whose rotation is expected (the
+ *   frozen deep profile when omitted)
  * @returns the first mismatch (carried arm, 1-based position, expected arm),
  *   or null when the history matches the pre-registered rotation
  */
-export const validateDeepRotation = (era: DeepEra): RotationMismatch | null => {
+export const validateDeepRotation = (era: DeepEra, profile: ExperimentProfile = DEEP_PROFILE): RotationMismatch | null => {
   let position = 0
   for (const flip of era.flips) {
     if (flip.arm === CALIBRATION_ARM) continue
     position += 1
-    const expected = armForDataBlock(position)
+    const expected = armForDataBlock(position, profile)
     if (flip.arm !== expected) return { position, carried: flip.arm, expected }
   }
   return null
@@ -213,24 +327,21 @@ const canonicalJson = (value: unknown): string =>
 /**
  * The post-flip arm assertion's core: a parsed live config must carry exactly
  * the intended arm's plugin entry (deep equality carries the manualMode
- * boolean, the watermark, and every companion key); OFF means an empty plugin
- * list.
+ * boolean, the watermark, and every companion key, including the lever
+ * profile's cacheAwareHints discriminator); OFF means an empty plugin list.
+ * An arm outside the profile carries no seed and matches nothing.
  *
  * @param config the parsed opencode config document
  * @param arm the arm the flip intended
+ * @param profile the experiment profile whose seeds the assertion compares
+ *   against (the frozen deep profile when omitted)
  * @returns true when the live plugin entry matches the arm's seed exactly
  */
-export const configMatchesArm = (config: unknown, arm: FlipArm): boolean => {
+export const configMatchesArm = (config: unknown, arm: FlipArm, profile: ExperimentProfile = DEEP_PROFILE): boolean => {
   const plugin = (config as { plugin?: unknown } | null)?.plugin
-  switch (arm) {
-    case "OFF":
-      return Array.isArray(plugin) && plugin.length === 0
-    case "ON-FULL":
-    case CALIBRATION_ARM:
-      return canonicalJson(plugin) === canonicalJson(ON_PLUGIN_ENTRY)
-    case "ON-DRY":
-      return canonicalJson(plugin) === canonicalJson(ON_DRY_PLUGIN_ENTRY)
-  }
+  if (arm === "OFF") return Array.isArray(plugin) && plugin.length === 0
+  const seed = profile.pluginSeedByArm[arm]
+  return seed !== undefined && canonicalJson(plugin) === canonicalJson(seed)
 }
 
 /**
@@ -240,12 +351,16 @@ export const configMatchesArm = (config: unknown, arm: FlipArm): boolean => {
  *
  * @param config the parsed opencode config document
  * @param arm the arm to apply
+ * @param profile the experiment profile whose seeds are applied (the frozen
+ *   deep profile when omitted)
  * @returns a new config document carrying the arm's plugin entry
+ * @throws Error when the arm carries no plugin seed in the profile
  */
-export const applyArmToConfig = (config: unknown, arm: FlipArm): unknown => {
-  const plugin =
-    arm === "OFF" ? [] : arm === "ON-DRY" ? ON_DRY_PLUGIN_ENTRY : ON_PLUGIN_ENTRY
-  return { ...(config as Record<string, unknown>), plugin }
+export const applyArmToConfig = (config: unknown, arm: FlipArm, profile: ExperimentProfile = DEEP_PROFILE): unknown => {
+  if (arm === "OFF") return { ...(config as Record<string, unknown>), plugin: [] }
+  const seed = profile.pluginSeedByArm[arm]
+  if (seed === undefined) throw new Error(`arm ${arm} carries no plugin seed in the ${profile.name} profile`)
+  return { ...(config as Record<string, unknown>), plugin: seed }
 }
 
 /**
