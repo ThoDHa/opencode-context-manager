@@ -3,6 +3,76 @@
   "permission": {
     "qhaway_*": "deny",
     "playwright_*": "deny",
-    "context7_*": "deny"
+    "context7_*": "deny",
+    "read": {
+      "*ab-work-deep-reference*": "deny",
+      "*ab-work-deep-template*": "deny",
+      "*opencode-ab-work-deep*": "deny",
+      "*ab-work-deep.log*": "deny",
+      "*ab-work-template*": "deny",
+      "*ab-test*": "deny",
+      "*ab-redcheck*": "deny",
+      "*ab-deep-redcheck*": "deny"
+    },
+    "glob": {
+      "*ab-work-deep-reference*": "deny",
+      "*ab-work-deep-template*": "deny",
+      "*opencode-ab-work-deep*": "deny",
+      "*ab-work-deep.log*": "deny",
+      "*ab-work-template*": "deny",
+      "*ab-test*": "deny",
+      "*ab-redcheck*": "deny",
+      "*ab-deep-redcheck*": "deny"
+    },
+    "grep": {
+      "*ab-work-deep-reference*": "deny",
+      "*ab-work-deep-template*": "deny",
+      "*opencode-ab-work-deep*": "deny",
+      "*ab-work-deep.log*": "deny",
+      "*ab-work-template*": "deny",
+      "*ab-test*": "deny",
+      "*ab-redcheck*": "deny",
+      "*ab-deep-redcheck*": "deny"
+    },
+    "list": {
+      "*ab-work-deep-reference*": "deny",
+      "*ab-work-deep-template*": "deny",
+      "*opencode-ab-work-deep*": "deny",
+      "*ab-work-deep.log*": "deny",
+      "*ab-work-template*": "deny",
+      "*ab-test*": "deny",
+      "*ab-redcheck*": "deny",
+      "*ab-deep-redcheck*": "deny"
+    },
+    "edit": {
+      "*ab-work-deep-reference*": "deny",
+      "*ab-work-deep-template*": "deny",
+      "*opencode-ab-work-deep*": "deny",
+      "*ab-work-deep.log*": "deny",
+      "*ab-work-template*": "deny",
+      "*ab-test*": "deny",
+      "*ab-redcheck*": "deny",
+      "*ab-deep-redcheck*": "deny"
+    },
+    "bash": {
+      "*ab-work-deep-reference*": "deny",
+      "*ab-work-deep-template*": "deny",
+      "*opencode-ab-work-deep*": "deny",
+      "*ab-work-deep.log*": "deny",
+      "*ab-work-template*": "deny",
+      "*ab-test*": "deny",
+      "*ab-redcheck*": "deny",
+      "*ab-deep-redcheck*": "deny"
+    },
+    "external_directory": {
+      "*ab-work-deep-reference*": "deny",
+      "*ab-work-deep-template*": "deny",
+      "*opencode-ab-work-deep*": "deny",
+      "*ab-work-deep.log*": "deny",
+      "*ab-work-template*": "deny",
+      "*ab-test*": "deny",
+      "*ab-redcheck*": "deny",
+      "*ab-deep-redcheck*": "deny"
+    }
   }
 }

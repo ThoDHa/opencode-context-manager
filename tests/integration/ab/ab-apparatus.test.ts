@@ -614,6 +614,20 @@ test("the tamper gate flags every modified frozen spec file", () => {
   }
 })
 
+test("the deep tamper gate flags the workdir fence config alongside the shared spec files", () => {
+  const exercise = resolveExercise("deep")
+  for (const spec of exercise.workdirSpecFiles) {
+    const workDir = tempDir("ab-tamper-deep-")
+    try {
+      cpSync(exercise.templateDir, workDir, { recursive: true })
+      writeFileSync(join(workDir, spec), `${readFileSync(join(workDir, spec), "utf8")}\n// tamper\n`)
+      assert.deepEqual(checkSpecIntegrity(exercise.templateDir, workDir, exercise.workdirSpecFiles), { ok: false, file: spec })
+    } finally {
+      rmSync(workDir, { recursive: true, force: true })
+    }
+  }
+})
+
 test("the tamper gate flags a missing work spec file", () => {
   const exercise = resolveExercise("rotator")
   const workDir = tempDir("ab-tamper-missing-")
@@ -665,16 +679,33 @@ test("the deep suite pins the four table digests and imports only the subject mo
   assert.deepEqual(nonBuiltins, ["../src/importer.mjs"])
 })
 
-test("the deep template carries the qhaway guard denying exactly the three MCP servers", () => {
+test("the deep template carries the qhaway guard and the eight-needle apparatus isolation fence", () => {
   const guard = JSON.parse(readFileSync(join(resolveExercise("deep").templateDir, ".opencode", "opencode.json"), "utf8")) as {
     $schema?: string
     plugin?: unknown
-    permission: Record<string, string>
+    permission: Record<string, string | Record<string, string>>
   }
   assert.match(guard.$schema ?? "", /opencode\.ai\/config\.json/)
   assert.equal(guard.plugin, undefined)
-  assert.deepEqual(Object.keys(guard.permission).sort(), ["context7_*", "playwright_*", "qhaway_*"])
-  assert.deepEqual(Object.values(guard.permission), ["deny", "deny", "deny"])
+  const mcpDenies = ["context7_*", "playwright_*", "qhaway_*"]
+  const fenceCategories = ["read", "glob", "grep", "list", "edit", "bash", "external_directory"]
+  const fenceNeedles = [
+    "*ab-work-deep-reference*",
+    "*ab-work-deep-template*",
+    "*opencode-ab-work-deep*",
+    "*ab-work-deep.log*",
+    "*ab-work-template*",
+    "*ab-test*",
+    "*ab-redcheck*",
+    "*ab-deep-redcheck*",
+  ]
+  assert.deepEqual(Object.keys(guard.permission).sort(), [...mcpDenies, ...fenceCategories].sort())
+  for (const server of mcpDenies) assert.equal(guard.permission[server], "deny")
+  for (const category of fenceCategories) {
+    const needles = guard.permission[category] as Record<string, string>
+    assert.deepEqual(Object.keys(needles).sort(), [...fenceNeedles].sort())
+    assert.deepEqual(Object.values(needles), fenceNeedles.map(() => "deny"))
+  }
 })
 
 test("the deep README orders the corpus harvest before any suite reading", () => {

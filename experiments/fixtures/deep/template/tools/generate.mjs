@@ -3,17 +3,11 @@
 // Regenerates the data/ tree of a work tree byte-identically from a fixed
 // seed. Usage: node tools/generate.mjs <targetDir>
 //
-// Calibration knobs (the pre-registered bounded adjustment, task LRU-82-3):
-// DIRECTIVE_COUNT and STATUS_CHAIN_LENGTH move the solver's harvest work, so
-// they are the knobs that move the turn count; RECORD_COUNT ranges and
-// ARCHIVE_COUNT move corpus bytes only. Changing any knob requires the full
-// mechanical follow-through: regenerate data/, recompute the four table
-// digests pinned in tests/importer.test.mjs whenever the directive texts for
-// the pinned tables change, refresh the reference's spec-file copies, and
-// re-run proof-deep-work.sh in both PATH modes. If a knob round ever adds a
-// new table-bearing directive band (a fifth pinned table), the harvest case
-// proof-deep-work.sh case 9b must be extended to rebuild and pin that band
-// too, or the new table passes the existing pins unverified.
+// Calibration knobs: DIRECTIVE_COUNT and STATUS_CHAIN_LENGTH move the
+// solver's harvest work, so they are the knobs that move the turn count;
+// RECORD_COUNT ranges and ARCHIVE_COUNT move corpus bytes only. Any knob
+// change requires regenerating data/ and keeping every other exercise file
+// consistent with the new corpus before the exercise is used again.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 

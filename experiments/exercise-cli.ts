@@ -201,7 +201,7 @@ export const resetTree = (exerciseSpec: ReturnType<typeof resolveExercise>, opti
  */
 export const verifyTree = (exerciseSpec: ReturnType<typeof resolveExercise>, options: ExerciseCliOptions): number => {
   if (!existsSync(options.workDir)) die(`no exercise tree at ${options.workDir}; run reset first`)
-  const tamper = checkSpecIntegrity(exerciseSpec.templateDir, options.workDir, exerciseSpec.specFiles)
+  const tamper = checkSpecIntegrity(exerciseSpec.templateDir, options.workDir, exerciseSpec.workdirSpecFiles)
   if (!tamper.ok) {
     logLine(options, exerciseSpec.name, `verify: spec tampered: ${tamper.file} differs from template`)
     process.stderr.write(`opencode-abx-work: spec tampered: ${tamper.file} differs from template\n`)

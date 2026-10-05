@@ -40,7 +40,10 @@ control in `arms.ts`.
   processing rules are scattered as directive records across a 96-archive
   corpus that `tools/generate.mjs` regenerates deterministically from a
   fixed seed. The template's `.opencode/opencode.json` carries the
-  qhaway/playwright/context7 deny guard into every solve tree.
+  qhaway/playwright/context7 deny guard plus the eight-needle apparatus
+  isolation fence into every solve tree, and `fixtures/deep/README.md`
+  documents the generated corpus, its manifest pin, and the calibration-knob
+  follow-through.
 - `legacy/`: the bash apparatus (`opencode-ab`, `opencode-ab-block`,
   `opencode-ab-work`, `opencode-ab-work-deep`) as the committed reference
   implementation.

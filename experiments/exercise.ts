@@ -21,6 +21,7 @@ export type Exercise = {
   templateDir: string
   referenceDir: string
   specFiles: readonly string[]
+  workdirSpecFiles: readonly string[]
   pastePrompt: string
   entryModule: string
 }
@@ -34,26 +35,32 @@ const PROMPT_DEEP =
  * Resolves an exercise's committed fixture layout by name.
  *
  * @param name the exercise name ("rotator" or "deep")
- * @returns the exercise's template/reference directories, frozen spec files,
- *   paste prompt, and entry module path
+ * @returns the exercise's template/reference directories, the frozen spec
+ *   files shared by both trees, the workdir-checked spec files (the shared
+ *   list plus the template-only fence config for the deep exercise), the
+ *   paste prompt, and the entry module path
  */
 export const resolveExercise = (name: ExerciseName): Exercise => {
   const templateDir = join(EXERCISE_ROOT, name, "template")
   if (name === "rotator") {
+    const specFiles = ["tests/rotator.test.mjs", "README.md", "package.json"] as const
     return {
       name,
       templateDir,
       referenceDir: join(EXERCISE_ROOT, name, "reference"),
-      specFiles: ["tests/rotator.test.mjs", "README.md", "package.json"],
+      specFiles,
+      workdirSpecFiles: specFiles,
       pastePrompt: PROMPT_ROTATOR,
       entryModule: "src/rotator.mjs",
     }
   }
+  const specFiles = ["tests/importer.test.mjs", "README.md", "package.json"] as const
   return {
     name,
     templateDir,
     referenceDir: join(EXERCISE_ROOT, name, "reference"),
-    specFiles: ["tests/importer.test.mjs", "README.md", "package.json"],
+    specFiles,
+    workdirSpecFiles: [...specFiles, ".opencode/opencode.json"],
     pastePrompt: PROMPT_DEEP,
     entryModule: "src/importer.mjs",
   }

@@ -42,12 +42,37 @@ function canonicalTable(table) {
   );
 }
 
-// The digest recipe, demonstrated on a toy table so the serialization
-// conventions are visible before you reconcile the real corpus tables:
-// rows sort by their first element, JSON.stringify serializes the sorted
-// rows, sha256 hashes that exact text. Row shape follows each band's own
-// arity, string keys sort as strings, numeric coefficients stay numbers
-// (never strings), and vocabulary values are uppercase. Worked example:
+// THE SERIALIZATION CONTRACT (complete; there is no other convention):
+//
+//   1. Rows sort ascending by their first element, compared as strings
+//      (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0).
+//   2. The sorted rows serialize with JSON.stringify exactly: no spaces,
+//      double-quoted strings, numbers as bare JSON numbers.
+//   3. Numbers stay numbers (never digit strings), code values stay
+//      strings, and vocabulary values are UPPERCASE.
+//   4. sha256 hashes that exact text, lowercase hex output.
+//
+// THE PER-TABLE ROW SCHEMAS (field order is exactly this; the VALUES are
+// stated only in the corpus directives, so harvest them from the archives):
+//
+//   status table:      ["0x7F", "NAME-ONE"]
+//                      code is 0x plus two hex digits; name is uppercase.
+//   calibration table: ["EXAMPLE-FAM", 1.5, -2.5]
+//                      family string; scale and offset are numbers.
+//   site table:        ["EXAMPLE-SITE", "2031-02-03T04:05:06Z", "s"]
+//                      the anchor stays the directive's exact ISO string;
+//                      the unit is "s" | "m" | "h" (seconds | minutes | hours).
+//   layout table:      ["example_field", 9, "left"]
+//                      width equals the directive's column end minus its
+//                      column start plus one (end - start + 1); the padding
+//                      vocabulary is "left" | "zero"; the field-name
+//                      vocabulary, in corpus column order, is exactly:
+//                      site, device, family, counter, status, raw,
+//                      checksum, flag, seq, reserved.
+//
+// The digest inputs are these four tables, canonicalized as above and
+// hashed. Worked toy example (two rows, nothing to do with the corpus):
+//
 //   const TOY_TABLE = [
 //     ["BETA-2C", 12, -3.5],
 //     ["ALPHA-CODE", "NAME-ONE"],
