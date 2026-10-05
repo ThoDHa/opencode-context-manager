@@ -1,14 +1,22 @@
 // Single source of truth for the metrics totals schema shared by the
 // producer (context-manager.ts: SessionMetrics seeding, CumulativeCounters,
 // totalsOf), the parser (panel-data.ts: PanelTotals, parseTotals), and the
-// TUI entry (context-manager.tui.tsx: PLUGIN_ID), plus the default path
+// TUI entry (context-manager.tui.tsx: PLUGIN_ID), the default path
 // constants from which the producer and parser each build their default
-// paths. Zero imports: every consumer stays dependency-free, and a counter
+// paths, and the option spellings and defaults of the cache-aware passes.
+// Zero imports: every consumer stays dependency-free, and a counter
 // added here reaches both sides in one edit instead of a six-file lockstep.
 
 export const DEFAULT_METRICS_DIR_SEGMENTS = [".local", "share", "opencode"]
 export const DEFAULT_METRICS_FILE_BASENAME = "context-metrics.jsonl"
 export const DEFAULT_LIVE_STATE_DIR_BASENAME = "context-state"
+
+// Canonical spellings and defaults for the cache-aware pass options: the
+// producer resolves its option surface through these, so a consumer
+// spelling the option differently cannot silently no-op. The passes stay
+// default-off until a measurement arm shows the cache win.
+export const OPTION_CACHE_AWARE_HINTS = "cacheAwareHints"
+export const DEFAULT_CACHE_AWARE_HINTS = false
 
 // Shared by both entry modules so their registrations never drift.
 export const PLUGIN_ID = "context-manager"

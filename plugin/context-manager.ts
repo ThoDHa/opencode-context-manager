@@ -4,9 +4,11 @@ import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import type { Plugin, PluginModule } from "@opencode-ai/plugin"
 import {
+  DEFAULT_CACHE_AWARE_HINTS,
   DEFAULT_LIVE_STATE_DIR_BASENAME,
   DEFAULT_METRICS_DIR_SEGMENTS,
   DEFAULT_METRICS_FILE_BASENAME,
+  OPTION_CACHE_AWARE_HINTS,
   PLUGIN_ID,
   PLUGIN_VERSION,
   RAW_COUNTER_KEYS as SCHEMA_RAW_COUNTER_KEYS,
@@ -46,6 +48,12 @@ const DEFAULT_WATERMARK_RATIO = 0.5
 const DEFAULT_RECENT_WINDOW_MESSAGES = 4
 const DEFAULT_MIN_EVICTABLE_BYTES = 2048
 const DEFAULT_HINT_SUBJECTS = 10
+// Cache-aware hint hysteresis: a subject enters the stable line only after
+// HINT_ENTRY_TOUCHES accumulated live touches and leaves only after
+// HINT_EXIT_MISSES consecutive runs without one; entry strictly exceeding
+// exit keeps a flapping subject from rewriting the line it just left.
+const HINT_ENTRY_TOUCHES = 3
+const HINT_EXIT_MISSES = 2
 const DEFAULT_PROTECTED_TOOLS = ["task", "todowrite"]
 const DEFAULT_PROTECTED_PATTERNS: string[] = []
 const PATH_INPUT_KEYS = ["filePath", "path", "file", "directory"]
@@ -261,6 +269,7 @@ type ContextManagerOptions = {
   defaultContextTokens?: number
   modelContextTokens?: Record<string, number>
   hintSubjects?: number
+  cacheAwareHints?: boolean
   protectedTools?: string[]
   protectedPatterns?: string[]
   stashLimit?: number
@@ -661,6 +670,7 @@ const resolveOptions = (raw: ContextManagerOptions = {}): ResolvedOptions => {
       typeof raw.hintSubjects === "number" && Number.isInteger(raw.hintSubjects) && raw.hintSubjects >= 0
         ? raw.hintSubjects
         : DEFAULT_HINT_SUBJECTS,
+    [OPTION_CACHE_AWARE_HINTS]: typeof raw.cacheAwareHints === "boolean" ? raw.cacheAwareHints : DEFAULT_CACHE_AWARE_HINTS,
     protectedTools: Array.isArray(raw.protectedTools) && raw.protectedTools.every(isNonEmptyString) ? raw.protectedTools : DEFAULT_PROTECTED_TOOLS,
     protectedPatterns: protectedPatterns.flatMap((pattern) => {
       const compiled = compiledGlobOf(pattern)
@@ -2971,6 +2981,81 @@ const storeHint = (hintBySession: Map<string, string>, sessionKey: string, hotSu
   if (hintLine !== undefined) rememberSessionValue(hintBySession, sessionKey, hintLine, sessionBound)
 }
 
+// One subject identifier's stable-membership state for the cache-aware
+// hint line: accumulated live touches, consecutive runs without a live
+// entry, and whether the identifier currently renders.
+type HintMembershipState = { touches: number; missRun: number; member: boolean }
+
+type HintMembershipBySession = Map<string, Map<string, HintMembershipState>>
+
+// The stable line's subject identity: the bounded path alone, so the
+// per-read range numerals never enter the rendered bytes and two reads of
+// one file at different ranges hold one seat.
+const stableHintIdentifierOf = (subject: Subject): string => boundedSingleLineOf(subject.path)
+
+const hintMembershipFor = (membershipBySession: HintMembershipBySession, sessionKey: string, sessionBound: number): Map<string, HintMembershipState> => {
+  const touched = touchMapEntry(membershipBySession, sessionKey)
+  if (touched !== undefined) return touched
+  trimMapToBound(membershipBySession, sessionBound)
+  const created: Map<string, HintMembershipState> = new Map()
+  membershipBySession.set(sessionKey, created)
+  return created
+}
+
+// One transform run's membership movement: live touches accumulate and
+// clear the miss run, absent runs accrue misses and drop a member only at
+// the exit bound, and an identifier that has left (or never entered and
+// gone stale) releases its state so the map holds only members and entry
+// candidates.
+const updateHintMembership = (membership: Map<string, HintMembershipState>, hotSubjects: HotSubject[]): void => {
+  const touchesByIdentifier = new Map<string, number>()
+  for (const { subject } of hotSubjects) {
+    const identifier = stableHintIdentifierOf(subject)
+    touchesByIdentifier.set(identifier, (touchesByIdentifier.get(identifier) ?? 0) + 1)
+  }
+  for (const [identifier, state] of membership) {
+    const touches = touchesByIdentifier.get(identifier) ?? 0
+    if (touches > 0) {
+      state.touches += touches
+      state.missRun = 0
+      if (!state.member && state.touches >= HINT_ENTRY_TOUCHES) state.member = true
+    } else {
+      state.missRun += 1
+      if (state.member && state.missRun >= HINT_EXIT_MISSES) state.member = false
+    }
+    if (!state.member && state.missRun >= HINT_EXIT_MISSES) membership.delete(identifier)
+  }
+  for (const [identifier, touches] of touchesByIdentifier) {
+    if (membership.has(identifier)) continue
+    membership.set(identifier, { touches, missRun: 0, member: touches >= HINT_ENTRY_TOUCHES })
+  }
+}
+
+// Members in code-unit order, not locale order and not touch recency, so
+// the rendered bytes are a pure function of membership.
+const buildStableHintLine = (membership: Map<string, HintMembershipState>, limit: number): string | undefined => {
+  if (limit <= 0) return undefined
+  const members = [...membership].filter(([, state]) => state.member).map(([identifier]) => identifier)
+  if (members.length === 0) return undefined
+  members.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+  return `${HINT_LINE_PREFIX} ${members.slice(0, limit).join(SUBJECT_SEPARATOR)}`
+}
+
+const storeStableHint = (
+  hintBySession: Map<string, string>,
+  membershipBySession: HintMembershipBySession,
+  sessionKey: string,
+  hotSubjects: HotSubject[],
+  limit: number,
+  sessionBound: number,
+): void => {
+  if (limit <= 0) return
+  const membership = hintMembershipFor(membershipBySession, sessionKey, sessionBound)
+  updateHintMembership(membership, hotSubjects)
+  const hintLine = buildStableHintLine(membership, limit)
+  if (hintLine !== undefined) rememberSessionValue(hintBySession, sessionKey, hintLine, sessionBound)
+}
+
 // The compaction-prompt enrichment: when the host's native compaction
 // fires, append a compact block carrying the session's remembered evicted
 // subjects (sharing the hint line's newest-first order and hintSubjects
@@ -3031,6 +3116,7 @@ type TransformHookDeps = {
   persistedTotalsForSession: (sessionKey: string) => Promise<PersistedTotals | undefined>
   pageStoreBySession: PageStoreBySession
   hintBySession: Map<string, string>
+  hintMembershipBySession: HintMembershipBySession
   pruneThrottle: PruneThrottle
   pluginSession: string
   pageStoreGuard: PageStoreGuard
@@ -3125,7 +3211,18 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
     fenceBlocks: runOutcome.fenceEvicted.blocks,
   }
   sessionMetrics.lastRetention = retentionBreakdownOf(candidates, messages, options, sessionMetrics.faultCounts)
-  storeHint(deps.hintBySession, sessionKey, eviction.hotSubjects, options.hintSubjects, options.hintSessions)
+  // WHY cache-aware: the hint line rides the system array, seat ~0 of the
+  // request, so rewriting it every run (touch-recency reordering, fresh
+  // range numerals) invalidates the provider's cached prefix from that
+  // seat onward and re-prices the whole request at the uncached rate. The
+  // gated rendering is byte-stable: identifiers sorted, no live numerals,
+  // membership moving only through entry/exit hysteresis, so the seat
+  // rewrites only on a genuine membership change.
+  if (options.cacheAwareHints) {
+    storeStableHint(deps.hintBySession, deps.hintMembershipBySession, sessionKey, eviction.hotSubjects, options.hintSubjects, options.hintSessions)
+  } else {
+    storeHint(deps.hintBySession, sessionKey, eviction.hotSubjects, options.hintSubjects, options.hintSessions)
+  }
   await recordPageStoreLines(options, deps.metricsBySession, sessionKey, pageStoreEntries, deps.pageStoreGuard)
   await recordMetricsLine(options, sessionMetrics, sessionKey, deps.pluginSession, contextLimit, runOutcome)
   await recordSessionCheckpoint(options, sessionKey, contextLimit, sessionMetrics, sessionPageStore, eviction.hotSubjects, deps.pruneThrottle)
@@ -3288,6 +3385,7 @@ const server = (async (_input, rawOptions) => {
   const modelKeyBySession = new Map<string, string | undefined>()
   const pageStoreBySession = new Map<string, SessionPageStore>()
   const hintBySession = new Map<string, string>()
+  const hintMembershipBySession: HintMembershipBySession = new Map()
   const metricsBySession: MetricsStore = new Map()
   const metricsHydrationBySession: MetricsHydration = new Map()
   const pruneThrottle: PruneThrottle = { lastScanMs: PRUNE_SCAN_NEVER }
@@ -3305,6 +3403,7 @@ const server = (async (_input, rawOptions) => {
     persistedTotalsForSession,
     pageStoreBySession,
     hintBySession,
+    hintMembershipBySession,
     pruneThrottle,
     pluginSession,
     pageStoreGuard,

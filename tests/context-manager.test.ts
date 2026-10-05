@@ -15,7 +15,7 @@ import contextManagerEntry, {
   RAW_COUNTER_KEYS,
 } from "../plugin/context-manager.ts"
 import { loadPanelData, PANEL_COMMAND_CATEGORY, PANEL_COMMAND_NAME, PANEL_COMMAND_NAMESPACE, PANEL_COMMAND_SLASH_NAME } from "../plugin/panel-data.ts"
-import { PLUGIN_ID, PLUGIN_VERSION, TOTALS_KEYS } from "../plugin/schema.ts"
+import { PLUGIN_ID, PLUGIN_VERSION, OPTION_CACHE_AWARE_HINTS, TOTALS_KEYS } from "../plugin/schema.ts"
 
 const contextManagerFactory = contextManagerEntry.server
 
@@ -110,6 +110,12 @@ const HINT_DEFAULT_ENTRY_COUNT = 11
 const DEFAULT_HINT_SUBJECT_COUNT = 10
 const REPEAT_TRANSFORM_COUNT = 3
 const NEGATIVE_HINT_SUBJECTS = -1
+const STABLE_HINT_ALPHA_PATH = "/data/alpha.txt"
+const STABLE_HINT_ZEBRA_PATH = "/data/zebra.txt"
+const STABLE_HINT_ENTRY_PATH = "/data/stable-entry.txt"
+const STABLE_HINT_ISOLATION_PATH_B = "/data/from-b.txt"
+const STABLE_HINT_RUNS_TO_ENTER = 3
+const STABLE_HINT_RUNS_TO_EXIT = 2
 const SYSTEM_HOOK = "experimental.chat.system.transform"
 const BASE_SYSTEM_BLOCK = "base system prompt block"
 const SYSTEM_BLOCK_COUNT_WITH_HINT = 2
@@ -2041,6 +2047,141 @@ test("chat system transform lists one hint entry from the retained copy when ide
   assert.equal(hintBlocks.length, 1)
   assert.equal(hintBlocks[0], hintLineFor(["/data/dup.txt"]))
   assert.equal(hintBlocks[0].split("/data/dup.txt").length - 1, 1)
+})
+
+const loadCacheAwareHintHooks = async (): Promise<HookMap> => loadPluginHooksWith({ [OPTION_CACHE_AWARE_HINTS]: true })
+
+const runStableHintTurn = async (hooks: HookMap, partsPerMessage: MessagePart[][], sessionID: string = SESSION_ID): Promise<string[]> => {
+  await runTransform(hooks, buildBundle([...partsPerMessage, ...fillerMessages(2)], sessionID))
+  return runSystemTransform(hooks, sessionID, [BASE_SYSTEM_BLOCK])
+}
+
+const runStableHintTurns = async (
+  hooks: HookMap,
+  turns: number,
+  partsPerMessage: MessagePart[][],
+  sessionID: string = SESSION_ID,
+): Promise<string[]> => {
+  let blocks: string[] = []
+  for (let runIndex = 0; runIndex < turns; runIndex += 1) {
+    blocks = await runStableHintTurn(hooks, partsPerMessage, sessionID)
+  }
+  return blocks
+}
+
+test("chat system transform with cacheAwareHints off keeps the touch-recency rendering with range numerals", async () => {
+  const hooks = await loadPluginHooksWith({ [OPTION_CACHE_AWARE_HINTS]: false })
+
+  const blocks = await runStableHintTurn(hooks, [
+    [
+      completedToolPart(
+        READ_TOOL,
+        { [PATH_INPUT_KEY]: RANGE_PATH, [OFFSET_INPUT_KEY]: READ_OFFSET_LINES, [LIMIT_INPUT_KEY]: READ_LIMIT_LINES },
+        outputOfBytes(MIN_EVICTABLE_BYTES),
+      ),
+    ],
+    [pathToolPart("/data/newer.txt", MIN_EVICTABLE_BYTES)],
+    [pathToolPart("/data/older.txt", MIN_EVICTABLE_BYTES)],
+  ])
+
+  assert.deepEqual(hintBlocksIn(blocks), [
+    hintLineFor(["/data/older.txt", "/data/newer.txt", `${RANGE_PATH}:${READ_OFFSET_LINES}-${READ_OFFSET_LINES + READ_LIMIT_LINES}`]),
+  ])
+})
+
+test("chat system transform with cacheAwareHints enters a subject only after the entry touches accumulate across runs", async () => {
+  const hooks = await loadCacheAwareHintHooks()
+  const entryTurn = [[pathToolPart(STABLE_HINT_ENTRY_PATH, MIN_EVICTABLE_BYTES)]]
+
+  for (let runIndex = 1; runIndex < STABLE_HINT_RUNS_TO_ENTER; runIndex += 1) {
+    assert.deepEqual(hintBlocksIn(await runStableHintTurn(hooks, entryTurn)), [])
+  }
+  const blocks = await runStableHintTurn(hooks, entryTurn)
+
+  assert.deepEqual(hintBlocksIn(blocks), [hintLineFor([STABLE_HINT_ENTRY_PATH])])
+})
+
+test("chat system transform with cacheAwareHints keeps the hint bytes identical across touch reordering", async () => {
+  const hooks = await loadCacheAwareHintHooks()
+  const firstTouchTurn = [
+    [pathToolPart(STABLE_HINT_ALPHA_PATH, MIN_EVICTABLE_BYTES)],
+    [pathToolPart(STABLE_HINT_ZEBRA_PATH, MIN_EVICTABLE_BYTES)],
+  ]
+  const flippedTouchTurn = [
+    [pathToolPart(STABLE_HINT_ZEBRA_PATH, MIN_EVICTABLE_BYTES)],
+    [pathToolPart(STABLE_HINT_ALPHA_PATH, MIN_EVICTABLE_BYTES)],
+  ]
+
+  const enteredLine = hintBlocksIn(await runStableHintTurns(hooks, STABLE_HINT_RUNS_TO_ENTER, firstTouchTurn))
+  assert.deepEqual(enteredLine, [hintLineFor([STABLE_HINT_ALPHA_PATH, STABLE_HINT_ZEBRA_PATH])])
+
+  const reorderedLine = hintBlocksIn(await runStableHintTurn(hooks, flippedTouchTurn))
+
+  assert.deepEqual(reorderedLine, enteredLine)
+})
+
+test("chat system transform with cacheAwareHints keeps a member through one missed run and exits it after the exit misses", async () => {
+  const hooks = await loadCacheAwareHintHooks()
+  const bothMemberTurn = [
+    [pathToolPart(STABLE_HINT_ALPHA_PATH, MIN_EVICTABLE_BYTES)],
+    [pathToolPart(STABLE_HINT_ZEBRA_PATH, MIN_EVICTABLE_BYTES)],
+  ]
+  const survivorTurn = [[pathToolPart(STABLE_HINT_ALPHA_PATH, MIN_EVICTABLE_BYTES)]]
+
+  const bothMemberLine = hintBlocksIn(await runStableHintTurns(hooks, STABLE_HINT_RUNS_TO_ENTER, bothMemberTurn))
+  assert.deepEqual(bothMemberLine, [hintLineFor([STABLE_HINT_ALPHA_PATH, STABLE_HINT_ZEBRA_PATH])])
+
+  for (let runIndex = 1; runIndex < STABLE_HINT_RUNS_TO_EXIT; runIndex += 1) {
+    assert.deepEqual(hintBlocksIn(await runStableHintTurn(hooks, survivorTurn)), bothMemberLine)
+  }
+  const exitedLine = hintBlocksIn(await runStableHintTurn(hooks, survivorTurn))
+
+  assert.deepEqual(exitedLine, [hintLineFor([STABLE_HINT_ALPHA_PATH])])
+})
+
+test("chat system transform with cacheAwareHints renders a ranged subject once as its bare path without numerals", async () => {
+  const hooks = await loadCacheAwareHintHooks()
+  const rangedReadAt = (offset: number): CompletedToolPart =>
+    completedToolPart(READ_TOOL, { [PATH_INPUT_KEY]: RANGE_PATH, [OFFSET_INPUT_KEY]: offset, [LIMIT_INPUT_KEY]: READ_LIMIT_LINES }, outputOfBytes(MIN_EVICTABLE_BYTES))
+  const rangedTurn = [[rangedReadAt(READ_OFFSET_LINES)], [rangedReadAt(READ_OFFSET_LINES + RANGED_ENTRY_OFFSET)]]
+
+  const blocks = await runStableHintTurns(hooks, STABLE_HINT_RUNS_TO_ENTER, rangedTurn)
+
+  assert.deepEqual(hintBlocksIn(blocks), [hintLineFor([RANGE_PATH])])
+})
+
+test("chat system transform with cacheAwareHints updates the stored hint seat in place on a genuine membership change", async () => {
+  const hooks = await loadCacheAwareHintHooks()
+  const singleMemberTurn = [[pathToolPart(STABLE_HINT_ALPHA_PATH, MIN_EVICTABLE_BYTES)]]
+  const twoMemberTurn = [
+    [pathToolPart(STABLE_HINT_ALPHA_PATH, MIN_EVICTABLE_BYTES)],
+    [pathToolPart(STABLE_HINT_ZEBRA_PATH, MIN_EVICTABLE_BYTES)],
+  ]
+
+  const enteredBlocks = await runStableHintTurns(hooks, STABLE_HINT_RUNS_TO_ENTER, singleMemberTurn)
+  const enteredLine = hintBlocksIn(enteredBlocks)
+  const enteredSeat = enteredBlocks.indexOf(enteredLine[0])
+  assert.deepEqual(enteredLine, [hintLineFor([STABLE_HINT_ALPHA_PATH])])
+
+  const grownBlocks = await runStableHintTurns(hooks, STABLE_HINT_RUNS_TO_ENTER, twoMemberTurn)
+  const grownLine = hintBlocksIn(grownBlocks)
+
+  assert.deepEqual(grownLine, [hintLineFor([STABLE_HINT_ALPHA_PATH, STABLE_HINT_ZEBRA_PATH])])
+  assert.equal(grownBlocks.length, SYSTEM_BLOCK_COUNT_WITH_HINT)
+  assert.equal(grownBlocks.indexOf(grownLine[0]), enteredSeat)
+})
+
+test("chat system transform with cacheAwareHints keeps stable hint membership isolated between sessions", async () => {
+  const hooks = await loadCacheAwareHintHooks()
+  const sessionATurn = [[pathToolPart(STABLE_HINT_ALPHA_PATH, MIN_EVICTABLE_BYTES)]]
+  const sessionBTurn = [[pathToolPart(STABLE_HINT_ISOLATION_PATH_B, MIN_EVICTABLE_BYTES)]]
+
+  const blocksA = await runStableHintTurns(hooks, STABLE_HINT_RUNS_TO_ENTER, sessionATurn, SESSION_ID)
+  assert.deepEqual(hintBlocksIn(blocksA), [hintLineFor([STABLE_HINT_ALPHA_PATH])])
+
+  const blocksB = await runStableHintTurn(hooks, sessionBTurn, SESSION_ID_B)
+
+  assert.deepEqual(hintBlocksIn(blocksB), [])
 })
 
 test("the tool registry carries exactly the recall and describe definitions with no legacy names", async () => {
