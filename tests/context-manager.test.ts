@@ -15,7 +15,7 @@ import contextManagerEntry, {
   RAW_COUNTER_KEYS,
 } from "../plugin/context-manager.ts"
 import { loadPanelData, PANEL_COMMAND_CATEGORY, PANEL_COMMAND_NAME, PANEL_COMMAND_NAMESPACE, PANEL_COMMAND_SLASH_NAME } from "../plugin/panel-data.ts"
-import { PLUGIN_ID, PLUGIN_VERSION, OPTION_CACHE_AWARE_HINTS, TOTALS_KEYS } from "../plugin/schema.ts"
+import { PLUGIN_ID, PLUGIN_VERSION, OPTION_CACHE_AWARE_HINTS, OPTION_MUTATION_BATCH_CADENCE, TOTALS_KEYS } from "../plugin/schema.ts"
 
 const contextManagerFactory = contextManagerEntry.server
 
@@ -3418,6 +3418,206 @@ test("transform leaves a widened-retention expiry result unchanged on a second t
   assert.deepEqual(bundle, afterFirstPass)
   assert.equal(bundle.messages[0].parts.length, 0)
   assert.deepEqual(bundle.messages[9].parts, [reasoningPart(REASONING_SECOND_COLD_TEXT)])
+})
+
+const BATCH_CADENCE_DISABLED = 0
+const BATCH_CADENCE_EVERY_RUN = 1
+const BATCH_CADENCE_TWO_RUNS = 2
+const BATCH_CADENCE_THREE_RUNS = 3
+const BATCH_CADENCE_NEVER_REACHED = 50
+const BATCH_INVALID_CADENCE_VALUES = [-1, 1.5, "2"]
+const BATCH_TRIGGER_FILLER_MESSAGES = 2
+const BATCH_CLEAN_RUN_FILLER_MESSAGES = 6
+const RANGE_COLLAPSE_RETAINED_EXTRA_BYTES = 512
+const BATCH_FIRE_RESET_ERROR_PATH = "/data/errored-batch-reset.txt"
+
+// One bundle carrying all three hygiene triggers at once: a cold reasoning
+// part past the retention boundary (message 0), an errored tool input
+// outside the recent window (message 4), and a range read fully contained
+// in a newer read of the same path (message 1 contained, message 5
+// retained). The passes resolve none of them until a fire resolves them.
+const buildBatchTriggerBundle = (sessionID: string = SESSION_ID): StrictBundle =>
+  buildBundle(
+    [
+      [reasoningPart(REASONING_COLD_TEXT)],
+      [rangeReadPart(RANGE_COLLAPSE_PATH, 100, 50, MIN_EVICTABLE_BYTES)],
+      ...fillerMessages(BATCH_TRIGGER_FILLER_MESSAGES),
+      [errorToolPart(READ_TOOL, { [PATH_INPUT_KEY]: PURGE_ERROR_PATH }, outputOfBytes(UNCOMPLETED_OUTPUT_BYTES))],
+      [rangeReadPart(RANGE_COLLAPSE_PATH, 80, 120, MIN_EVICTABLE_BYTES + RANGE_COLLAPSE_RETAINED_EXTRA_BYTES)],
+      ...fillerMessages(BATCH_TRIGGER_FILLER_MESSAGES),
+      [reasoningPart(REASONING_HOT_TEXT)],
+    ],
+    sessionID,
+  )
+
+const assertBatchTriggerBundleDeferred = (bundle: StrictBundle): void => {
+  assert.equal(bundle.messages[0].parts.length, 1, "the cold reasoning part must still be present while the batch is deferred")
+  assert.deepEqual(inputAt(bundle.messages[4]), { [PATH_INPUT_KEY]: PURGE_ERROR_PATH }, "the errored input must stay unpurged while the batch is deferred")
+  assert.equal(
+    toolPartAt(bundle.messages[1], 0).state.output,
+    outputOfBytes(MIN_EVICTABLE_BYTES),
+    "the contained range read must stay intact while the batch is deferred",
+  )
+}
+
+const assertBatchTriggerBundleFired = (bundle: StrictBundle): void => {
+  assert.equal(bundle.messages[0].parts.length, 0, "the fire must expire the cold reasoning part")
+  assert.equal(inputAt(bundle.messages[4]), PURGE_MARKER, "the fire must purge the errored input")
+  assert.equal(
+    (bundle.messages[4].parts[0] as ErrorToolPart).state.output,
+    outputOfBytes(UNCOMPLETED_OUTPUT_BYTES),
+    "the fire must keep the errored part's output",
+  )
+  assert.deepEqual(bundle.messages[1].parts[0], {
+    type: "text",
+    text: rangeTombstoneFor(RANGE_COLLAPSE_PATH, 100, 150, 5, 80, 200),
+  }, "the fire must collapse the contained range read naming the retained message")
+  assert.equal(
+    toolPartAt(bundle.messages[5], 0).state.output,
+    outputOfBytes(MIN_EVICTABLE_BYTES + RANGE_COLLAPSE_RETAINED_EXTRA_BYTES),
+    "the fire must keep the retained range read intact",
+  )
+  assert.deepEqual(bundle.messages[8].parts, [reasoningPart(REASONING_HOT_TEXT)], "the fire must keep the hot reasoning part")
+}
+
+test("transform with mutationBatchCadence 0 keeps the hygiene passes firing immediately on every request", async () => {
+  const hooks = await loadPluginHooksWith({ [OPTION_MUTATION_BATCH_CADENCE]: BATCH_CADENCE_DISABLED })
+
+  const bundle = buildBatchTriggerBundle()
+  await runTransform(hooks, bundle)
+
+  assertBatchTriggerBundleFired(bundle)
+})
+
+test("transform with mutationBatchCadence keeps the hygiene mutations deferred while the trigger runs sit below the cadence", async () => {
+  const hooks = await loadPluginHooksWith({ [OPTION_MUTATION_BATCH_CADENCE]: BATCH_CADENCE_THREE_RUNS })
+
+  const bundle = buildBatchTriggerBundle()
+  await runTransform(hooks, bundle)
+  assertBatchTriggerBundleDeferred(bundle)
+
+  await runTransform(hooks, bundle)
+  assertBatchTriggerBundleDeferred(bundle)
+})
+
+test("transform with mutationBatchCadence fires the three hygiene passes as one batched mutation when the cadence is met", async () => {
+  const hooks = await loadPluginHooksWith({ [OPTION_MUTATION_BATCH_CADENCE]: BATCH_CADENCE_THREE_RUNS })
+
+  const bundle = buildBatchTriggerBundle()
+  await runTransform(hooks, bundle)
+  await runTransform(hooks, bundle)
+  assertBatchTriggerBundleDeferred(bundle)
+
+  await runTransform(hooks, bundle)
+  assertBatchTriggerBundleFired(bundle)
+  const counters = countersOf(await readStats(hooks, SESSION_ID))
+  assert.equal(counters.collapsedWindows, RANGE_COLLAPSE_WINDOW_COUNT)
+  assert.equal(counters.reasoningExpiredUnique, 1)
+  assert.equal(counters.evictions, 0)
+})
+
+test("transform with mutationBatchCadence does not advance the cadence on a run without hygiene triggers", async () => {
+  const hooks = await loadPluginHooksWith({ [OPTION_MUTATION_BATCH_CADENCE]: BATCH_CADENCE_THREE_RUNS })
+
+  const triggerBundle = buildBatchTriggerBundle()
+  await runTransform(hooks, triggerBundle)
+  assertBatchTriggerBundleDeferred(triggerBundle)
+
+  const cleanBundle = buildBundle([...fillerMessages(BATCH_CLEAN_RUN_FILLER_MESSAGES)])
+  await runTransform(hooks, cleanBundle)
+
+  await runTransform(hooks, triggerBundle)
+  assertBatchTriggerBundleDeferred(triggerBundle)
+})
+
+test("transform with mutationBatchCadence starts a fresh cadence after a batched fire", async () => {
+  const hooks = await loadPluginHooksWith({ [OPTION_MUTATION_BATCH_CADENCE]: BATCH_CADENCE_TWO_RUNS })
+
+  const firstCycle = buildBatchTriggerBundle()
+  await runTransform(hooks, firstCycle)
+  assertBatchTriggerBundleDeferred(firstCycle)
+  await runTransform(hooks, firstCycle)
+  assertBatchTriggerBundleFired(firstCycle)
+
+  const secondCycle = buildBundle([
+    [errorToolPart(READ_TOOL, { [PATH_INPUT_KEY]: BATCH_FIRE_RESET_ERROR_PATH }, outputOfBytes(UNCOMPLETED_OUTPUT_BYTES))],
+    ...fillerMessages(RECENT_WINDOW_MESSAGES + 1),
+  ])
+  await runTransform(hooks, secondCycle)
+  assert.deepEqual(inputAt(secondCycle.messages[0]), { [PATH_INPUT_KEY]: BATCH_FIRE_RESET_ERROR_PATH })
+
+  await runTransform(hooks, secondCycle)
+  assert.equal(inputAt(secondCycle.messages[0]), PURGE_MARKER)
+})
+
+test("transform keeps the watermark eviction walk immediate while the hygiene mutations sit below the cadence", async () => {
+  const hooks = await loadPluginHooksWith({ [OPTION_MUTATION_BATCH_CADENCE]: BATCH_CADENCE_NEVER_REACHED })
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+
+  const bundle = buildBundle([
+    [pathToolPart("/data/valve-coldest.txt", MIN_EVICTABLE_BYTES)],
+    [errorToolPart(READ_TOOL, { [PATH_INPUT_KEY]: PURGE_ERROR_PATH }, outputOfBytes(UNCOMPLETED_OUTPUT_BYTES))],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER), "the watermark walk must evict on the very run the cadence defers")
+  assert.deepEqual(inputAt(bundle.messages[1]), { [PATH_INPUT_KEY]: PURGE_ERROR_PATH }, "the errored input must stay unpurged below the cadence")
+})
+
+test("transform keeps the aged read tier firing immediately while the hygiene mutations sit below the cadence", async () => {
+  const hooks = await loadPluginHooksWith({
+    [OPTION_MUTATION_BATCH_CADENCE]: BATCH_CADENCE_NEVER_REACHED,
+    agedReadEvictionMessages: AGED_EVICTION_MESSAGES,
+  })
+
+  const bundle = buildBundle([
+    [errorToolPart(READ_TOOL, { [PATH_INPUT_KEY]: PURGE_ERROR_PATH }, outputOfBytes(UNCOMPLETED_OUTPUT_BYTES))],
+    [pathToolPart(AGED_READ_PATH, MIN_EVICTABLE_BYTES)],
+    ...fillerMessages(AGED_FILLER_COUNT),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.ok(toolPartAt(bundle.messages[1], 0).state.output.startsWith(TOMBSTONE_MARKER), "the aged tier must hard-fire on the very run the cadence defers")
+  assert.deepEqual(inputAt(bundle.messages[0]), { [PATH_INPUT_KEY]: PURGE_ERROR_PATH }, "the errored input must stay unpurged below the cadence")
+})
+
+test("transform drops invalid mutationBatchCadence values to the immediate per-request behavior", async () => {
+  for (const invalidValue of BATCH_INVALID_CADENCE_VALUES) {
+    const hooks = await loadPluginHooksWith({ [OPTION_MUTATION_BATCH_CADENCE]: invalidValue })
+
+    const bundle = buildBatchTriggerBundle()
+    await runTransform(hooks, bundle)
+
+    assertBatchTriggerBundleFired(bundle)
+  }
+})
+
+test("transform with mutationBatchCadence 1 fires the hygiene passes on every trigger-carrying run", async () => {
+  const hooks = await loadPluginHooksWith({ [OPTION_MUTATION_BATCH_CADENCE]: BATCH_CADENCE_EVERY_RUN })
+
+  const bundle = buildBatchTriggerBundle()
+  await runTransform(hooks, bundle)
+
+  assertBatchTriggerBundleFired(bundle)
+})
+
+test("transform with mutationBatchCadence keeps the hygiene cadence independent between sessions", async () => {
+  const hooks = await loadPluginHooksWith({ [OPTION_MUTATION_BATCH_CADENCE]: BATCH_CADENCE_TWO_RUNS })
+
+  const sessionA = buildBatchTriggerBundle(SESSION_ID)
+  await runTransform(hooks, sessionA)
+  assertBatchTriggerBundleDeferred(sessionA)
+
+  const sessionB = buildBatchTriggerBundle(SESSION_ID_B)
+  await runTransform(hooks, sessionB)
+  assertBatchTriggerBundleDeferred(sessionB)
+
+  await runTransform(hooks, sessionA)
+  assertBatchTriggerBundleFired(sessionA)
+
+  await runTransform(hooks, sessionB)
+  assertBatchTriggerBundleFired(sessionB)
 })
 
 test("transform never tombstones a default protected task output under watermark pressure that evicts an unprotected sibling", async () => {

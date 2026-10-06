@@ -8,7 +8,9 @@ import {
   DEFAULT_LIVE_STATE_DIR_BASENAME,
   DEFAULT_METRICS_DIR_SEGMENTS,
   DEFAULT_METRICS_FILE_BASENAME,
+  DEFAULT_MUTATION_BATCH_CADENCE,
   OPTION_CACHE_AWARE_HINTS,
+  OPTION_MUTATION_BATCH_CADENCE,
   PLUGIN_ID,
   PLUGIN_VERSION,
   RAW_COUNTER_KEYS as SCHEMA_RAW_COUNTER_KEYS,
@@ -270,6 +272,7 @@ type ContextManagerOptions = {
   modelContextTokens?: Record<string, number>
   hintSubjects?: number
   cacheAwareHints?: boolean
+  mutationBatchCadence?: number
   protectedTools?: string[]
   protectedPatterns?: string[]
   stashLimit?: number
@@ -671,6 +674,11 @@ const resolveOptions = (raw: ContextManagerOptions = {}): ResolvedOptions => {
         ? raw.hintSubjects
         : DEFAULT_HINT_SUBJECTS,
     [OPTION_CACHE_AWARE_HINTS]: typeof raw.cacheAwareHints === "boolean" ? raw.cacheAwareHints : DEFAULT_CACHE_AWARE_HINTS,
+    // The hygiene passes' batch cadence in trigger-carrying runs: 0 (the
+    // default) keeps every pass firing per request; N defers the passes'
+    // mutations until the session's Nth trigger-carrying run fires them as
+    // one batched mutation. The cache reasoning lives at resolveHygieneBatch.
+    [OPTION_MUTATION_BATCH_CADENCE]: boundedIntegerOr(raw.mutationBatchCadence, DEFAULT_MUTATION_BATCH_CADENCE, 0),
     protectedTools: Array.isArray(raw.protectedTools) && raw.protectedTools.every(isNonEmptyString) ? raw.protectedTools : DEFAULT_PROTECTED_TOOLS,
     protectedPatterns: protectedPatterns.flatMap((pattern) => {
       const compiled = compiledGlobOf(pattern)
@@ -1029,9 +1037,21 @@ const rangeWindowOf = (part: Record<string, unknown>): { range: SubjectRange; st
 // discipline mirrors dedup: reads inside the recent window never
 // collapse, outputs under minEvictableBytes never collapse, and
 // already-tombstoned outputs never collapse.
-const collapseRangeReads = (messages: MessageBundle[], options: ResolvedOptions): RangeCollapseOutcome => {
+
+// One planned collapse: the message and part slots to overwrite and the
+// tombstone to write there. The plan phase never mutates, so the batched
+// cadence can detect the pass's trigger by planning alone and a fire can
+// apply the recorded edits later; detection reads only each candidate's
+// own part, so planning and applying in two phases lands the same list as
+// mutating in the walk.
+type RangeCollapseEdit = { msgIndex: number; partIndex: number; replacement: Record<string, unknown> }
+
+type RangeCollapsePlan = { edits: RangeCollapseEdit[]; collapsed: number; collapsedBytes: number }
+
+const planRangeCollapse = (messages: MessageBundle[], options: ResolvedOptions): RangeCollapsePlan => {
   const hotFromIndex = hotFromIndexOf(messages, options)
   const retainedByPath = new Map<string, RangeReadWindow>()
+  const edits: RangeCollapseEdit[] = []
   let collapsed = 0
   let collapsedBytes = 0
   for (let msgIndex = messages.length - 1; msgIndex >= 0; msgIndex -= 1) {
@@ -1048,14 +1068,22 @@ const collapseRangeReads = (messages: MessageBundle[], options: ResolvedOptions)
       if (msgIndex >= hotFromIndex) continue
       if (window.stateRef.output.length < options.minEvictableBytes) continue
       collapsedBytes += window.stateRef.output.length
-      messageParts[partIndex] = {
-        type: TEXT_PART_TYPE,
-        text: `${DEDUP_MARKER} ${READ_TOOL_NAME} ${renderSubject({ path: window.path, range: window.range })} ${DEDUP_RANGE_SUPERSEDED_LEAD} ${retained.msgIndex} (${renderSubject({ path: window.path, range: retained.range })})`,
-      }
+      edits.push({
+        msgIndex,
+        partIndex,
+        replacement: {
+          type: TEXT_PART_TYPE,
+          text: `${DEDUP_MARKER} ${READ_TOOL_NAME} ${renderSubject({ path: window.path, range: window.range })} ${DEDUP_RANGE_SUPERSEDED_LEAD} ${retained.msgIndex} (${renderSubject({ path: window.path, range: retained.range })})`,
+        },
+      })
       collapsed += 1
     }
   }
-  return { collapsed, collapsedBytes }
+  return { edits, collapsed, collapsedBytes }
+}
+
+const applyRangeCollapse = (messages: MessageBundle[], plan: RangeCollapsePlan): void => {
+  for (const edit of plan.edits) messages[edit.msgIndex].parts[edit.partIndex] = edit.replacement
 }
 
 // Membership test plus bounded remember shared by the unique-event counters:
@@ -1242,19 +1270,40 @@ const runCompositionOf = (messages: MessageBundle[], options: ResolvedOptions): 
   return { toolPoolBytes, textChars, reasoningInWindowBytes, escapeBytes, attachmentBytes }
 }
 
+// The one purge-candidate decision the pass and its batched-cadence
+// trigger scan share, so the two sites cannot drift: an errored tool
+// part's state whose input has not been scrubbed yet.
+const unpurgedErroredToolStateOf = (part: Record<string, unknown>): Record<string, unknown> | undefined => {
+  if (part["type"] !== "tool") return undefined
+  const state = part["state"]
+  if (typeof state !== "object" || state === null) return undefined
+  const typedState = state as Record<string, unknown>
+  if (typedState["status"] !== "error") return undefined
+  if (typedState["input"] === PURGED_INPUT_MARKER || typedState["input"] === LEGACY_PURGED_INPUT_MARKER) return undefined
+  return typedState
+}
+
 const purgeErroredToolInputs = (messages: MessageBundle[], options: ResolvedOptions): void => {
   const hotFromIndex = hotFromIndexOf(messages, options)
   for (let msgIndex = 0; msgIndex < hotFromIndex; msgIndex += 1) {
     for (const part of messages[msgIndex].parts) {
-      if (part["type"] !== "tool") continue
-      const state = part["state"]
-      if (typeof state !== "object" || state === null) continue
-      const typedState = state as Record<string, unknown>
-      if (typedState["status"] !== "error") continue
-      if (typedState["input"] === PURGED_INPUT_MARKER || typedState["input"] === LEGACY_PURGED_INPUT_MARKER) continue
-      typedState["input"] = PURGED_INPUT_MARKER
+      const erroredState = unpurgedErroredToolStateOf(part)
+      if (erroredState === undefined) continue
+      erroredState["input"] = PURGED_INPUT_MARKER
     }
   }
+}
+
+// The pass's batched-cadence trigger: whether a purge would mutate, early
+// exiting on the first candidate so a deferred run pays one scan.
+const hasErroredToolInputToPurge = (messages: MessageBundle[], options: ResolvedOptions): boolean => {
+  const hotFromIndex = hotFromIndexOf(messages, options)
+  for (let msgIndex = 0; msgIndex < hotFromIndex; msgIndex += 1) {
+    for (const part of messages[msgIndex].parts) {
+      if (unpurgedErroredToolStateOf(part) !== undefined) return true
+    }
+  }
+  return false
 }
 
 // Message indices are unstable across runs: opencode trims stored messages,
@@ -1294,6 +1343,18 @@ const expireAgedReasoning = (metrics: SessionMetrics, messages: MessageBundle[],
     }
   }
   return { parts, bytes, unique, uniqueBytes }
+}
+
+// The pass's batched-cadence trigger: whether an expiry would mutate,
+// early exiting on the first reasoning part past the retention boundary.
+const hasAgedReasoningToExpire = (messages: MessageBundle[], options: ResolvedOptions): boolean => {
+  const retentionFromIndex = retentionFromIndexOf(messages, options)
+  for (let msgIndex = 0; msgIndex < retentionFromIndex; msgIndex += 1) {
+    for (const part of messages[msgIndex].parts) {
+      if (part["type"] === REASONING_PART_TYPE) return true
+    }
+  }
+  return false
 }
 
 const stripLegacyHintParts = (messages: MessageBundle[]): void => {
@@ -3104,6 +3165,61 @@ const deliverHint = (hintBySession: Map<string, string>, input: unknown, output:
   else output.system[existingIndex] = hintLine
 }
 
+// Per-session hygiene cadence state: the count of trigger-carrying runs
+// since the last batched fire. A missing entry means zero.
+type HygieneCadenceBySession = Map<string, number>
+
+// Sessions holding a pending trigger count, mirroring the other per-session
+// store bounds; a session falling out of the map merely restarts its count.
+const HYGIENE_CADENCE_SESSIONS = 8
+
+// One transform run's hygiene disposition: whether the three batchable
+// passes (range collapse, errored-input purge, aged-reasoning expiry) fire
+// this run, and the collapse plan the decision phase already walked.
+type HygieneBatchDecision = { fire: boolean; collapsePlan: RangeCollapsePlan }
+
+// The deferred-run results the fire path returns instead of pass outcomes:
+// frozen so a downstream field write on the shared record fails loudly
+// instead of corrupting every later deferred run.
+const RANGE_COLLAPSE_NONE: RangeCollapseOutcome = Object.freeze({ collapsed: 0, collapsedBytes: 0 })
+const REASONING_EXPIRY_NONE: ReasoningExpiry = Object.freeze({ parts: 0, bytes: 0, unique: 0, uniqueBytes: 0 })
+
+// WHY cache-aware: each of these passes cuts history at its own seat, and
+// a provider serves a cache hit only while the next request byte-matches
+// the cached prefix from position zero, so every small cut re-prices the
+// whole request tail at the uncached rate. N per-request hygiene cuts cost
+// N re-priced tails; the gated cadence accumulates the passes' triggers
+// across runs and fires them as ONE batched mutation, so N small cuts
+// collapse into one cut and one re-priced tail. The pressure valves never
+// ride this gate: the watermark-driven eviction walk and the aged read
+// tier's hard fire answer size pressure, and deferring those would trade
+// unbounded context growth for cache bytes.
+const resolveHygieneBatch = (
+  messages: MessageBundle[],
+  options: ResolvedOptions,
+  pendingBySession: HygieneCadenceBySession,
+  sessionKey: string,
+): HygieneBatchDecision => {
+  const collapsePlan = planRangeCollapse(messages, options)
+  if (options.mutationBatchCadence <= 0) return { fire: true, collapsePlan }
+  const triggered =
+    collapsePlan.collapsed > 0 || hasErroredToolInputToPurge(messages, options) || hasAgedReasoningToExpire(messages, options)
+  if (triggered === false) return { fire: false, collapsePlan }
+  const pending = (touchMapEntry(pendingBySession, sessionKey) ?? 0) + 1
+  if (pending >= options.mutationBatchCadence) {
+    pendingBySession.delete(sessionKey)
+    return { fire: true, collapsePlan }
+  }
+  rememberSessionValue(pendingBySession, sessionKey, pending, HYGIENE_CADENCE_SESSIONS)
+  return { fire: false, collapsePlan }
+}
+
+const fireCollapsePass = (messages: MessageBundle[], decision: HygieneBatchDecision): RangeCollapseOutcome => {
+  if (decision.fire === false) return RANGE_COLLAPSE_NONE
+  applyRangeCollapse(messages, decision.collapsePlan)
+  return { collapsed: decision.collapsePlan.collapsed, collapsedBytes: decision.collapsePlan.collapsedBytes }
+}
+
 // The transform hook's body, extracted so the registration-site boundary
 // can wrap it in fault isolation. Everything it needs rides the deps
 // object (the plugin instance's per-process stores plus resolved
@@ -3117,6 +3233,7 @@ type TransformHookDeps = {
   pageStoreBySession: PageStoreBySession
   hintBySession: Map<string, string>
   hintMembershipBySession: HintMembershipBySession
+  hygieneCadenceBySession: HygieneCadenceBySession
   pruneThrottle: PruneThrottle
   pluginSession: string
   pageStoreGuard: PageStoreGuard
@@ -3145,7 +3262,12 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
   stripLegacyHintParts(messages)
   const toolDedup = deduplicateToolOutputs(messages, options)
   const fileDedup = deduplicateFileAttachments(messages, options)
-  const rangeCollapse = collapseRangeReads(messages, options)
+  // The batched-cadence decision sits where the collapse pass used to fire:
+  // its plan phase is the collapse pass's detection, and the purge and
+  // expiry trigger scans read the same pre-hygiene state their passes
+  // would, so the deferral decision cannot disagree with a fire.
+  const hygieneBatch = resolveHygieneBatch(messages, options, deps.hygieneCadenceBySession, sessionKey)
+  const rangeCollapse = fireCollapsePass(messages, hygieneBatch)
   const dedupedThisRun = toolDedup.tombstones + fileDedup.tombstones
   // The lifetime unique credit gates count and bytes alike on the pair
   // identity: a standing duplicate re-tombstones every run, but only its
@@ -3154,8 +3276,11 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
     ...toolDedup.tombstonedPairs,
     ...fileDedup.tombstonedPairs,
   ])
-  purgeErroredToolInputs(messages, options)
-  const reasoningExpiredThisRun = expireAgedReasoning(sessionMetrics, messages, options)
+  let reasoningExpiredThisRun: ReasoningExpiry = REASONING_EXPIRY_NONE
+  if (hygieneBatch.fire) {
+    purgeErroredToolInputs(messages, options)
+    reasoningExpiredThisRun = expireAgedReasoning(sessionMetrics, messages, options)
+  }
   const fenceEvictedThisRun = evictLargeUserFences(messages, options, sessionPageStore, pageStoreEntries)
   const effectiveWatermarkTokens = effectiveWatermarkTokensOf(contextLimit.tokens, options)
   // One scan and one candidate walk feed whichever path runs: the
@@ -3386,6 +3511,7 @@ const server = (async (_input, rawOptions) => {
   const pageStoreBySession = new Map<string, SessionPageStore>()
   const hintBySession = new Map<string, string>()
   const hintMembershipBySession: HintMembershipBySession = new Map()
+  const hygieneCadenceBySession: HygieneCadenceBySession = new Map()
   const metricsBySession: MetricsStore = new Map()
   const metricsHydrationBySession: MetricsHydration = new Map()
   const pruneThrottle: PruneThrottle = { lastScanMs: PRUNE_SCAN_NEVER }
@@ -3404,6 +3530,7 @@ const server = (async (_input, rawOptions) => {
     pageStoreBySession,
     hintBySession,
     hintMembershipBySession,
+    hygieneCadenceBySession,
     pruneThrottle,
     pluginSession,
     pageStoreGuard,
