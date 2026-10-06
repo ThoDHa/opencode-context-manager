@@ -12,12 +12,8 @@ import {
   BLOCK_LOG_BASENAME,
   CALIBRATION_ARM,
   DEEP_PROFILE,
-  EXPERIMENT_PROFILES,
   FLIP_LOG_BASENAME,
-  isExperimentProfileName,
   LEVER1_PROFILE,
-  LEVER2_ARM_PLUGIN_ENTRY,
-  LEVER2_PROFILE,
   LEVER_ARM_PLUGIN_ENTRY,
   LEVER_ON_FULL_PLUGIN_ENTRY,
   SPAWN_LOG_BASENAME,
@@ -35,8 +31,6 @@ import {
   TOTAL_DATA_BLOCKS,
   validateDeepRotation,
   type Arm,
-  type ExperimentProfile,
-  type PluginEntry,
 } from "../../../experiments/arms.ts"
 import {
   buildSolveArgv,
@@ -1328,7 +1322,7 @@ test("parseMetricsLog records whether a metrics line carries real evictions", ()
   assert.equal(events[1]!.evictedThisRun, false)
 })
 
-const corroborationCensus = (metricsEvents: readonly MetricsLineOptions[], profile: ExperimentProfile = LEVER1_PROFILE): CensusRow[] =>
+const corroborationCensus = (metricsEvents: readonly MetricsLineOptions[]): CensusRow[] =>
   buildCensus({
     flipLogText: flipLogText(["OFF", "ON-FULL", "LEVER"]),
     spawnLogText: spawnLogText([
@@ -1348,9 +1342,9 @@ const corroborationCensus = (metricsEvents: readonly MetricsLineOptions[], profi
       ["ses_cal", [turn(6)]],
       ["ses_off", [turn(16)]],
       ["ses_full", [turn(26)]],
-      ["ses_lever", [turn(36)]]],
-    )),
-    profile,
+      ["ses_lever", [turn(36)]],
+    ])),
+    profile: LEVER1_PROFILE,
   })
 
 test("the lever corroboration demands eviction-bearing metrics on ON arms and silence on OFF", () => {
@@ -1767,154 +1761,4 @@ test("excluded census rows keep their table row but never enter the endpoint pop
   } finally {
     rmSync(temp, { recursive: true, force: true })
   }
-})
-
-// ---------------------------------------------------------------------------
-// Lever-2 experiment profile (LRU-85-4): the cumulative-stack series.
-// ---------------------------------------------------------------------------
-
-test("the lever2 profile's LEVER seed pins the cumulative lever stack exactly", () => {
-  assert.equal(
-    JSON.stringify(LEVER2_ARM_PLUGIN_ENTRY),
-    '[["./opencode-context-manager/plugin/context-manager.ts",{"manualMode":false,"watermarkTokens":12000,"agedReadEvictionMessages":30,"reasoningRetentionMessages":16,"cacheAwareHints":true,"cacheAwareDedup":true}]]',
-    "the lever2 LEVER seed is the cumulative stack, byte-pinned",
-  )
-  const lever2Seed = LEVER2_ARM_PLUGIN_ENTRY[0]![1]
-  assert.deepEqual(lever2Seed, {
-    manualMode: false,
-    watermarkTokens: 12000,
-    agedReadEvictionMessages: 30,
-    reasoningRetentionMessages: 16,
-    cacheAwareHints: true,
-    cacheAwareDedup: true,
-  })
-  const leverOnFull = LEVER2_PROFILE.pluginSeedByArm["ON-FULL"]![0]![1]
-  assert.deepEqual(leverOnFull, { manualMode: false, watermarkTokens: 12000, agedReadEvictionMessages: 30, reasoningRetentionMessages: 16 })
-  assert.equal("cacheAwareHints" in leverOnFull || "cacheAwareDedup" in leverOnFull, false, "the profile's ON-FULL seed carries no lever keys")
-  assert.equal(LEVER2_PROFILE.pluginSeedByArm["CAL-ON-FULL"], LEVER2_PROFILE.pluginSeedByArm["ON-FULL"], "the calibration token maps to the profile's ON-FULL seed")
-  assert.equal(LEVER2_ARM_PLUGIN_ENTRY[0]![0], LEVER_ON_FULL_PLUGIN_ENTRY[0]![0], "every lever seed points at the same plugin path")
-  assert.deepEqual(LEVER2_PROFILE.contrasts, [["LEVER", "OFF"], ["LEVER", "ON-FULL"], ["ON-FULL", "OFF"]])
-  assert.equal(LEVER2_PROFILE.corroboratesFullModeMetrics, true)
-})
-
-test("the arm assertion catches wrong-profile lever seeds, partial keys, and extra keys in both directions", () => {
-  assert.equal(configMatchesArm({ plugin: LEVER2_ARM_PLUGIN_ENTRY }, "LEVER", LEVER1_PROFILE), false, "a lever2-era config must fail the lever1 LEVER assertion (extra cacheAwareDedup key)")
-  assert.equal(configMatchesArm({ plugin: LEVER_ARM_PLUGIN_ENTRY }, "LEVER", LEVER2_PROFILE), false, "a lever1-era config must fail the lever2 LEVER assertion (missing cacheAwareDedup key)")
-  const pluginPath = LEVER2_ARM_PLUGIN_ENTRY[0]![0]
-  const lever2Seed = LEVER2_ARM_PLUGIN_ENTRY[0]![1]
-  const missingHints: PluginEntry = [pluginPath, { ...lever2Seed, cacheAwareHints: false }]
-  const dedupDisabled: PluginEntry = [pluginPath, { ...lever2Seed, cacheAwareDedup: false }]
-  assert.equal(configMatchesArm({ plugin: [missingHints] }, "LEVER", LEVER2_PROFILE), false, "a disabled cacheAwareHints key must fail the lever2 assertion")
-  assert.equal(configMatchesArm({ plugin: [dedupDisabled] }, "LEVER", LEVER2_PROFILE), false, "a disabled cacheAwareDedup key must fail the lever2 assertion")
-  assert.equal(
-    configMatchesArm({ plugin: [[pluginPath, { ...lever2Seed, watermarkOverride: 1 }]] }, "LEVER", LEVER2_PROFILE),
-    false,
-    "an unknown extra key must fail the lever2 assertion",
-  )
-  assert.equal(configMatchesArm({ plugin: LEVER2_ARM_PLUGIN_ENTRY }, "LEVER", LEVER2_PROFILE), true)
-  assert.equal(configMatchesArm({ plugin: LEVER2_ARM_PLUGIN_ENTRY }, "ON-FULL", LEVER2_PROFILE), false, "the lever seed is not the profile's ON-FULL seed")
-  assert.equal(configMatchesArm({ plugin: LEVER_ON_FULL_PLUGIN_ENTRY }, "ON-FULL", LEVER2_PROFILE), true)
-  assert.equal(configMatchesArm({ plugin: LEVER_ON_FULL_PLUGIN_ENTRY }, CALIBRATION_ARM, LEVER2_PROFILE), true)
-  assert.equal(configMatchesArm({ plugin: [] }, "OFF", LEVER2_PROFILE), true)
-  assert.equal(configMatchesArm({ plugin: LEVER2_ARM_PLUGIN_ENTRY }, "OFF", LEVER2_PROFILE), false)
-  assert.equal(configMatchesArm({ plugin: ON_PLUGIN_ENTRY }, "ON-FULL", LEVER2_PROFILE), false, "the frozen 250k seed is not a lever2 seed")
-  assert.equal(configMatchesArm(null, "LEVER", LEVER2_PROFILE), false)
-  const flipped = applyArmToConfig({ model: "test-model", plugin: [] as unknown[] }, "LEVER", LEVER2_PROFILE) as { plugin: unknown }
-  assert.deepEqual(flipped.plugin, LEVER2_ARM_PLUGIN_ENTRY)
-  assert.throws(() => applyArmToConfig({ plugin: [] }, "ON-DRY", LEVER2_PROFILE), /no plugin seed in the lever2 profile/)
-})
-
-test("the lever2 profile walks the lever-era schedule and the profile-scoped era readers separate the histories", () => {
-  assert.deepEqual(Array.from({ length: TOTAL_DATA_BLOCKS }, (_, index) => armForDataBlock(index + 1, LEVER2_PROFILE)), [...LEVER_SCHEDULE])
-  const lever2Era = readDeepEra(flipLogText(LEVER_SCHEDULE), LEVER2_PROFILE)
-  assert.equal(eraDataCount(lever2Era), 18)
-  assert.equal(validateDeepRotation(lever2Era, LEVER2_PROFILE), null)
-  assert.equal(validateDeepRotation(readDeepEra(flipLogText(LEVER_SCHEDULE))) === null, false, "the frozen deep reader refuses a lever2-era log")
-  assert.equal(validateDeepRotation(readDeepEra(flipLogText(SCHEDULE), LEVER2_PROFILE)) === null, false, "the lever2 reader refuses a frozen deep-era log")
-  const afterThree = decideNextBlock(readDeepEra(flipLogText(LEVER_SCHEDULE.slice(0, 3)), LEVER2_PROFILE), false, false, LEVER2_PROFILE)
-  assert.deepEqual(afterThree, { kind: "run", blockLabel: "4", arm: "LEVER" })
-  const broken = decideNextBlock(readDeepEra(flipLogText(["OFF", "OFF"]), LEVER2_PROFILE), false, false, LEVER2_PROFILE)
-  assert.equal(broken.kind === "refuse" ? broken.rc : -1, 11)
-  assert.match(broken.kind === "refuse" ? broken.reason : "", /position 2 carries arm OFF, expected ON-FULL/)
-})
-
-test("AB_EXPERIMENT resolves lever2 with the self-flip default while deep and lever1 stay pinned", () => {
-  assert.equal(isExperimentProfileName("lever2"), true)
-  assert.equal(isExperimentProfileName("lever3"), false)
-  const lever2Resolved = resolveCliConfig([], { AB_EXPERIMENT: "lever2" })
-  assert.equal(lever2Resolved.profile, LEVER2_PROFILE)
-  assert.equal(EXPERIMENT_PROFILES.deep, DEEP_PROFILE)
-  assert.equal(EXPERIMENT_PROFILES.lever1, LEVER1_PROFILE)
-  assert.equal(EXPERIMENT_PROFILES.lever2, LEVER2_PROFILE)
-  assert.deepEqual(LEVER2_PROFILE.dataArms, LEVER1_PROFILE.dataArms)
-  assert.equal(DEEP_PROFILE.defaultsToSelfFlip, false, "the frozen deep profile keeps the legacy flip default")
-  assert.equal(LEVER1_PROFILE.defaultsToSelfFlip, true)
-  assert.equal(LEVER2_PROFILE.defaultsToSelfFlip, true)
-  assert.equal(lever2Resolved.flipCmd, SELF_FLIP_COMMAND)
-  assert.equal(resolveCliConfig([], { AB_EXPERIMENT: "lever2", AB_FLIP_CMD: "/bin/true" }).flipCmd, "/bin/true")
-  assert.notEqual(resolveCliConfig([], {}).flipCmd, SELF_FLIP_COMMAND)
-})
-
-test("flipArmAndAssert applies the lever2 seed and refuses wrong-profile lever seeds at the shell layer", () => {
-  const selfDir = tempDir("ab-lever2-self-")
-  const lever1EraDir = tempDir("ab-lever2-l1era-")
-  const lever2EraDir = tempDir("ab-lever2-l2era-")
-  try {
-    const configPathFor = (dir: string): string => join(dir, "config.json")
-    for (const dir of [selfDir, lever1EraDir, lever2EraDir]) {
-      writeFileSync(configPathFor(dir), `${JSON.stringify({ model: "test-model", plugin: [] as unknown[] })}\n`)
-    }
-    const selfConfig = cliConfigFor(selfDir, { configPath: configPathFor(selfDir), profile: LEVER2_PROFILE, flipCmd: SELF_FLIP_COMMAND })
-    appendFileSync(join(selfDir, FLIP_LOG_BASENAME), `${formatFlipLine(new Date(Date.parse(T0)).toISOString(), CALIBRATION_ARM)}\n`)
-    const selfOutput = flipArmAndAssert(selfConfig, "LEVER")
-    assert.match(selfOutput ?? "", /flipped to lever \(self\)/)
-    assert.match(readFileSync(join(selfDir, BLOCK_LOG_BASENAME), "utf8"), /arm-assert: OK \(LEVER\)/)
-    assert.deepEqual(JSON.parse(readFileSync(configPathFor(selfDir), "utf8")).plugin, LEVER2_ARM_PLUGIN_ENTRY)
-    withFakeEnv({ ABX_CONFIG: configPathFor(lever1EraDir), ABX_FLIP_LOG: join(lever1EraDir, FLIP_LOG_BASENAME) }, () => {
-      const config = cliConfigFor(lever1EraDir, { configPath: configPathFor(lever1EraDir), flipCmd: writeFakeFlip(lever1EraDir, "correct"), profile: LEVER2_PROFILE })
-      assert.equal(flipArmAndAssert(config, "LEVER"), null, "the lever1-era seed must fail the lever2 LEVER assertion")
-      assert.match(readFileSync(join(lever1EraDir, BLOCK_LOG_BASENAME), "utf8"), /arm-assert: FAILED \(live config does not match arm LEVER/)
-    })
-    withFakeEnv({ ABX_CONFIG: configPathFor(lever2EraDir), ABX_FLIP_LOG: join(lever2EraDir, FLIP_LOG_BASENAME) }, () => {
-      const config = cliConfigFor(lever2EraDir, { configPath: configPathFor(lever2EraDir), flipCmd: writeFakeFlip(lever2EraDir, "correct-lever2"), profile: LEVER1_PROFILE })
-      assert.equal(flipArmAndAssert(config, "LEVER"), null, "the lever2-era seed must fail the lever1 LEVER assertion")
-      assert.match(readFileSync(join(lever2EraDir, BLOCK_LOG_BASENAME), "utf8"), /arm-assert: FAILED \(live config does not match arm LEVER/)
-    })
-  } finally {
-    rmSync(selfDir, { recursive: true, force: true })
-    rmSync(lever1EraDir, { recursive: true, force: true })
-    rmSync(lever2EraDir, { recursive: true, force: true })
-  }
-})
-
-test("the lever2 profile runs the census corroboration and endpoint views profile-generically", () => {
-  assert.deepEqual(fullModeArms(LEVER2_PROFILE), ["ON-FULL", "LEVER"])
-  const rows = [endpointRow("OFF", 40, 1, 1), endpointRow("ON-FULL", 60, 1, 2), endpointRow("LEVER", 44, 1, 3)]
-  const { summaries, contrasts } = computeEndpoints(rows, LEVER2_PROFILE)
-  assert.deepEqual(summaries.map((summary) => summary.arm), ["OFF", "ON-FULL", "LEVER"])
-  assert.deepEqual(
-    contrasts.map((contrast) => [contrast.firstArm, contrast.secondArm]),
-    [
-      ["LEVER", "OFF"],
-      ["LEVER", "ON-FULL"],
-      ["ON-FULL", "OFF"],
-    ],
-  )
-  const corroborating = corroborationCensus(
-    [
-      { minute: 26, sessionId: "ses_full", generation: 1, evictions: 1 },
-      { minute: 36, sessionId: "ses_lever", generation: 2, evictions: 1 },
-    ],
-    LEVER2_PROFILE,
-  )
-  assert.deepEqual(uncorroboratedFullModeBlocks(corroborating), [])
-  const leaking = corroborationCensus(
-    [
-      { minute: 16, sessionId: "ses_off", generation: 1, evictions: 1 },
-      { minute: 26, sessionId: "ses_full", generation: 1, evictions: 1 },
-      { minute: 36, sessionId: "ses_lever", generation: 2, evictions: 1 },
-    ],
-    LEVER2_PROFILE,
-  )
-  assert.deepEqual(uncorroboratedFullModeBlocks(leaking), ["1"], "an OFF block carrying metrics must be named under lever2 too")
 })

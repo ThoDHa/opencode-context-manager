@@ -125,18 +125,15 @@ const LEVER_ON_FULL_ENTRY_TEXT =
   '[["./opencode-context-manager/plugin/context-manager.ts",{"manualMode":false,"watermarkTokens":12000,"agedReadEvictionMessages":30,"reasoningRetentionMessages":16}]]'
 const LEVER_LEVER_ENTRY_TEXT =
   '[["./opencode-context-manager/plugin/context-manager.ts",{"manualMode":false,"watermarkTokens":12000,"agedReadEvictionMessages":30,"reasoningRetentionMessages":16,"cacheAwareHints":true}]]'
-const LEVER2_LEVER_ENTRY_TEXT =
-  '[["./opencode-context-manager/plugin/context-manager.ts",{"manualMode":false,"watermarkTokens":12000,"agedReadEvictionMessages":30,"reasoningRetentionMessages":16,"cacheAwareHints":true,"cacheAwareDedup":true}]]'
 
-export type FakeFlipMode = "correct" | "correct-lever2" | "wrong-bool" | "swapped"
+export type FakeFlipMode = "correct" | "wrong-bool" | "swapped"
 
 /**
  * Writes the fake flip double (a bash script) into a temp bin dir. The fake
  * writes the arm's plugin entry into the ABX_CONFIG config file, appends the
  * arm-named line to ABX_FLIP_LOG, and prints a success line: the observable
- * effects the post-flip assertion reads. correct-lever2 writes the lever2
- * profile's seeds; the other modes inject the miswrite classes (inverted
- * manualMode, swapped arm entries).
+ * effects the post-flip assertion reads. Modes inject the miswrite classes
+ * (inverted manualMode, swapped arm entries).
  *
  * @param binDir the temp bin directory
  * @param mode the fake's behavior mode
@@ -160,15 +157,6 @@ case "${mode}" in
       cal-on-full) write_entry '[]'; log_flip "CAL-ON-FULL"; echo "flipped to cal-on-full" ;;
       off) write_entry '${ON_ENTRY_TEXT}'; log_flip "OFF"; echo "flipped to off" ;;
       lever) write_entry '${LEVER_ON_FULL_ENTRY_TEXT}'; log_flip "LEVER"; echo "flipped to lever" ;;
-    esac
-    exit 0
-    ;;
-  correct-lever2)
-    case "$1" in
-      on-full) write_entry '${LEVER_ON_FULL_ENTRY_TEXT}'; log_flip "ON-FULL"; echo "flipped to on-full" ;;
-      cal-on-full) write_entry '${LEVER_ON_FULL_ENTRY_TEXT}'; log_flip "CAL-ON-FULL"; echo "flipped to cal-on-full" ;;
-      off) write_entry '[]'; log_flip "OFF"; echo "flipped to off" ;;
-      lever) write_entry '${LEVER2_LEVER_ENTRY_TEXT}'; log_flip "LEVER"; echo "flipped to lever" ;;
     esac
     exit 0
     ;;

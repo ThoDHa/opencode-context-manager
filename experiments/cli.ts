@@ -88,10 +88,9 @@ export const SETTLE_SECONDS_DEFAULT = 5
 // instance; distinct from every nested CLI exit so a refusal is recognizable.
 export const FLOCK_CONFLICT_EXIT = 99
 const LOCK_HELD_ENV = "ABX_LOCKED"
-// The experiment-profile selection: AB_EXPERIMENT=lever1 or lever2 runs the
-// lever series; unset or "deep" runs the frozen deep profile; anything else
-// is an infra error (a silently-wrong profile would collect unattributable
-// data).
+// The experiment-profile selection: AB_EXPERIMENT=lever1 runs the lever
+// series; unset or "deep" runs the frozen deep profile; anything else is an
+// infra error (a silently-wrong profile would collect unattributable data).
 export const EXPERIMENT_PROFILE_ENV = "AB_EXPERIMENT"
 // The self-flip sentinel: the lever profile's default flip command. The
 // legacy bash flip tool has no lever case and writes 250k seeds, so the
@@ -170,8 +169,8 @@ export const resolveCmd = (name: string, fallbackDir: string): string => {
  * AB_SETTLE_SECONDS, AB_EXPERIMENT (the experiment profile; deep when
  * unset), plus the --chain/--calibration flags (CHAIN=1 and AB_CALIBRATION=1
  * accepted as aliases). The flip command defaults to the legacy bash tool,
- * except under the lever profiles where it defaults to the self flip (the
- * bash tool has no lever case); AB_FLIP_CMD overrides in both.
+ * except under the lever profile where it defaults to the self flip (the
+ * bash tool has no lever case); AB_FLIP_CMD overrides in both profiles.
  *
  * @param argv the CLI argument vector
  * @param env the process environment

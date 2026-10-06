@@ -4,12 +4,10 @@ import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import type { Plugin, PluginModule } from "@opencode-ai/plugin"
 import {
-  DEFAULT_CACHE_AWARE_DEDUP,
   DEFAULT_CACHE_AWARE_HINTS,
   DEFAULT_LIVE_STATE_DIR_BASENAME,
   DEFAULT_METRICS_DIR_SEGMENTS,
   DEFAULT_METRICS_FILE_BASENAME,
-  OPTION_CACHE_AWARE_DEDUP,
   OPTION_CACHE_AWARE_HINTS,
   PLUGIN_ID,
   PLUGIN_VERSION,
@@ -133,10 +131,8 @@ const FALLBACK_SESSION_KEY = "no-session"
 const DEDUP_MARKER = "[ctx-deduped]"
 const TOOL_ERROR_PREFIX = "[ctx-error] "
 const DEDUP_SUPERSEDED_LEAD = "identical call superseded by the newer output at message"
-const DEDUP_SUPERSEDED_EARLIER_LEAD = "identical call superseded by the earlier output at message"
 const DEDUP_RANGE_SUPERSEDED_LEAD = "range read superseded by the retained range at message"
 const DEDUP_FILE_SUPERSEDED_LEAD = "identical attachment superseded by the newer attachment at message"
-const DEDUP_FILE_SUPERSEDED_EARLIER_LEAD = "identical attachment superseded by the earlier attachment at message"
 const FILE_PART_TYPE = "file"
 const FILE_FILENAME_KEY = "filename"
 const TEXT_PART_TYPE = "text"
@@ -274,7 +270,6 @@ type ContextManagerOptions = {
   modelContextTokens?: Record<string, number>
   hintSubjects?: number
   cacheAwareHints?: boolean
-  cacheAwareDedup?: boolean
   protectedTools?: string[]
   protectedPatterns?: string[]
   stashLimit?: number
@@ -676,7 +671,6 @@ const resolveOptions = (raw: ContextManagerOptions = {}): ResolvedOptions => {
         ? raw.hintSubjects
         : DEFAULT_HINT_SUBJECTS,
     [OPTION_CACHE_AWARE_HINTS]: typeof raw.cacheAwareHints === "boolean" ? raw.cacheAwareHints : DEFAULT_CACHE_AWARE_HINTS,
-    [OPTION_CACHE_AWARE_DEDUP]: typeof raw.cacheAwareDedup === "boolean" ? raw.cacheAwareDedup : DEFAULT_CACHE_AWARE_DEDUP,
     protectedTools: Array.isArray(raw.protectedTools) && raw.protectedTools.every(isNonEmptyString) ? raw.protectedTools : DEFAULT_PROTECTED_TOOLS,
     protectedPatterns: protectedPatterns.flatMap((pattern) => {
       const compiled = compiledGlobOf(pattern)
@@ -905,8 +899,8 @@ const dedupKeyOf = (tool: string, input: Record<string, unknown>): string => JSO
 const reasoningIdentityOf = (text: unknown, metadata: unknown): string =>
   JSON.stringify([stableStringify(text), stableStringify(metadata)])
 
-const buildDedupTombstone = (tool: string, msgIndex: number, supersededLead: string): string =>
-  `${DEDUP_MARKER} ${tool} ${supersededLead} ${msgIndex}`
+const buildDedupTombstone = (tool: string, msgIndex: number): string =>
+  `${DEDUP_MARKER} ${tool} ${DEDUP_SUPERSEDED_LEAD} ${msgIndex}`
 
 const dedupTargetOf = (part: Record<string, unknown>): DedupTarget | undefined => {
   const outputRef = completedOutputOf(part)
@@ -919,31 +913,11 @@ const dedupTargetOf = (part: Record<string, unknown>): DedupTarget | undefined =
   return { stateRef: outputRef, tool, input }
 }
 
-// WHY cache-aware: a provider caches a request's processed prefix and hits
-// only while a later request byte-matches it from position zero, so a
-// mid-history rewrite re-prices everything after the cut at the uncached
-// rate. Gate-off, this family walks newest-first and tombstones the older
-// duplicate, so every recurring duplicate rewrites bytes deep inside the
-// already-cached prefix. With cacheAwareDedup the walk inverts: the older
-// occurrence is retained verbatim (its bytes stay prefix-valid) and the
-// new duplicate seat carries the pointer tombstone. The new seat sits in
-// the request's uncached tail and, once tombstoned, is never-cached
-// content the later passes skip, so suppression stops invalidating the
-// cached prefix. The gate-on leads say "earlier" because the retained
-// seat is now the earlier one; the pointer format ("at message N") is
-// unchanged.
-const dedupVisitOrder = (count: number, oldestFirst: boolean): number[] => {
-  const order: number[] = new Array(count)
-  for (let index = 0; index < count; index += 1) order[index] = oldestFirst ? index : count - 1 - index
-  return order
-}
-
 const deduplicateToolOutputs = (messages: MessageBundle[], options: ResolvedOptions): DedupOutcome => {
   const retainedByKey = new Map<string, RetainedDuplicate>()
-  const supersededLead = options.cacheAwareDedup ? DEDUP_SUPERSEDED_EARLIER_LEAD : DEDUP_SUPERSEDED_LEAD
   let tombstones = 0
   const tombstonedPairs: DedupedPairBytes[] = []
-  for (const msgIndex of dedupVisitOrder(messages.length, options.cacheAwareDedup)) {
+  for (let msgIndex = messages.length - 1; msgIndex >= 0; msgIndex -= 1) {
     for (const part of messages[msgIndex].parts) {
       const target = dedupTargetOf(part)
       if (target === undefined) continue
@@ -959,7 +933,7 @@ const deduplicateToolOutputs = (messages: MessageBundle[], options: ResolvedOpti
       }
       if (retained.supersedes) {
         const supersededBytes = target.stateRef.output.length + attachmentPayloadCharsOf(target.stateRef)
-        target.stateRef.output = buildDedupTombstone(retained.tool, retained.msgIndex, supersededLead)
+        target.stateRef.output = buildDedupTombstone(retained.tool, retained.msgIndex)
         stripStateAttachments(target.stateRef)
         tombstones += 1
         tombstonedPairs.push({ key, bytes: supersededBytes })
@@ -982,18 +956,17 @@ const fileDedupKeyOf = (file: FilePartFields): string => JSON.stringify([file.mi
 
 const fileDedupLabelOf = (file: FilePartFields): string => (file.filename.length > 0 ? file.filename : file.mime)
 
-const buildFileDedupTombstone = (label: string, msgIndex: number, supersededLead: string): string =>
-  `${DEDUP_MARKER} ${label} ${supersededLead} ${msgIndex}`
+const buildFileDedupTombstone = (label: string, msgIndex: number): string =>
+  `${DEDUP_MARKER} ${label} ${DEDUP_FILE_SUPERSEDED_LEAD} ${msgIndex}`
 
 const deduplicateFileAttachments = (messages: MessageBundle[], options: ResolvedOptions): DedupOutcome => {
   const retainedByKey = new Map<string, RetainedFileDuplicate>()
   const hotFromIndex = hotFromIndexOf(messages, options)
-  const supersededLead = options.cacheAwareDedup ? DEDUP_FILE_SUPERSEDED_EARLIER_LEAD : DEDUP_FILE_SUPERSEDED_LEAD
   let tombstones = 0
   const tombstonedPairs: DedupedPairBytes[] = []
-  for (const msgIndex of dedupVisitOrder(messages.length, options.cacheAwareDedup)) {
+  for (let msgIndex = messages.length - 1; msgIndex >= 0; msgIndex -= 1) {
     const messageParts = messages[msgIndex].parts
-    for (const partIndex of dedupVisitOrder(messageParts.length, options.cacheAwareDedup)) {
+    for (let partIndex = messageParts.length - 1; partIndex >= 0; partIndex -= 1) {
       const file = filePartOf(messageParts[partIndex])
       if (file === undefined) continue
       const key = fileDedupKeyOf(file)
@@ -1003,7 +976,7 @@ const deduplicateFileAttachments = (messages: MessageBundle[], options: Resolved
         continue
       }
       if (msgIndex >= hotFromIndex) continue
-      messageParts[partIndex] = { type: TEXT_PART_TYPE, text: buildFileDedupTombstone(retained.label, retained.msgIndex, supersededLead) }
+      messageParts[partIndex] = { type: TEXT_PART_TYPE, text: buildFileDedupTombstone(retained.label, retained.msgIndex) }
       tombstones += 1
       tombstonedPairs.push({ key, bytes: 0 })
     }
@@ -1046,10 +1019,8 @@ const rangeWindowOf = (part: Record<string, unknown>): { range: SubjectRange; st
 // cannot see: every distinct offset/limit pair is a distinct key, so the
 // same file is paid for once per window on every request. This pass
 // tombstones a contained window exactly the way file-part dedup tombstones
-// a superseded part: walking in the dedup family's retention direction
-// (newest first by default, oldest first under cacheAwareDedup, so the
-// retained read stays prefix-valid), a read whose [start, end) range
-// is fully contained in the retained read's range of the same
+// a superseded part: walking newest first, a read whose [start, end) range
+// is fully contained in a strictly newer retained read's range of the same
 // path becomes a text tombstone naming the retained read's message.
 // Containment only: merely overlapping or merely contiguous windows are
 // left alone because a contained window provably adds no unique lines,
@@ -1063,9 +1034,9 @@ const collapseRangeReads = (messages: MessageBundle[], options: ResolvedOptions)
   const retainedByPath = new Map<string, RangeReadWindow>()
   let collapsed = 0
   let collapsedBytes = 0
-  for (const msgIndex of dedupVisitOrder(messages.length, options.cacheAwareDedup)) {
+  for (let msgIndex = messages.length - 1; msgIndex >= 0; msgIndex -= 1) {
     const messageParts = messages[msgIndex].parts
-    for (const partIndex of dedupVisitOrder(messageParts.length, options.cacheAwareDedup)) {
+    for (let partIndex = messageParts.length - 1; partIndex >= 0; partIndex -= 1) {
       const window = rangeWindowOf(messageParts[partIndex])
       if (window === undefined || window.path === undefined) continue
       const retained = retainedByPath.get(window.path)

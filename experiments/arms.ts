@@ -47,7 +47,6 @@ export type PluginEntryOption = {
   agedReadEvictionMessages: number
   reasoningRetentionMessages: number
   cacheAwareHints?: boolean
-  cacheAwareDedup?: boolean
 }
 export type PluginEntry = [string, PluginEntryOption]
 
@@ -83,15 +82,6 @@ export const LEVER_ARM_PLUGIN_ENTRY: readonly PluginEntry[] = [
     { manualMode: false, watermarkTokens: 12000, agedReadEvictionMessages: 30, reasoningRetentionMessages: 16, cacheAwareHints: true },
   ],
 ]
-// The lever-2 series measures the cumulative stack: its LEVER arm carries
-// every landed lever key on top of the profile's ON-FULL seed, so the
-// per-lever attribution comes from LEVER/ON-FULL, not from key toggling.
-export const LEVER2_ARM_PLUGIN_ENTRY: readonly PluginEntry[] = [
-  [
-    "./opencode-context-manager/plugin/context-manager.ts",
-    { manualMode: false, watermarkTokens: 12000, agedReadEvictionMessages: 30, reasoningRetentionMessages: 16, cacheAwareHints: true, cacheAwareDedup: true },
-  ],
-]
 
 export const FLIP_ARG_BY_ARM = {
   OFF: "off",
@@ -125,7 +115,7 @@ export const ARM_BY_FLIP_ARG: ArmByFlipArg = {
 // deep profile is the frozen LRU-82 shape and stays the default everywhere;
 // a profile parameter omitted means deep.
 export type ExperimentProfile = {
-  name: "deep" | "lever1" | "lever2"
+  name: "deep" | "lever1"
   dataArms: readonly Arm[]
   pluginSeedByArm: Readonly<Partial<Record<FlipArm, readonly PluginEntry[]>>>
   corroboratesFullModeMetrics: boolean
@@ -167,29 +157,9 @@ export const LEVER1_PROFILE: ExperimentProfile = {
   ],
 }
 
-// The lever-2 series: the lever shape byte-identical at the schedule and
-// era layers, with the LEVER arm measuring the cumulative lever stack.
-export const LEVER2_PROFILE: ExperimentProfile = {
-  name: "lever2",
-  dataArms: LEVER_DATA_ARMS,
-  pluginSeedByArm: {
-    "ON-FULL": LEVER_ON_FULL_PLUGIN_ENTRY,
-    LEVER: LEVER2_ARM_PLUGIN_ENTRY,
-    "CAL-ON-FULL": LEVER_ON_FULL_PLUGIN_ENTRY,
-  },
-  corroboratesFullModeMetrics: true,
-  defaultsToSelfFlip: true,
-  contrasts: [
-    ["LEVER", "OFF"],
-    ["LEVER", "ON-FULL"],
-    ["ON-FULL", "OFF"],
-  ],
-}
-
 export const EXPERIMENT_PROFILES: Readonly<Record<ExperimentProfile["name"], ExperimentProfile>> = {
   deep: DEEP_PROFILE,
   lever1: LEVER1_PROFILE,
-  lever2: LEVER2_PROFILE,
 }
 
 /**

@@ -272,9 +272,7 @@ const DEDUP_LEAF_KEY_EARLY = "b"
 const DEDUP_NESTED_TOP_VALUE = 1
 const DEDUP_LEAF_VALUE_LATE = 2
 const DEDUP_LEAF_VALUE_EARLY = 3
-const DEDUP_SUPERSEDED_EARLIER_LEAD = "identical call superseded by the earlier output at message"
 const DEDUP_FILE_SUPERSEDED_LEAD = "identical attachment superseded by the newer attachment at message"
-const DEDUP_FILE_SUPERSEDED_EARLIER_LEAD = "identical attachment superseded by the earlier attachment at message"
 const FILE_MIME_TEXT = "text/plain"
 const FILE_MIME_PDF = "application/pdf"
 const FILE_URL = "file:///data/notes.txt"
@@ -668,12 +666,6 @@ const dedupTombstoneFor = (tool: string, msgIndex: number): string =>
 
 const fileDedupTombstoneFor = (label: string, msgIndex: number): string =>
   `${DEDUP_MARKER} ${label} ${DEDUP_FILE_SUPERSEDED_LEAD} ${msgIndex}`
-
-const dedupEarlierTombstoneFor = (tool: string, msgIndex: number): string =>
-  `${DEDUP_MARKER} ${tool} ${DEDUP_SUPERSEDED_EARLIER_LEAD} ${msgIndex}`
-
-const fileDedupEarlierTombstoneFor = (label: string, msgIndex: number): string =>
-  `${DEDUP_MARKER} ${label} ${DEDUP_FILE_SUPERSEDED_EARLIER_LEAD} ${msgIndex}`
 
 const recallToolArgs = async (hooks: HookMap, args: Record<string, unknown>, sessionID: string): Promise<unknown> =>
   (hooks as Record<string, Record<string, RecallToolDefinition>>)[TOOL_MAP_KEY][RECALL_TOOL_NAME].execute(args, { sessionID })
@@ -3008,134 +3000,6 @@ test("transform leaves a duplicate file attachment inside the recent window unto
 
   assert.deepEqual(bundle.messages[2].parts[0], fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME))
   assert.deepEqual(bundle.messages[3].parts[0], fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME))
-})
-
-test("transform with cacheAwareDedup off keeps the newest-occurrence direction across the dedup family", async () => {
-  const hooks = await loadPluginHooksWith({ cacheAwareDedup: false })
-  await setContextLimit(hooks, SESSION_ID, RANGE_COLLAPSE_SPACIOUS_CONTEXT_LIMIT)
-
-  const pairBundle = buildBundle([
-    [pathToolPart(DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES), fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME)],
-    ...fillerMessages(2),
-    [pathToolPart(DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES), fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME)],
-    ...fillerMessages(2),
-  ])
-  await runTransform(hooks, pairBundle)
-
-  assert.equal(toolPartAt(pairBundle.messages[0], 0).state.output, dedupTombstoneFor(READ_TOOL, 3))
-  assert.deepEqual(pairBundle.messages[0].parts[1], { type: "text", text: fileDedupTombstoneFor(FILE_FILENAME, 3) })
-  assert.equal(toolPartAt(pairBundle.messages[3], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
-  assert.deepEqual(pairBundle.messages[3].parts[1], fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME))
-
-  const rangeBundle = buildBundle([
-    [rangeReadPart(RANGE_COLLAPSE_PATH, 100, 50, MIN_EVICTABLE_BYTES)],
-    ...fillerMessages(2),
-    [rangeReadPart(RANGE_COLLAPSE_PATH, 80, 120, MIN_EVICTABLE_BYTES + 512)],
-    ...fillerMessages(),
-  ])
-  await runTransform(hooks, rangeBundle)
-
-  assert.deepEqual(rangeBundle.messages[0].parts[0], {
-    type: "text",
-    text: rangeTombstoneFor(RANGE_COLLAPSE_PATH, 100, 150, 3, 80, 200),
-  })
-  assert.equal(toolPartAt(rangeBundle.messages[3], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES + 512))
-})
-
-test("transform with cacheAwareDedup retains the older identical call verbatim and tombstones the newer seat", async () => {
-  const hooks = await loadPluginHooksWith({ cacheAwareDedup: true })
-
-  const bundle = buildBundle([
-    [pathToolPart(DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
-    ...fillerMessages(2),
-    [pathToolPart(DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
-    ...fillerMessages(2),
-  ])
-  await runTransform(hooks, bundle)
-
-  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
-  assert.equal(toolPartAt(bundle.messages[3], 0).state.output, dedupEarlierTombstoneFor(READ_TOOL, 0))
-})
-
-test("transform with cacheAwareDedup retains the older identical attachment verbatim and tombstones the newer seat", async () => {
-  const hooks = await loadPluginHooksWith({ cacheAwareDedup: true })
-
-  const bundle = buildBundle([
-    [fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME)],
-    [fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME)],
-    ...fillerMessages(RECENT_WINDOW_MESSAGES),
-  ])
-  await runTransform(hooks, bundle)
-
-  assert.deepEqual(bundle.messages[0].parts[0], fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME))
-  assert.deepEqual(bundle.messages[1].parts[0], { type: "text", text: fileDedupEarlierTombstoneFor(FILE_FILENAME, 0) })
-})
-
-test("transform with cacheAwareDedup collapses a newer contained window and retains the older read verbatim", async () => {
-  const hooks = await loadPluginHooksWith({ cacheAwareDedup: true })
-  await setContextLimit(hooks, SESSION_ID, RANGE_COLLAPSE_SPACIOUS_CONTEXT_LIMIT)
-
-  const bundle = buildBundle([
-    [rangeReadPart(RANGE_COLLAPSE_PATH, 80, 120, MIN_EVICTABLE_BYTES + 512)],
-    ...fillerMessages(2),
-    [rangeReadPart(RANGE_COLLAPSE_PATH, 100, 50, MIN_EVICTABLE_BYTES)],
-    ...fillerMessages(RECENT_WINDOW_MESSAGES),
-  ])
-  await runTransform(hooks, bundle)
-
-  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES + 512))
-  assert.deepEqual(bundle.messages[3].parts[0], {
-    type: "text",
-    text: rangeTombstoneFor(RANGE_COLLAPSE_PATH, 100, 150, 0, 80, 200),
-  })
-})
-
-test("transform with cacheAwareDedup leaves results unchanged on a second transform pass", async () => {
-  const hooks = await loadPluginHooksWith({ cacheAwareDedup: true })
-
-  const bundle = buildBundle([
-    [pathToolPart(DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
-    ...fillerMessages(2),
-    [pathToolPart(DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
-    ...fillerMessages(2),
-  ])
-  await runTransform(hooks, bundle)
-  const afterFirstPass = structuredClone(bundle)
-  await runTransform(hooks, bundle)
-
-  assert.deepEqual(bundle, afterFirstPass)
-  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
-  assert.equal(toolPartAt(bundle.messages[3], 0).state.output, dedupEarlierTombstoneFor(READ_TOOL, 0))
-})
-
-test("transform with cacheAwareDedup never tombstones a newer duplicate attachment inside the recent window", async () => {
-  const hooks = await loadPluginHooksWith({ cacheAwareDedup: true })
-
-  const bundle = buildBundle([
-    [fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME)],
-    ...fillerMessages(RECENT_WINDOW_MESSAGES + 1),
-    [fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME)],
-    ...fillerMessages(RECENT_WINDOW_MESSAGES - 1),
-  ])
-  await runTransform(hooks, bundle)
-
-  assert.deepEqual(bundle.messages[0].parts[0], fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME))
-  assert.deepEqual(bundle.messages[6].parts[0], fileAttachmentPart(FILE_MIME_TEXT, FILE_URL, FILE_FILENAME))
-})
-
-test("transform with cacheAwareDedup never tombstones a newer duplicate when the retained older output sits below the size floor", async () => {
-  const hooks = await loadPluginHooksWith({ cacheAwareDedup: true })
-
-  const bundle = buildBundle([
-    [pathToolPart(DEDUP_PATH, APPEARANCE_ONLY_OUTPUT_BYTES)],
-    ...fillerMessages(1),
-    [pathToolPart(DEDUP_PATH, THREE_ENTRY_OUTPUT_BYTES)],
-    ...fillerMessages(2),
-  ])
-  await runTransform(hooks, bundle)
-
-  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(APPEARANCE_ONLY_OUTPUT_BYTES))
-  assert.equal(toolPartAt(bundle.messages[2], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
 })
 
 test("transform never collapses file attachments that differ in url or mime", async () => {
