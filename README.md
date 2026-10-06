@@ -77,6 +77,8 @@ The plugin reads its options from the second argument opencode passes to the plu
 
 Options follow a drop-on-invalid discipline: a value failing the validation below is discarded and the documented default applies, so a mistyped option degrades to default behavior instead of blocking a session.
 
+Two options, `cacheAwareDedup` and `cacheAwareHints`, make the always-on passes prefix-friendly, and both rest on one cache model: providers cache a request's processed prefix and serve a cache hit only while a later request byte-matches that prefix from position zero, so every history mutation invalidates the cached prefix from the cut point forward and re-prices everything after the cut at the uncached rate. The options reshape how the always-on passes rewrite bytes (dedup suppression lands on the newer duplicate seat past the cached prefix, the hint seat rewrites only on a genuine membership change) while keeping their management value: duplicates still collapse to one retained copy, the working set still renders in the hint line. Both ship default off, are measured on a standardized exercise series, and stay off pending that measurement program's conclusion; the rows in the tables below document each option's exact semantics.
+
 ### Context limit and eviction
 
 | Option | Type | Default | Validation | Effect |
@@ -87,7 +89,7 @@ Options follow a drop-on-invalid discipline: a value failing the validation belo
 | `recentWindow` | `number` | `4` | number, 0 or more, floored | Messages treated as hot; shielded from eviction, input purge, and fence eviction, and the floor under reasoning retention |
 | `reasoningRetentionMessages` | `number` | unset | integer above 0; anything else falls back to unset; a set value below `recentWindow` clamps up to it | Reasoning retention: `reasoning` parts survive until older than this many messages from the list tail, independent of the hot window's other protections; unset keeps expiry at the `recentWindow` boundary |
 | `minEvictableBytes` | `number` | `2048` | 0 or more | Output size floor for evictability and for dedup supersede |
-| `cacheAwareDedup` | `boolean` | `false` | boolean; anything else falls back to false | Dedup direction: retains the older identical occurrence verbatim in dedup and range-read collapse and tombstones the newer duplicate seat instead, so suppression stops rewriting the provider-cached prefix |
+| `cacheAwareDedup` | `boolean` | `false` | boolean; anything else falls back to false | Dedup direction: inverts the walk of all three dedup passes (tool-output dedup, file-attachment dedup, range-read collapse) so the older occurrence is the one retained verbatim (the identical occurrence for tool-output and file dedup, the containing read for range-read collapse) and the newer duplicate seat or contained window carries the tombstone, keeping suppression's rewrites out of the provider-cached prefix |
 | `defaultContextTokens` | `number` | unset | finite and above 0 | Fallback context limit when no model limit was captured |
 | `modelContextTokens` | `Record<string, number>` | `{}` | per-entry finite and above 0 | Per `providerID/modelID` context-limit override |
 | `manualMode` | `boolean` | `false` | boolean; anything else falls back to false | Disables context-limit-driven eviction; measurement-only runs |
@@ -106,6 +108,7 @@ The two `*Messages` age options point in opposite directions, and reading either
 | `protectedTools` | `string[]` | `["task", "todowrite"]` | array of non-empty strings | Tool names never evicted |
 | `protectedPatterns` | `string[]` | `[]` | array of non-empty strings | Glob patterns protecting subjects and bash commands from eviction |
 | `hintSubjects` | `number` | `10` | integer, 0 or more (0 disables hints) | Cap on hot subjects in the hint line and the checkpoint |
+| `cacheAwareHints` | `boolean` | `false` | boolean; anything else falls back to false | Hint rendering: renders the hot-subjects hint line byte-stable (the subject's path as identifier, members sorted, no range numerals) with entry and exit hysteresis on membership, so the system prompt's hint seat rewrites only on a genuine membership change instead of every run |
 
 ### Advanced configuration
 
