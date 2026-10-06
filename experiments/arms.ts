@@ -47,6 +47,7 @@ export type PluginEntryOption = {
   agedReadEvictionMessages: number
   reasoningRetentionMessages: number
   cacheAwareHints?: boolean
+  mutationBatchCadence?: number
 }
 export type PluginEntry = [string, PluginEntryOption]
 
@@ -68,8 +69,8 @@ export const ON_DRY_PLUGIN_ENTRY: readonly PluginEntry[] = [
 ]
 
 // The lever-series seeds: every ON arm runs the 12k-watermark measurement
-// geometry the lever protocol pre-registered, and the LEVER arm adds the
-// lever-1 keys (cacheAwareHints) on top of the profile's ON-FULL seed.
+// geometry the lever protocol pre-registered, and each profile's LEVER arm
+// adds its lever keys on top of the profile's ON-FULL seed.
 export const LEVER_ON_FULL_PLUGIN_ENTRY: readonly PluginEntry[] = [
   [
     "./opencode-context-manager/plugin/context-manager.ts",
@@ -80,6 +81,12 @@ export const LEVER_ARM_PLUGIN_ENTRY: readonly PluginEntry[] = [
   [
     "./opencode-context-manager/plugin/context-manager.ts",
     { manualMode: false, watermarkTokens: 12000, agedReadEvictionMessages: 30, reasoningRetentionMessages: 16, cacheAwareHints: true },
+  ],
+]
+export const LEVER3_ARM_PLUGIN_ENTRY: readonly PluginEntry[] = [
+  [
+    "./opencode-context-manager/plugin/context-manager.ts",
+    { manualMode: false, watermarkTokens: 12000, agedReadEvictionMessages: 30, reasoningRetentionMessages: 16, cacheAwareHints: true, mutationBatchCadence: 3 },
   ],
 ]
 
@@ -115,7 +122,7 @@ export const ARM_BY_FLIP_ARG: ArmByFlipArg = {
 // deep profile is the frozen LRU-82 shape and stays the default everywhere;
 // a profile parameter omitted means deep.
 export type ExperimentProfile = {
-  name: "deep" | "lever1"
+  name: "deep" | "lever1" | "lever3"
   dataArms: readonly Arm[]
   pluginSeedByArm: Readonly<Partial<Record<FlipArm, readonly PluginEntry[]>>>
   corroboratesFullModeMetrics: boolean
@@ -157,9 +164,30 @@ export const LEVER1_PROFILE: ExperimentProfile = {
   ],
 }
 
+// The lever-3 series: the shared lever shape with the LEVER arm carrying the
+// cumulative cache-aware stack (hint stability plus the hygiene batch
+// cadence); the deep lever2 era name stays retired.
+export const LEVER3_PROFILE: ExperimentProfile = {
+  name: "lever3",
+  dataArms: LEVER_DATA_ARMS,
+  pluginSeedByArm: {
+    "ON-FULL": LEVER_ON_FULL_PLUGIN_ENTRY,
+    LEVER: LEVER3_ARM_PLUGIN_ENTRY,
+    "CAL-ON-FULL": LEVER_ON_FULL_PLUGIN_ENTRY,
+  },
+  corroboratesFullModeMetrics: true,
+  defaultsToSelfFlip: true,
+  contrasts: [
+    ["LEVER", "OFF"],
+    ["LEVER", "ON-FULL"],
+    ["ON-FULL", "OFF"],
+  ],
+}
+
 export const EXPERIMENT_PROFILES: Readonly<Record<ExperimentProfile["name"], ExperimentProfile>> = {
   deep: DEEP_PROFILE,
   lever1: LEVER1_PROFILE,
+  lever3: LEVER3_PROFILE,
 }
 
 /**
@@ -333,7 +361,7 @@ const canonicalJson = (value: unknown): string =>
  * The post-flip arm assertion's core: a parsed live config must carry exactly
  * the intended arm's plugin entry (deep equality carries the manualMode
  * boolean, the watermark, and every companion key, including the lever
- * profile's cacheAwareHints discriminator); OFF means an empty plugin list.
+ * profiles' discriminator keys); OFF means an empty plugin list.
  * An arm outside the profile carries no seed and matches nothing.
  *
  * @param config the parsed opencode config document

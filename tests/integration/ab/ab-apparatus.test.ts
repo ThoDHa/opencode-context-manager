@@ -14,6 +14,8 @@ import {
   DEEP_PROFILE,
   FLIP_LOG_BASENAME,
   LEVER1_PROFILE,
+  LEVER3_ARM_PLUGIN_ENTRY,
+  LEVER3_PROFILE,
   LEVER_ARM_PLUGIN_ENTRY,
   LEVER_ON_FULL_PLUGIN_ENTRY,
   SPAWN_LOG_BASENAME,
@@ -22,6 +24,7 @@ import {
   configMatchesArm,
   countEraFlips,
   eraDataCount,
+  isExperimentProfileName,
   FLIP_ARG_BY_ARM,
   formatFlipLine,
   formatParkLine,
@@ -1628,6 +1631,103 @@ test("the lever profile defaults the flip command to the self flip", () => {
   assert.equal(resolveCliConfig([], { AB_EXPERIMENT: "lever1" }).flipCmd, SELF_FLIP_COMMAND)
   assert.equal(resolveCliConfig([], { AB_EXPERIMENT: "lever1", AB_FLIP_CMD: "/bin/true" }).flipCmd, "/bin/true")
   assert.notEqual(resolveCliConfig([], {}).flipCmd, SELF_FLIP_COMMAND, "the frozen deep default keeps the legacy flip path")
+})
+
+// ---------------------------------------------------------------------------
+// Lever-3 experiment profile (LRU-85-7).
+// ---------------------------------------------------------------------------
+
+test("the lever3 profile's LEVER seed carries the cumulative cache-aware stack byte-exactly", () => {
+  assert.equal(
+    JSON.stringify(LEVER3_ARM_PLUGIN_ENTRY),
+    '[["./opencode-context-manager/plugin/context-manager.ts",{"manualMode":false,"watermarkTokens":12000,"agedReadEvictionMessages":30,"reasoningRetentionMessages":16,"cacheAwareHints":true,"mutationBatchCadence":3}]]',
+    "the lever3 LEVER seed must stay byte-identical",
+  )
+  assert.deepEqual(LEVER3_ARM_PLUGIN_ENTRY[0]![1], {
+    manualMode: false,
+    watermarkTokens: 12000,
+    agedReadEvictionMessages: 30,
+    reasoningRetentionMessages: 16,
+    cacheAwareHints: true,
+    mutationBatchCadence: 3,
+  })
+  assert.equal(LEVER3_ARM_PLUGIN_ENTRY[0]![0], LEVER_ARM_PLUGIN_ENTRY[0]![0], "every lever seed points at the same plugin path")
+  const lever3OnFull = LEVER3_PROFILE.pluginSeedByArm["ON-FULL"]!
+  assert.deepEqual(lever3OnFull, LEVER_ON_FULL_PLUGIN_ENTRY, "the lever3 ON-FULL seed is the shared 12k geometry")
+  assert.equal("cacheAwareHints" in lever3OnFull[0]![1], false, "the profile's ON-FULL seed carries no lever keys")
+  assert.equal(LEVER3_PROFILE.pluginSeedByArm["CAL-ON-FULL"], LEVER3_PROFILE.pluginSeedByArm["ON-FULL"], "the calibration token maps to the profile's ON-FULL seed")
+  assert.notEqual(LEVER3_PROFILE.pluginSeedByArm["LEVER"], LEVER1_PROFILE.pluginSeedByArm["LEVER"], "the lever profiles' LEVER seeds are distinct records")
+  assert.deepEqual(LEVER3_PROFILE.dataArms, LEVER1_PROFILE.dataArms)
+  assert.deepEqual(LEVER3_PROFILE.contrasts, LEVER1_PROFILE.contrasts)
+  assert.equal(LEVER3_PROFILE.corroboratesFullModeMetrics, true)
+  assert.equal(LEVER3_PROFILE.defaultsToSelfFlip, true)
+})
+
+test("configMatchesArm separates the lever profiles' series at the seed-assertion layer in both directions", () => {
+  assert.equal(configMatchesArm({ plugin: LEVER3_ARM_PLUGIN_ENTRY }, "LEVER", LEVER3_PROFILE), true)
+  assert.equal(configMatchesArm({ plugin: LEVER3_ARM_PLUGIN_ENTRY }, "LEVER", LEVER1_PROFILE), false, "the extra mutationBatchCadence key must fail the lever1 LEVER assertion")
+  assert.equal(configMatchesArm({ plugin: LEVER_ARM_PLUGIN_ENTRY }, "LEVER", LEVER3_PROFILE), false, "the missing mutationBatchCadence key must fail the lever3 LEVER assertion")
+  assert.equal(configMatchesArm({ plugin: LEVER3_ARM_PLUGIN_ENTRY }, "ON-FULL", LEVER3_PROFILE), false)
+  assert.equal(configMatchesArm({ plugin: LEVER_ON_FULL_PLUGIN_ENTRY }, "ON-FULL", LEVER3_PROFILE), true)
+  assert.equal(configMatchesArm({ plugin: LEVER_ON_FULL_PLUGIN_ENTRY }, CALIBRATION_ARM, LEVER3_PROFILE), true, "the calibration token maps to the profile's ON-FULL seed")
+  assert.equal(configMatchesArm({ plugin: [] }, "OFF", LEVER3_PROFILE), true)
+  assert.equal(configMatchesArm({ plugin: LEVER3_ARM_PLUGIN_ENTRY }, "OFF", LEVER3_PROFILE), false)
+  assert.equal(configMatchesArm({ plugin: ON_PLUGIN_ENTRY }, "ON-FULL", LEVER3_PROFILE), false, "the frozen 250k seed is not a lever-profile seed")
+  assert.equal(configMatchesArm(null, "LEVER", LEVER3_PROFILE), false)
+})
+
+test("applyArmToConfig applies the lever3 profile's seeds and refuses arms outside the profile", () => {
+  const flipped = applyArmToConfig({ model: "test-model", theme: "dark", plugin: [] as unknown[] }, "LEVER", LEVER3_PROFILE) as { model: string; theme: string; plugin: unknown }
+  assert.equal(flipped.model, "test-model")
+  assert.equal(flipped.theme, "dark")
+  assert.deepEqual(flipped.plugin, LEVER3_ARM_PLUGIN_ENTRY)
+  const onFull = applyArmToConfig({ plugin: [] }, "ON-FULL", LEVER3_PROFILE) as { plugin: unknown }
+  assert.deepEqual(onFull.plugin, LEVER_ON_FULL_PLUGIN_ENTRY)
+  const off = applyArmToConfig({ plugin: LEVER3_ARM_PLUGIN_ENTRY }, "OFF", LEVER3_PROFILE) as { plugin: unknown }
+  assert.deepEqual(off.plugin, [])
+  assert.throws(() => applyArmToConfig({ plugin: [] }, "ON-DRY", LEVER3_PROFILE), /no plugin seed in the lever3 profile/)
+})
+
+test("the lever3 profile rides the identical mirrored 18-block schedule as lever1", () => {
+  const lever3Schedule = Array.from({ length: TOTAL_DATA_BLOCKS }, (_, index) => armForDataBlock(index + 1, LEVER3_PROFILE))
+  assert.deepEqual(lever3Schedule, [...LEVER_SCHEDULE])
+  assert.deepEqual(Array.from({ length: TOTAL_DATA_BLOCKS }, (_, index) => armForDataBlock(index + 1, LEVER1_PROFILE)), lever3Schedule, "the lever profiles ride one shared schedule")
+  for (const arm of new Set<string>(LEVER_SCHEDULE)) {
+    const indices = lever3Schedule.map((scheduleArm, index) => (scheduleArm === arm ? index + 1 : 0)).filter((index) => index > 0)
+    assert.equal(indices.length, 6, `arm ${arm} holds six runs`)
+    const mean = indices.reduce((sum, index) => sum + index, 0) / indices.length
+    assert.equal(mean, 9.5, `arm ${arm} mean run index`)
+  }
+})
+
+test("readDeepEra separates the lever3 series from the frozen era in both directions", () => {
+  const lever3Era = readDeepEra(flipLogText(LEVER_SCHEDULE), LEVER3_PROFILE)
+  assert.equal(eraDataCount(lever3Era), 18)
+  assert.equal(validateDeepRotation(lever3Era, LEVER3_PROFILE), null)
+  const frozenReaderOnLever3Log = readDeepEra(flipLogText(LEVER_SCHEDULE))
+  assert.equal(validateDeepRotation(frozenReaderOnLever3Log) === null, false, "the frozen reader must refuse a lever3 history")
+  const lever3ReaderOnFrozenLog = readDeepEra(flipLogText(SCHEDULE), LEVER3_PROFILE)
+  assert.equal(validateDeepRotation(lever3ReaderOnFrozenLog, LEVER3_PROFILE) === null, false, "the lever3 reader must refuse a frozen deep history")
+})
+
+test("resolveCliConfig selects lever3 with the self-flip default and the archived lever2 name is not a profile", () => {
+  const config = resolveCliConfig([], { AB_EXPERIMENT: "lever3" })
+  assert.equal(config.profile, LEVER3_PROFILE)
+  assert.equal(config.flipCmd, SELF_FLIP_COMMAND, "a lever profile defaults to the self flip")
+  assert.equal(resolveCliConfig([], { AB_EXPERIMENT: "lever3", AB_FLIP_CMD: "/bin/true" }).flipCmd, "/bin/true")
+  assert.equal(isExperimentProfileName("lever3"), true)
+  assert.equal(isExperimentProfileName("lever2"), false, "the reverted lever2 era name must not resolve to a profile")
+})
+
+test("main refuses the archived lever2 experiment name", async () => {
+  const temp = tempDir("ab-lever3-archived-")
+  try {
+    const exitCode = await runCli(["not-a-subcommand"], { AB_HOME: join(temp, "home"), AB_EXPERIMENT: "lever2" })
+    assert.equal(exitCode, 1, "the archived lever2 name refuses with exit 1")
+    assert.match(readFileSync(join(temp, "home", BLOCK_LOG_BASENAME), "utf8"), /invalid AB_EXPERIMENT: lever2/)
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
 })
 
 test("the flip subcommand applies the active profile's seed and refuses unknown or out-of-profile arms", async () => {
