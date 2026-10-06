@@ -87,6 +87,7 @@ Options follow a drop-on-invalid discipline: a value failing the validation belo
 | `recentWindow` | `number` | `4` | number, 0 or more, floored | Messages treated as hot; shielded from eviction, input purge, and fence eviction, and the floor under reasoning retention |
 | `reasoningRetentionMessages` | `number` | unset | integer above 0; anything else falls back to unset; a set value below `recentWindow` clamps up to it | Reasoning retention: `reasoning` parts survive until older than this many messages from the list tail, independent of the hot window's other protections; unset keeps expiry at the `recentWindow` boundary |
 | `minEvictableBytes` | `number` | `2048` | 0 or more | Output size floor for evictability and for dedup supersede |
+| `cacheAwareDedup` | `boolean` | `false` | boolean; anything else falls back to false | Dedup direction: retains the older identical occurrence verbatim in dedup and range-read collapse and tombstones the newer duplicate seat instead, so suppression stops rewriting the provider-cached prefix |
 | `defaultContextTokens` | `number` | unset | finite and above 0 | Fallback context limit when no model limit was captured |
 | `modelContextTokens` | `Record<string, number>` | `{}` | per-entry finite and above 0 | Per `providerID/modelID` context-limit override |
 | `manualMode` | `boolean` | `false` | boolean; anything else falls back to false | Disables context-limit-driven eviction; measurement-only runs |

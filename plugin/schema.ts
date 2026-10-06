@@ -17,6 +17,8 @@ export const DEFAULT_LIVE_STATE_DIR_BASENAME = "context-state"
 // default-off until a measurement arm shows the cache win.
 export const OPTION_CACHE_AWARE_HINTS = "cacheAwareHints"
 export const DEFAULT_CACHE_AWARE_HINTS = false
+export const OPTION_CACHE_AWARE_DEDUP = "cacheAwareDedup"
+export const DEFAULT_CACHE_AWARE_DEDUP = false
 
 // Shared by both entry modules so their registrations never drift.
 export const PLUGIN_ID = "context-manager"
