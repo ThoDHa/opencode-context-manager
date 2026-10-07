@@ -10,6 +10,7 @@ import { JSON_INDENT_SPACES, orderedRenderedSubjectsOf } from "./vocabulary.ts"
 import type { HotSubject } from "./vocabulary.ts"
 import { RAW_COUNTER_KEYS, totalsOf, withSessionMetricsEntry } from "./state.ts"
 import type { AdvisoryResult, CumulativeCounters, LastRunMetrics, MetricsStore, PersistedContextLimitSeed, PersistedCounters, PersistedTotals, RawCounterKey, RetentionBreakdown, RunOutcome, SessionMetrics } from "./state.ts"
+import type { SessionPageStore } from "./page-store.ts"
 
 const HYGIENE_COPY_DISABLED_MAX_BYTES = 0
 
@@ -22,18 +23,6 @@ const METRICS_ROTATION_SUFFIX = ".1"
 const METRICS_COALESCING_DISABLED_MS = 0
 
 export type PruneThrottle = { lastScanMs: number }
-
-export type PageEntry = {
-  output: string
-  tool: string
-  subject: string
-  msgIndex: number
-  partIndex: number
-  attachments?: unknown[]
-  stashSlot?: number
-}
-
-export type SessionPageStore = Map<string, PageEntry>
 
 type SessionCheckpoint = {
   ts: string

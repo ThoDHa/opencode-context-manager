@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto"
-import { appendFile, readFile } from "node:fs/promises"
 import type { Plugin, PluginModule } from "@opencode-ai/plugin"
 import { PLUGIN_ID } from "./schema.ts"
 
@@ -103,25 +102,23 @@ import {
   rememberError,
   rememberUniqueKey,
   totalsOf,
-  withSessionMetricsEntry,
 } from "./state.ts"
 import type { PruneThrottle } from "./persistence.ts"
 import {
   appendHygieneCopy,
-  isRecord,
-  logRotationIsDue,
-  METRICS_ROTATION_DISABLED_MAX_BYTES,
   migrateLegacyDefaultPaths,
   newestPersistedTotalsOf,
   PRUNE_SCAN_NEVER,
   recordMetricsLine,
   recordSessionCheckpoint,
-  rotateMetricsLogPastCap,
 } from "./persistence.ts"
+import type { PageEntry, PageStoreBySession, PageStoreGuard, SessionPageStore } from "./page-store.ts"
+import { pagesForSession, pageStoreMatchesFor, recordPageStoreLines, storeEvictedPage } from "./page-store.ts"
 
 export { ADVISORY_BAND_RATIO_DEFAULT, DEFAULT_INGESTION_HYGIENE_ROTATION_MAX_BYTES, DEFAULT_METRICS_ROTATION_MAX_BYTES, DEFAULT_PAGE_STORE_ROTATION_MAX_BYTES } from "./options.ts"
 export { METRIC_NUMBER_KEYS, METRICS_CURSOR_KEYS, RAW_COUNTER_KEYS } from "./state.ts"
 export type { MetricsCursorKey } from "./state.ts"
+export { PAGE_STORE_SCHEMA_VERSION } from "./page-store.ts"
 
 // Cache-aware hint hysteresis: a subject enters the stable line only after
 // HINT_ENTRY_TOUCHES accumulated live touches and leaves only after
@@ -181,12 +178,6 @@ const TOOL_ERROR_PREFIX = "[ctx-error] "
 // in the candidate sort: a reloaded output is demonstrably needed again, so
 // it re-evicts five messages later than its recency alone would place it.
 const FAULT_PENALTY_MESSAGES = 5
-// The page-store line contract's own version, stamped on every new line so
-// mixed-version stores classify line by line: a legacy unstamped line reads
-// as this version (v1 is the unstamped shape plus the field), a strictly
-// newer version is refused rather than interpreted, and refusal halts this
-// process's appends and rotation so it cannot bury a newer build's pages.
-export const PAGE_STORE_SCHEMA_VERSION = 1
 const DESCRIBE_TOOL_NAME = "describe"
 const DESCRIBE_TOOL_DESCRIPTION =
   "Return live metrics for the Context Manager in this session: eviction counters, expired reasoning counts, faults (post-eviction re-references of evicted subjects), session page store occupancy, the effective context limit and its headroom, and the most recent transform run's token estimate; also the newest run's declared omissions (tool evictions, expired reasoning parts, evicted fenced blocks) with the recall reload pointer when one exists, the newest run's retention audit over the live tool-output pool when one exists, the manual-mode dry run when armed, the newest run's advisory pressure-band preview when the estimate enters the band, the newest run's post-transform composition (tool outputs, text, retained reasoning), the echoed option surface including charsPerToken, the remembered-evicted-subjects bound, and the protected tools and patterns, and the last transform error when one occurred."
@@ -227,22 +218,6 @@ type EvictableEntry = {
   subjects: Subject[]
 }
 
-// The instance-level downgrade-refusal fact, the PruneThrottle pattern: one
-// flag per plugin process, set the first time any walk of the store (the
-// recall walk or the writer's pre-rename walk) classifies a line whose
-// schema version is newer than this build's, and never cleared, so the
-// process stops managing the store for its remaining lifetime.
-type PageStoreGuard = { newerSchemaObserved: boolean }
-
-// One parsed store line's relation to this build's schema version: absent
-// or equal admits the line under the current shape, strictly greater is a
-// newer writer's line this build must never interpret, and anything else is
-// corruption the existing invalid-line skip covers.
-type PageStoreSchemaVerdict =
-  | { kind: "admissible" }
-  | { kind: "invalid" }
-  | { kind: "newer"; observed: number }
-
 type StatsSource = {
   options: ResolvedOptions
   limits: Map<string, ContextLimitEntry>
@@ -258,8 +233,6 @@ type RetainedFileDuplicate = { msgIndex: number; label: string }
 type DedupTarget = { stateRef: { output: string; attachments?: unknown }; tool: string; input: Record<string, unknown> }
 
 type DedupOutcome = { tombstones: number; tombstonedPairs: DedupedPairBytes[] }
-
-type PageStoreBySession = Map<string, SessionPageStore>
 
 const dedupKeyOf = (tool: string, input: Record<string, unknown>): string => JSON.stringify([tool, stableStringify(input)])
 
@@ -716,34 +689,6 @@ const evictLargeUserFences = (messages: MessageBundle[], options: ResolvedOption
   return { blocks, bytes, pagesDropped }
 }
 
-const pageKeyOf = (tool: string, subject: string, msgIndex: number, partIndex: number, stashSlot?: number): string =>
-  `${tool}:${subject}:${msgIndex}:${partIndex}${stashSlot === undefined ? "" : `:${stashSlot}`}`
-
-const pagesForSession = (pageStores: PageStoreBySession, sessionKey: string, sessionBound: number): SessionPageStore => {
-  const touched = touchMapEntry(pageStores, sessionKey)
-  if (touched !== undefined) return touched
-  trimMapToBound(pageStores, sessionBound)
-  const created: SessionPageStore = new Map()
-  pageStores.set(sessionKey, created)
-  return created
-}
-
-const trimPages = (pageStore: SessionPageStore, limit: number): number => {
-  let dropped = 0
-  while (pageStore.size > limit) {
-    const oldest = pageStore.keys().next()
-    if (oldest.done === true) break
-    pageStore.delete(oldest.value)
-    dropped += 1
-  }
-  return dropped
-}
-
-const storeEvictedPage = (pageStore: SessionPageStore, entry: PageEntry, limit: number): number => {
-  pageStore.set(pageKeyOf(entry.tool, entry.subject, entry.msgIndex, entry.partIndex, entry.stashSlot), entry)
-  return trimPages(pageStore, limit)
-}
-
 const pageMissTextFor = (subject: string): string =>
   `${STASH_MARKER} ${STASH_MISS_LEAD} "${subject}"; ${STASH_MISS_HINT}.`
 
@@ -802,142 +747,6 @@ const attachmentSummaryOf = (attachment: unknown): string => {
 
 const pageAttachmentsLineFor = (attachments: unknown[]): string =>
   `${STASH_MARKER} ${STASH_ATTACHMENTS_LEAD}: ${attachments.map(attachmentSummaryOf).join(SUBJECT_SEPARATOR)}; ${STASH_ATTACHMENT_DROPPED_TAIL}.`
-
-// The store's line shape, validated field by field: a line failing any
-// required field is skipped (per-line tolerance, mirroring the log seeder's
-// corrupt-line skip) rather than failing the whole read.
-const pageStoreLineOf = (parsed: unknown): PageEntry | undefined => {
-  if (!isRecord(parsed)) return undefined
-  const output = parsed["output"]
-  const tool = parsed["tool"]
-  const subject = parsed["subject"]
-  const msgIndex = parsed["msgIndex"]
-  const partIndex = parsed["partIndex"]
-  if (typeof output !== "string" || typeof tool !== "string" || typeof subject !== "string") return undefined
-  if (typeof msgIndex !== "number" || typeof partIndex !== "number") return undefined
-  const attachments = parsed["attachments"]
-  if (attachments !== undefined && !Array.isArray(attachments)) return undefined
-  const stashSlot = parsed["stashSlot"]
-  if (stashSlot !== undefined && typeof stashSlot !== "number") return undefined
-  return {
-    output,
-    tool,
-    subject,
-    msgIndex,
-    partIndex,
-    ...(stashSlot === undefined ? {} : { stashSlot }),
-    ...(attachments === undefined ? {} : { attachments }),
-  }
-}
-
-const pageStoreSchemaVerdictOf = (parsed: unknown): PageStoreSchemaVerdict => {
-  const schemaVersion = isRecord(parsed) ? parsed["schemaVersion"] : undefined
-  if (schemaVersion === undefined) return { kind: "admissible" }
-  if (typeof schemaVersion !== "number" || !Number.isFinite(schemaVersion)) return { kind: "invalid" }
-  if (schemaVersion > PAGE_STORE_SCHEMA_VERSION) return { kind: "newer", observed: schemaVersion }
-  if (schemaVersion === PAGE_STORE_SCHEMA_VERSION) return { kind: "admissible" }
-  return { kind: "invalid" }
-}
-
-const pageStoreSchemaErrorFor = (observed: number | undefined): string =>
-  observed === undefined
-    ? `the page store holds lines from a newer schema version than this build's ${PAGE_STORE_SCHEMA_VERSION}; appends and rotation are halted to leave the newer store untouched`
-    : `the page store holds schemaVersion ${observed} lines but this build writes ${PAGE_STORE_SCHEMA_VERSION}; appends and rotation are halted to leave the newer store untouched`
-
-const recordPageStoreSchemaError = (
-  metrics: MetricsStore,
-  sessionKey: string,
-  sessionBound: number,
-  observed: number | undefined,
-): void =>
-  withSessionMetricsEntry(metrics, sessionKey, sessionBound, (entry) => {
-    entry.pageStoreSchemaError ??= pageStoreSchemaErrorFor(observed)
-  })
-
-// The store's line loop, shared by the recall walk (classify and match in
-// one pass) and the writer's pre-rename observation walk: read and parse
-// failures degrade to visiting nothing, a corrupt or unreadable store being
-// a clean outcome, never a thrown error.
-const pageStoreParsedLines = async (options: ResolvedOptions, visit: (parsed: unknown) => void): Promise<void> => {
-  let content: string
-  try {
-    content = await readFile(options.pageStorePath, "utf8")
-  } catch {
-    return
-  }
-  for (const line of content.split("\n")) {
-    const trimmed = line.trim()
-    if (trimmed.length === 0) continue
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(trimmed)
-    } catch {
-      continue
-    }
-    visit(parsed)
-  }
-}
-
-// The observation side effect both walks share: a newer-schema line sets
-// the instance guard permanently and records the observing session's
-// diagnostic, the message keeping the first observed version.
-const observePageStoreSchemaVerdict = (
-  verdict: PageStoreSchemaVerdict,
-  guard: PageStoreGuard,
-  metrics: MetricsStore,
-  sessionKey: string,
-  sessionBound: number,
-): void => {
-  if (verdict.kind !== "newer") return
-  guard.newerSchemaObserved = true
-  recordPageStoreSchemaError(metrics, sessionKey, sessionBound, verdict.observed)
-}
-
-// Cross-session pages for one subject, read fresh per miss (misses are the
-// rare path) in file order, so the last matching line is the newest page.
-// Any read or parse failure degrades to no pages: a corrupt or unreadable
-// store is a clean miss, never a thrown tool error. The same pass classifies
-// each line's schema version: newer-version lines are skipped uninterpreted
-// and flip the instance guard, so this process's writer halts before it can
-// bury them.
-const pageStoreMatchesFor = async (
-  options: ResolvedOptions,
-  subject: string,
-  guard: PageStoreGuard,
-  metrics: MetricsStore,
-  sessionKey: string,
-): Promise<PageEntry[]> => {
-  if (options.pageStore === false) return []
-  const matches: PageEntry[] = []
-  await pageStoreParsedLines(options, (parsed) => {
-    const verdict = pageStoreSchemaVerdictOf(parsed)
-    observePageStoreSchemaVerdict(verdict, guard, metrics, sessionKey, options.metricsSessions)
-    if (verdict.kind !== "admissible") return
-    const entry = pageStoreLineOf(parsed)
-    if (entry !== undefined && entry.subject === subject) matches.push(entry)
-  })
-  return matches
-}
-
-// The writer's rotation-time observation walk, run immediately before the
-// rotation rename so the sole burying operation can never fire unobserved:
-// an instance that only evicts and never runs an observing recall still
-// halts at its next rotation boundary instead of renaming a newer build's
-// pages out of every reader's reach.
-const pageStoreWalkObservesNewerSchema = async (
-  options: ResolvedOptions,
-  guard: PageStoreGuard,
-  metrics: MetricsStore,
-  sessionKey: string,
-): Promise<boolean> => {
-  let observed = false
-  await pageStoreParsedLines(options, (parsed) => {
-    const verdict = pageStoreSchemaVerdictOf(parsed)
-    observePageStoreSchemaVerdict(verdict, guard, metrics, sessionKey, options.metricsSessions)
-    if (verdict.kind === "newer") observed = true
-  })
-  return observed
-}
 
 const pageStoreOlderLineFor = (subject: string, count: number): string =>
   `${STASH_MARKER} ${PAGE_STORE_OLDER_LEAD} "${subject}": ${count}.`
@@ -1017,73 +826,6 @@ const executeReadEvicted = async (
   const older = matches.slice(0, -1)
   const output = older.length === 0 ? newest.output : `${newest.output}\n${olderMatchesLineFor(subject, older)}`
   return newest.attachments === undefined ? output : `${output}\n${pageAttachmentsLineFor(newest.attachments)}`
-}
-
-// The persistent half of the stash: every entry the evictor stashed this run
-// becomes one JSONL line beside the metrics log, so a later session's
-// recall can reload an original its own in-memory stash never held.
-// Same discipline as the hygiene copy: rotation through the generic helper,
-// one append per run, a failed write surfaced as pageStoreWriteError on the
-// session's diagnostics without ever blocking the eviction, and both the
-// feature switch and a cap of 0 disabling writes entirely.
-const recordPageStoreLines = async (
-  options: ResolvedOptions,
-  metrics: MetricsStore,
-  sessionKey: string,
-  entries: PageEntry[],
-  pageStoreGuard: PageStoreGuard,
-): Promise<void> => {
-  if (options.pageStore === false || entries.length === 0) return
-  if (options.pageStoreRotationMaxBytes === METRICS_ROTATION_DISABLED_MAX_BYTES) return
-  // The downgrade refusal: once this instance has observed a newer-schema
-  // line, both the append and the rotation halt, so this older build can
-  // neither bury newer lines into the .1 generation nor mix its own older
-  // writes into the newer build's store. The diagnostic lands on the
-  // evicting session even when another session's recall set the guard, so
-  // an evict-only session still learns why its pages stopped persisting.
-  if (pageStoreGuard.newerSchemaObserved) {
-    recordPageStoreSchemaError(metrics, sessionKey, options.metricsSessions, undefined)
-    return
-  }
-  // One clock read per run: the lines a single eviction produced share one
-  // timestamp instead of drifting across the walk.
-  const ts = new Date(options.now()).toISOString()
-  try {
-    const pageStoreJsonLine = `${entries
-      .map((entry) =>
-        JSON.stringify({
-          ts,
-          schemaVersion: PAGE_STORE_SCHEMA_VERSION,
-          session: sessionKey,
-          tool: entry.tool,
-          subject: entry.subject,
-          msgIndex: entry.msgIndex,
-          partIndex: entry.partIndex,
-          ...(entry.stashSlot === undefined ? {} : { stashSlot: entry.stashSlot }),
-          output: entry.output,
-          ...(entry.attachments === undefined ? {} : { attachments: entry.attachments }),
-        }),
-      )
-      .join("\n")}\n`
-    // The schema-classification walk rides the rotation boundary only: it
-    // runs exactly when a rename is about to fire, so the sole burying
-    // operation can never fire unobserved while ordinary appends pay one
-    // size stat instead of a full-store walk. The pending line is not yet
-    // in the file, so the walk sees exactly what a rename would bury, and
-    // an observation stops the run before either half fires.
-    const incomingBytes = Buffer.byteLength(pageStoreJsonLine)
-    if (await logRotationIsDue(options.pageStorePath, incomingBytes, options.pageStoreRotationMaxBytes)) {
-      if (await pageStoreWalkObservesNewerSchema(options, pageStoreGuard, metrics, sessionKey)) return
-      await rotateMetricsLogPastCap(options.pageStorePath, incomingBytes, options.pageStoreRotationMaxBytes)
-    }
-    await appendFile(options.pageStorePath, pageStoreJsonLine)
-    const entry = touchMapEntry(metrics, sessionKey)
-    if (entry !== undefined) delete entry.pageStoreWriteError
-  } catch (error) {
-    withSessionMetricsEntry(metrics, sessionKey, options.metricsSessions, (target) => {
-      target.pageStoreWriteError = error instanceof Error ? error.message : String(error)
-    })
-  }
 }
 
 // The effective eviction watermark in tokens: the absolute watermarkTokens
