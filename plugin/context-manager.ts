@@ -8,27 +8,18 @@ import {
   chatParamsHookBody,
   contextLimitForRun,
 } from "./context-limits.ts"
-import type { FilePartFields, MessageBundle } from "./messages.ts"
+import type { MessageBundle } from "./messages.ts"
 import type { ContextManagerOptions, ResolvedOptions } from "./options.ts"
-import type { HotSubject, Subject, SubjectRange } from "./vocabulary.ts"
+import type { HotSubject, Subject } from "./vocabulary.ts"
 import {
   ATTACHMENT_MIME_KEY,
   ATTACHMENT_URL_KEY,
   attachmentPayloadCharsOf,
-  completedOutputOf,
-  ESCAPE_SPAN_PATTERN,
   estimateTokens,
-  filePartOf,
   hotFromIndexOf,
   nonEmptyAttachmentsOf,
-  REASONING_METADATA_KEY,
-  REASONING_PART_TYPE,
-  REASONING_TEXT_KEY,
-  retentionFromIndexOf,
   runCompositionOf,
-  stableStringify,
   stripStateAttachments,
-  TEXT_PART_TYPE,
 } from "./messages.ts"
 import {
   ADVISORY_SUBJECTS_BOUND,
@@ -48,26 +39,17 @@ import {
 import {
   BASH_TOOL_NAME,
   boundedSingleLineOf,
-  buildFenceTombstone,
   buildOutputDigest,
   buildReloadPointer,
   buildTombstone,
-  DEDUP_FILE_SUPERSEDED_LEAD,
   DEDUP_MARKER,
-  DEDUP_RANGE_SUPERSEDED_LEAD,
-  DEDUP_SUPERSEDED_LEAD,
   EVICTION_MARKER,
   HINT_LINE_PREFIX,
   JSON_INDENT_SPACES,
   LEGACY_DEDUP_MARKER,
   LEGACY_EVICTION_MARKER,
   LEGACY_HINT_LINE_PREFIX,
-  LEGACY_PURGED_INPUT_MARKER,
   orderedRenderedSubjectsOf,
-  PATH_INPUT_KEYS,
-  PURGED_INPUT_MARKER,
-  rangeOf,
-  READ_TOOL_NAME,
   RECALL_TOOL_NAME,
   renderSubject,
   startsWithEitherGeneration,
@@ -80,7 +62,6 @@ import type {
   DryRunResult,
   EvictedEntryInfo,
   EvictionResult,
-  FenceEviction,
   MetricsHydration,
   MetricsStore,
   PersistedTotals,
@@ -96,11 +77,9 @@ import {
   countUniqueDedupedPairs,
   createSessionMetrics,
   DEFAULT_REMEMBERED_FAULT_SUBJECTS,
-  DEFAULT_REMEMBERED_REASONING_PARTS,
   metricsForSession,
   recordRunOutcome,
   rememberError,
-  rememberUniqueKey,
   totalsOf,
 } from "./state.ts"
 import type { PruneThrottle } from "./persistence.ts"
@@ -114,6 +93,10 @@ import {
 } from "./persistence.ts"
 import type { PageEntry, PageStoreBySession, PageStoreGuard, SessionPageStore } from "./page-store.ts"
 import { pagesForSession, pageStoreMatchesFor, recordPageStoreLines, storeEvictedPage } from "./page-store.ts"
+import { deduplicateFileAttachments, deduplicateToolOutputs } from "./dedup.ts"
+import type { HygieneCadenceBySession } from "./hygiene.ts"
+import { expireAgedReasoning, fireCollapsePass, purgeErroredToolInputs, REASONING_EXPIRY_NONE, resolveHygieneBatch, stripLegacyHintParts, stripTerminalNoiseFrom } from "./hygiene.ts"
+import { evictLargeUserFences } from "./fences.ts"
 
 export { ADVISORY_BAND_RATIO_DEFAULT, DEFAULT_INGESTION_HYGIENE_ROTATION_MAX_BYTES, DEFAULT_METRICS_ROTATION_MAX_BYTES, DEFAULT_PAGE_STORE_ROTATION_MAX_BYTES } from "./options.ts"
 export { METRIC_NUMBER_KEYS, METRICS_CURSOR_KEYS, RAW_COUNTER_KEYS } from "./state.ts"
@@ -198,14 +181,6 @@ const OMISSIONS_RELOAD_LEAD = "; reload via "
 const STASH_ATTACHMENTS_LEAD = "attachments evicted with this output"
 const STASH_ATTACHMENT_DROPPED_TAIL = "payloads were dropped during eviction; re-run the tool to regenerate them"
 const UNKNOWN_ATTACHMENT_MIME_LABEL = "unknown mime"
-const FENCE_STASH_TOOL_LABEL = "fence"
-const FENCE_BACKTICK = "`"
-const MIN_FENCE_MARKER_TICKS = 3
-// CommonMark: a line indented four or more spaces is indented code, never a fence.
-const MAX_FENCE_INDENT_SPACES = 3
-const FENCE_INDENT_SPACE = " "
-const FENCE_INFO_SEPARATOR = /\s+/
-const USER_MESSAGE_ROLE = "user"
 
 type EvictableEntry = {
   stateRef: { output: string; attachments?: unknown }
@@ -224,469 +199,6 @@ type StatsSource = {
   modelKeys: Map<string, string | undefined>
   pageStores: PageStoreBySession
   metrics: MetricsStore
-}
-
-type RetainedDuplicate = { msgIndex: number; tool: string; supersedes: boolean }
-
-type RetainedFileDuplicate = { msgIndex: number; label: string }
-
-type DedupTarget = { stateRef: { output: string; attachments?: unknown }; tool: string; input: Record<string, unknown> }
-
-type DedupOutcome = { tombstones: number; tombstonedPairs: DedupedPairBytes[] }
-
-const dedupKeyOf = (tool: string, input: Record<string, unknown>): string => JSON.stringify([tool, stableStringify(input)])
-
-// A reasoning part's stable identity: its own text and metadata, keyed the
-// same way the dedup pass keys tool inputs, so identity survives the
-// transform's repeated passes over the stored message list.
-const reasoningIdentityOf = (text: unknown, metadata: unknown): string =>
-  JSON.stringify([stableStringify(text), stableStringify(metadata)])
-
-const buildDedupTombstone = (tool: string, msgIndex: number): string =>
-  `${DEDUP_MARKER} ${tool} ${DEDUP_SUPERSEDED_LEAD} ${msgIndex}`
-
-const dedupTargetOf = (part: Record<string, unknown>): DedupTarget | undefined => {
-  const outputRef = completedOutputOf(part)
-  if (outputRef === undefined) return undefined
-  if (startsWithEitherGeneration(outputRef.output, EVICTION_MARKER, LEGACY_EVICTION_MARKER) || startsWithEitherGeneration(outputRef.output, DEDUP_MARKER, LEGACY_DEDUP_MARKER)) return undefined
-  const tool = part["tool"]
-  if (typeof tool !== "string") return undefined
-  const typedState = part["state"] as Record<string, unknown>
-  const input = typeof typedState["input"] === "object" && typedState["input"] !== null ? (typedState["input"] as Record<string, unknown>) : {}
-  return { stateRef: outputRef, tool, input }
-}
-
-const deduplicateToolOutputs = (messages: MessageBundle[], options: ResolvedOptions): DedupOutcome => {
-  const retainedByKey = new Map<string, RetainedDuplicate>()
-  let tombstones = 0
-  const tombstonedPairs: DedupedPairBytes[] = []
-  for (let msgIndex = messages.length - 1; msgIndex >= 0; msgIndex -= 1) {
-    for (const part of messages[msgIndex].parts) {
-      const target = dedupTargetOf(part)
-      if (target === undefined) continue
-      const key = dedupKeyOf(target.tool, target.input)
-      const retained = retainedByKey.get(key)
-      if (retained === undefined) {
-        retainedByKey.set(key, {
-          msgIndex,
-          tool: target.tool,
-          supersedes: target.stateRef.output.length >= options.minEvictableBytes,
-        })
-        continue
-      }
-      if (retained.supersedes) {
-        const supersededBytes = target.stateRef.output.length + attachmentPayloadCharsOf(target.stateRef)
-        target.stateRef.output = buildDedupTombstone(retained.tool, retained.msgIndex)
-        stripStateAttachments(target.stateRef)
-        tombstones += 1
-        tombstonedPairs.push({ key, bytes: supersededBytes })
-      }
-    }
-  }
-  return { tombstones, tombstonedPairs }
-}
-
-const fileDedupKeyOf = (file: FilePartFields): string => JSON.stringify([file.mime, file.url])
-
-const fileDedupLabelOf = (file: FilePartFields): string => (file.filename.length > 0 ? file.filename : file.mime)
-
-const buildFileDedupTombstone = (label: string, msgIndex: number): string =>
-  `${DEDUP_MARKER} ${label} ${DEDUP_FILE_SUPERSEDED_LEAD} ${msgIndex}`
-
-const deduplicateFileAttachments = (messages: MessageBundle[], options: ResolvedOptions): DedupOutcome => {
-  const retainedByKey = new Map<string, RetainedFileDuplicate>()
-  const hotFromIndex = hotFromIndexOf(messages, options)
-  let tombstones = 0
-  const tombstonedPairs: DedupedPairBytes[] = []
-  for (let msgIndex = messages.length - 1; msgIndex >= 0; msgIndex -= 1) {
-    const messageParts = messages[msgIndex].parts
-    for (let partIndex = messageParts.length - 1; partIndex >= 0; partIndex -= 1) {
-      const file = filePartOf(messageParts[partIndex])
-      if (file === undefined) continue
-      const key = fileDedupKeyOf(file)
-      const retained = retainedByKey.get(key)
-      if (retained === undefined) {
-        retainedByKey.set(key, { msgIndex, label: fileDedupLabelOf(file) })
-        continue
-      }
-      if (msgIndex >= hotFromIndex) continue
-      messageParts[partIndex] = { type: TEXT_PART_TYPE, text: buildFileDedupTombstone(retained.label, retained.msgIndex) }
-      tombstones += 1
-      tombstonedPairs.push({ key, bytes: 0 })
-    }
-  }
-  // A file part's payload size is not observable from its url, so file dedup
-  // contributes tombstones whose pairs carry no bytes to the unique estimate.
-  return { tombstones, tombstonedPairs }
-}
-
-type RangeReadWindow = { msgIndex: number; stateRef: { output: string }; range: SubjectRange }
-
-type RangeCollapseOutcome = { collapsed: number; collapsedBytes: number }
-
-const rangeContains = (outer: SubjectRange, inner: SubjectRange): boolean =>
-  outer.start <= inner.start && outer.end >= inner.end
-
-// The window a read carried is recoverable from its input's offset and
-// limit; a read without both is not a range read and never collapses.
-const rangeWindowOf = (part: Record<string, unknown>): { range: SubjectRange; stateRef: { output: string }; path: string | undefined } | undefined => {
-  if (part["type"] !== "tool" || part["tool"] !== READ_TOOL_NAME) return undefined
-  const state = part["state"]
-  if (typeof state !== "object" || state === null) return undefined
-  const typedState = state as Record<string, unknown>
-  if (typedState["status"] !== "completed" || typeof typedState["output"] !== "string") return undefined
-  if (startsWithEitherGeneration(typedState["output"], EVICTION_MARKER, LEGACY_EVICTION_MARKER) || startsWithEitherGeneration(typedState["output"], DEDUP_MARKER, LEGACY_DEDUP_MARKER)) return undefined
-  const input = typeof typedState["input"] === "object" && typedState["input"] !== null ? (typedState["input"] as Record<string, unknown>) : {}
-  // Malformed ranges never become windows: a non-integer, negative, or
-  // empty range cannot be compared for containment meaningfully. The guards
-  // live here, not in rangeOf, which subjectsOf shares and whose subject
-  // rendering tolerates odd values.
-  const range = rangeOf(input)
-  if (range === undefined) return undefined
-  if (Number.isInteger(range.start) === false || Number.isInteger(range.end) === false) return undefined
-  if (range.start < 0 || range.end <= range.start) return undefined
-  const path = PATH_INPUT_KEYS.map((key) => input[key]).find((value) => typeof value === "string" && value.length > 0)
-  return { range, stateRef: typedState as { output: string }, path: typeof path === "string" ? path : undefined }
-}
-
-// Range reads of one file fragment its content into standing windows dedup
-// cannot see: every distinct offset/limit pair is a distinct key, so the
-// same file is paid for once per window on every request. This pass
-// tombstones a contained window exactly the way file-part dedup tombstones
-// a superseded part: walking newest first, a read whose [start, end) range
-// is fully contained in a strictly newer retained read's range of the same
-// path becomes a text tombstone naming the retained read's message.
-// Containment only: merely overlapping or merely contiguous windows are
-// left alone because a contained window provably adds no unique lines,
-// while an overlap may carry lines the retained window lacks, so
-// collapsing it would drop context the model paid for and received. The
-// discipline mirrors dedup: reads inside the recent window never
-// collapse, outputs under minEvictableBytes never collapse, and
-// already-tombstoned outputs never collapse.
-
-// One planned collapse: the message and part slots to overwrite and the
-// tombstone to write there. The plan phase never mutates, so the batched
-// cadence can detect the pass's trigger by planning alone and a fire can
-// apply the recorded edits later; detection reads only each candidate's
-// own part, so planning and applying in two phases lands the same list as
-// mutating in the walk.
-type RangeCollapseEdit = { msgIndex: number; partIndex: number; replacement: Record<string, unknown> }
-
-type RangeCollapsePlan = { edits: RangeCollapseEdit[]; collapsed: number; collapsedBytes: number }
-
-const planRangeCollapse = (messages: MessageBundle[], options: ResolvedOptions): RangeCollapsePlan => {
-  const hotFromIndex = hotFromIndexOf(messages, options)
-  const retainedByPath = new Map<string, RangeReadWindow>()
-  const edits: RangeCollapseEdit[] = []
-  let collapsed = 0
-  let collapsedBytes = 0
-  for (let msgIndex = messages.length - 1; msgIndex >= 0; msgIndex -= 1) {
-    const messageParts = messages[msgIndex].parts
-    for (let partIndex = messageParts.length - 1; partIndex >= 0; partIndex -= 1) {
-      const window = rangeWindowOf(messageParts[partIndex])
-      if (window === undefined || window.path === undefined) continue
-      const retained = retainedByPath.get(window.path)
-      if (retained === undefined) {
-        retainedByPath.set(window.path, { msgIndex, stateRef: window.stateRef, range: window.range })
-        continue
-      }
-      if (rangeContains(retained.range, window.range) === false) continue
-      if (msgIndex >= hotFromIndex) continue
-      if (window.stateRef.output.length < options.minEvictableBytes) continue
-      collapsedBytes += window.stateRef.output.length
-      edits.push({
-        msgIndex,
-        partIndex,
-        replacement: {
-          type: TEXT_PART_TYPE,
-          text: `${DEDUP_MARKER} ${READ_TOOL_NAME} ${renderSubject({ path: window.path, range: window.range })} ${DEDUP_RANGE_SUPERSEDED_LEAD} ${retained.msgIndex} (${renderSubject({ path: window.path, range: retained.range })})`,
-        },
-      })
-      collapsed += 1
-    }
-  }
-  return { edits, collapsed, collapsedBytes }
-}
-
-const applyRangeCollapse = (messages: MessageBundle[], plan: RangeCollapsePlan): void => {
-  for (const edit of plan.edits) messages[edit.msgIndex].parts[edit.partIndex] = edit.replacement
-}
-
-// At-birth tool-output hygiene, applied by tool.execute.after so the
-// rewrite persists into session storage: strips the same CSI/OSC spans
-// the composition walk counts (the shared ESCAPE_SPAN_PATTERN), collapses
-// carriage-return progress lines to their final segment within each
-// newline-delimited line (a \r that closes a line as CRLF, or sits at end
-// of output, is a line ending and is carried through untouched), and
-// trims trailing whitespace runs per line (leading whitespace stays). The
-// candidate scan over-approximates what the three passes can change (any
-// escape introducer, any carriage return, any trimmable line-ending
-// whitespace), so nothing strippable is missed; a clean output costs one
-// scan and zero writes, and the original string reference passes through
-// when the pipeline would be a no-op.
-const HYGIENE_CANDIDATE_PATTERN = /\x1b|\r|[ \t](?=\n|$)/
-const TRAILING_WHITESPACE_RUN_PATTERN = /[ \t]+$/
-const stripTerminalNoiseFrom = (output: string): string => {
-  if (HYGIENE_CANDIDATE_PATTERN.test(output) === false) return output
-  const lines = output.replace(ESCAPE_SPAN_PATTERN, "").split("\n")
-  for (let index = 0; index < lines.length; index += 1) {
-    // A trailing \r on a split line was followed by \n (a CRLF terminator)
-    // or sat at end of output; both are line endings rather than progress
-    // markers, so they are carried through untouched. Splitting on \n
-    // erases the lookahead that would distinguish them, hence the
-    // endswith check.
-    let line = lines[index]
-    let carriageReturnTerminator = ""
-    if (line.endsWith("\r")) {
-      carriageReturnTerminator = "\r"
-      line = line.slice(0, -1)
-    }
-    const latestCarriageReturn = line.lastIndexOf("\r")
-    const collapsed = latestCarriageReturn === -1 ? line : line.slice(latestCarriageReturn + 1)
-    lines[index] = collapsed.replace(TRAILING_WHITESPACE_RUN_PATTERN, "") + carriageReturnTerminator
-  }
-  const stripped = lines.join("\n")
-  return stripped === output ? output : stripped
-}
-
-// The one purge-candidate decision the pass and its batched-cadence
-// trigger scan share, so the two sites cannot drift: an errored tool
-// part's state whose input has not been scrubbed yet.
-const unpurgedErroredToolStateOf = (part: Record<string, unknown>): Record<string, unknown> | undefined => {
-  if (part["type"] !== "tool") return undefined
-  const state = part["state"]
-  if (typeof state !== "object" || state === null) return undefined
-  const typedState = state as Record<string, unknown>
-  if (typedState["status"] !== "error") return undefined
-  if (typedState["input"] === PURGED_INPUT_MARKER || typedState["input"] === LEGACY_PURGED_INPUT_MARKER) return undefined
-  return typedState
-}
-
-const purgeErroredToolInputs = (messages: MessageBundle[], options: ResolvedOptions): number => {
-  const hotFromIndex = hotFromIndexOf(messages, options)
-  let purged = 0
-  for (let msgIndex = 0; msgIndex < hotFromIndex; msgIndex += 1) {
-    for (const part of messages[msgIndex].parts) {
-      const erroredState = unpurgedErroredToolStateOf(part)
-      if (erroredState === undefined) continue
-      erroredState["input"] = PURGED_INPUT_MARKER
-      purged += 1
-    }
-  }
-  return purged
-}
-
-// The pass's batched-cadence trigger: whether a purge would mutate, early
-// exiting on the first candidate so a deferred run pays one scan.
-const hasErroredToolInputToPurge = (messages: MessageBundle[], options: ResolvedOptions): boolean => {
-  const hotFromIndex = hotFromIndexOf(messages, options)
-  for (let msgIndex = 0; msgIndex < hotFromIndex; msgIndex += 1) {
-    for (const part of messages[msgIndex].parts) {
-      if (unpurgedErroredToolStateOf(part) !== undefined) return true
-    }
-  }
-  return false
-}
-
-// Message indices are unstable across runs: opencode trims stored messages,
-// and the recent window rides the tail, so a part is identified by its own
-// content (text plus metadata, stringified with the same stable stringify
-// the dedup pass keys inputs by) rather than by a msgIndex cursor like the
-// touch watermark. A part counts unique the first run its identity is seen
-// outside the retention age, and identical-content occurrences count once.
-// The seen-set lives on the session's metrics entry, whose lifetime bounds
-// the memory: the entry can be evicted from the metrics store and reseeded
-// within one process, re-counting that session's standing set once per
-// entry lifetime; unique can therefore exceed the entry's own cumulative
-// count after a reseed but never the session's true unique total. The
-// seen-set is also bounded, so only a same-content reappearance after a
-// full bound worth of newer parts could count once more.
-const expireAgedReasoning = (metrics: SessionMetrics, messages: MessageBundle[], options: ResolvedOptions): ReasoningExpiry => {
-  const retentionFromIndex = retentionFromIndexOf(messages, options)
-  let parts = 0
-  let bytes = 0
-  let unique = 0
-  let uniqueBytes = 0
-  for (let msgIndex = 0; msgIndex < retentionFromIndex; msgIndex += 1) {
-    const messageParts = messages[msgIndex].parts
-    for (let partIndex = messageParts.length - 1; partIndex >= 0; partIndex -= 1) {
-      const part = messageParts[partIndex]
-      if (part["type"] !== REASONING_PART_TYPE) continue
-      const text = part[REASONING_TEXT_KEY]
-      const textChars = typeof text === "string" ? text.length : 0
-      bytes += textChars
-      const identity = reasoningIdentityOf(text, part[REASONING_METADATA_KEY])
-      if (rememberUniqueKey(metrics.reasoningSeenKeys, identity, DEFAULT_REMEMBERED_REASONING_PARTS)) {
-        unique += 1
-        uniqueBytes += textChars
-      }
-      messageParts.splice(partIndex, 1)
-      parts += 1
-    }
-  }
-  return { parts, bytes, unique, uniqueBytes }
-}
-
-// The pass's batched-cadence trigger: whether an expiry would mutate,
-// early exiting on the first reasoning part past the retention boundary.
-const hasAgedReasoningToExpire = (messages: MessageBundle[], options: ResolvedOptions): boolean => {
-  const retentionFromIndex = retentionFromIndexOf(messages, options)
-  for (let msgIndex = 0; msgIndex < retentionFromIndex; msgIndex += 1) {
-    for (const part of messages[msgIndex].parts) {
-      if (part["type"] === REASONING_PART_TYPE) return true
-    }
-  }
-  return false
-}
-
-const stripLegacyHintParts = (messages: MessageBundle[]): void => {
-  for (const message of messages) {
-    for (let partIndex = message.parts.length - 1; partIndex >= 0; partIndex -= 1) {
-      const part = message.parts[partIndex]
-      const text = part["text"]
-      if (part["type"] === TEXT_PART_TYPE && typeof text === "string" && startsWithEitherGeneration(text, HINT_LINE_PREFIX, LEGACY_HINT_LINE_PREFIX)) {
-        message.parts.splice(partIndex, 1)
-      }
-    }
-  }
-}
-
-type FenceSpan = { startLine: number; endLine: number; language: string | undefined }
-
-type FenceReplacement = { startOffset: number; endOffset: number; replacement: string; bytes: number }
-
-const leadingBackticksOf = (line: string): number => {
-  let ticks = 0
-  while (line.charAt(ticks) === FENCE_BACKTICK) ticks += 1
-  return ticks
-}
-
-const fenceLineWithinIndentOf = (rawLine: string): string | undefined => {
-  let spaces = 0
-  while (rawLine.charAt(spaces) === FENCE_INDENT_SPACE) spaces += 1
-  if (spaces > MAX_FENCE_INDENT_SPACES) return undefined
-  return rawLine.slice(spaces)
-}
-
-const fenceLanguageOf = (info: string): string => info.split(FENCE_INFO_SEPARATOR)[0]
-
-const fenceOpenerOf = (rawLine: string): { ticks: number; language: string | undefined } | undefined => {
-  const line = fenceLineWithinIndentOf(rawLine)
-  if (line === undefined) return undefined
-  const ticks = leadingBackticksOf(line)
-  if (ticks < MIN_FENCE_MARKER_TICKS) return undefined
-  const info = line.slice(ticks).trim()
-  // CommonMark: an info string holding a backtick never opens a fence, so
-  // the line is content and can neither start a block nor be evicted as one.
-  if (info.includes(FENCE_BACKTICK)) return undefined
-  return { ticks, language: info.length > 0 ? fenceLanguageOf(info) : undefined }
-}
-
-const isFenceCloser = (rawLine: string, openerTicks: number): boolean => {
-  const line = fenceLineWithinIndentOf(rawLine)
-  if (line === undefined) return false
-  const ticks = leadingBackticksOf(line)
-  return ticks >= openerTicks && line.slice(ticks).trim().length === 0
-}
-
-const fenceSpansIn = (lines: string[]): FenceSpan[] => {
-  const spans: FenceSpan[] = []
-  let openLine = -1
-  let openTicks = 0
-  let language: string | undefined
-  for (let index = 0; index < lines.length; index += 1) {
-    if (openLine === -1) {
-      const opener = fenceOpenerOf(lines[index])
-      if (opener === undefined) continue
-      openLine = index
-      openTicks = opener.ticks
-      language = opener.language
-      continue
-    }
-    if (isFenceCloser(lines[index], openTicks)) {
-      spans.push({ startLine: openLine, endLine: index, language })
-      openLine = -1
-    }
-  }
-  return spans
-}
-
-const lineStartsOf = (text: string): number[] => {
-  const starts = [0]
-  let index = text.indexOf("\n")
-  while (index !== -1) {
-    starts.push(index + 1)
-    index = text.indexOf("\n", index + 1)
-  }
-  return starts
-}
-
-const fenceFirstNonEmptyLineOf = (lines: string[], startLine: number, endLine: number): string | undefined => {
-  for (let index = startLine + 1; index < endLine; index += 1) {
-    const trimmed = lines[index].trim()
-    if (trimmed.length > 0) return trimmed
-  }
-  return undefined
-}
-
-const evictLargeUserFences = (messages: MessageBundle[], options: ResolvedOptions, pageStore: SessionPageStore, pageStoreEntries: PageEntry[]): FenceEviction => {
-  if (options.userFenceEviction.enabled === false) return { blocks: 0, bytes: 0, pagesDropped: 0 }
-  const hotFromIndex = hotFromIndexOf(messages, options)
-  const { minBlockLines } = options.userFenceEviction
-  let blocks = 0
-  let bytes = 0
-  let pagesDropped = 0
-  for (let msgIndex = 0; msgIndex < hotFromIndex; msgIndex += 1) {
-    const message = messages[msgIndex]
-    if (message.info.role !== USER_MESSAGE_ROLE) continue
-    for (let partIndex = 0; partIndex < message.parts.length; partIndex += 1) {
-      const part = message.parts[partIndex]
-      if (part["type"] !== TEXT_PART_TYPE) continue
-      const text = part["text"]
-      if (typeof text !== "string") continue
-      const lines = text.split("\n")
-      let lineStarts: number[] | undefined
-      const plans: FenceReplacement[] = []
-      for (const span of fenceSpansIn(lines)) {
-        const contentLines = span.endLine - span.startLine - 1
-        if (contentLines <= minBlockLines) continue
-        const firstLine = fenceFirstNonEmptyLineOf(lines, span.startLine, span.endLine)
-        if (firstLine === undefined) continue
-        if (lineStarts === undefined) lineStarts = lineStartsOf(text)
-        const startOffset = lineStarts[span.startLine]
-        const endOffset = span.endLine + 1 < lineStarts.length ? lineStarts[span.endLine + 1] : text.length
-        const blockText = text.slice(startOffset, endOffset)
-        const subject = boundedSingleLineOf(firstLine)
-        const tombstone = buildFenceTombstone(span.language, contentLines, subject)
-        const stored: PageEntry = {
-          output: blockText,
-          tool: FENCE_STASH_TOOL_LABEL,
-          subject,
-          msgIndex,
-          partIndex,
-          stashSlot: span.startLine,
-        }
-        pagesDropped += storeEvictedPage(pageStore, stored, options.stashLimit)
-        pageStoreEntries.push(stored)
-        plans.push({
-          startOffset,
-          endOffset,
-          replacement: blockText.endsWith("\n") ? `${tombstone}\n` : tombstone,
-          bytes: blockText.length,
-        })
-        blocks += 1
-      }
-      if (plans.length === 0) continue
-      let updated = text
-      for (let index = plans.length - 1; index >= 0; index -= 1) {
-        const plan = plans[index]
-        updated = `${updated.slice(0, plan.startOffset)}${plan.replacement}${updated.slice(plan.endOffset)}`
-        bytes += plan.bytes
-      }
-      part["text"] = updated
-    }
-  }
-  return { blocks, bytes, pagesDropped }
 }
 
 const pageMissTextFor = (subject: string): string =>
@@ -1369,61 +881,6 @@ const deliverHint = (hintBySession: Map<string, string>, input: unknown, output:
   const existingIndex = output.system.findIndex((block) => typeof block === "string" && startsWithEitherGeneration(block, HINT_LINE_PREFIX, LEGACY_HINT_LINE_PREFIX))
   if (existingIndex === -1) output.system.push(hintLine)
   else output.system[existingIndex] = hintLine
-}
-
-// Per-session hygiene cadence state: the count of trigger-carrying runs
-// since the last batched fire. A missing entry means zero.
-type HygieneCadenceBySession = Map<string, number>
-
-// Sessions holding a pending trigger count, mirroring the other per-session
-// store bounds; a session falling out of the map merely restarts its count.
-const HYGIENE_CADENCE_SESSIONS = 8
-
-// One transform run's hygiene disposition: whether the three batchable
-// passes (range collapse, errored-input purge, aged-reasoning expiry) fire
-// this run, and the collapse plan the decision phase already walked.
-type HygieneBatchDecision = { fire: boolean; collapsePlan: RangeCollapsePlan }
-
-// The deferred-run results the fire path returns instead of pass outcomes:
-// frozen so a downstream field write on the shared record fails loudly
-// instead of corrupting every later deferred run.
-const RANGE_COLLAPSE_NONE: RangeCollapseOutcome = Object.freeze({ collapsed: 0, collapsedBytes: 0 })
-const REASONING_EXPIRY_NONE: ReasoningExpiry = Object.freeze({ parts: 0, bytes: 0, unique: 0, uniqueBytes: 0 })
-
-// WHY cache-aware: each of these passes cuts history at its own seat, and
-// a provider serves a cache hit only while the next request byte-matches
-// the cached prefix from position zero, so every small cut re-prices the
-// whole request tail at the uncached rate. N per-request hygiene cuts cost
-// N re-priced tails; the gated cadence accumulates the passes' triggers
-// across runs and fires them as ONE batched mutation, so N small cuts
-// collapse into one cut and one re-priced tail. The pressure valves never
-// ride this gate: the watermark-driven eviction walk and the aged read
-// tier's hard fire answer size pressure, and deferring those would trade
-// unbounded context growth for cache bytes.
-const resolveHygieneBatch = (
-  messages: MessageBundle[],
-  options: ResolvedOptions,
-  pendingBySession: HygieneCadenceBySession,
-  sessionKey: string,
-): HygieneBatchDecision => {
-  const collapsePlan = planRangeCollapse(messages, options)
-  if (options.mutationBatchCadence <= 0) return { fire: true, collapsePlan }
-  const triggered =
-    collapsePlan.collapsed > 0 || hasErroredToolInputToPurge(messages, options) || hasAgedReasoningToExpire(messages, options)
-  if (triggered === false) return { fire: false, collapsePlan }
-  const pending = (touchMapEntry(pendingBySession, sessionKey) ?? 0) + 1
-  if (pending >= options.mutationBatchCadence) {
-    pendingBySession.delete(sessionKey)
-    return { fire: true, collapsePlan }
-  }
-  rememberSessionValue(pendingBySession, sessionKey, pending, HYGIENE_CADENCE_SESSIONS)
-  return { fire: false, collapsePlan }
-}
-
-const fireCollapsePass = (messages: MessageBundle[], decision: HygieneBatchDecision): RangeCollapseOutcome => {
-  if (decision.fire === false) return RANGE_COLLAPSE_NONE
-  applyRangeCollapse(messages, decision.collapsePlan)
-  return { collapsed: decision.collapsePlan.collapsed, collapsedBytes: decision.collapsePlan.collapsedBytes }
 }
 
 // The transform hook's body, extracted so the registration-site boundary

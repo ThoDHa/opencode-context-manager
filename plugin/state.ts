@@ -1,6 +1,7 @@
 import { RAW_COUNTER_KEYS as SCHEMA_RAW_COUNTER_KEYS, TOTALS_KEYS, type DerivedCounterKey as TotalsDerivedKey, type RawCounterKey as SchemaRawCounterKey, type TotalsKey } from "./schema.ts"
 import { estimateTokensFromBytes } from "./messages.ts"
 import { rememberFaultForSubject, touchMapEntry, trimMapToBound } from "./session-maps.ts"
+import type { DedupedPairBytes } from "./dedup.ts"
 import type { ContextTokensSource, PersistedContextLimit } from "./context-limits.ts"
 import type { HotSubject, Subject } from "./vocabulary.ts"
 import { BASH_TOOL_NAME } from "./vocabulary.ts"
@@ -178,8 +179,6 @@ const everyMetricIsSeeded: AssertEveryMetricSeeded = true
 // key added in schema.ts appears here and in the panel parser without a
 // second edit.
 export type CumulativeCounters = { [K in TotalsKey]: number }
-
-export type DedupedPairBytes = { key: string; bytes: number }
 
 // Membership test plus bounded remember shared by the unique-event counters:
 // returns true the first time a key is seen, false for repeats. The list
