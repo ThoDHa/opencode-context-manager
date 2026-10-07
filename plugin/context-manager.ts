@@ -12,6 +12,17 @@ import {
   type TotalsKey,
 } from "./schema.ts"
 
+import type { ChatParamsModel, ContextLimit, ContextLimitEntry, ContextTokensSource, PersistedContextLimit } from "./context-limits.ts"
+import {
+  CONTEXT_TOKENS_SOURCE_DEFAULT,
+  CONTEXT_TOKENS_SOURCE_MODEL,
+  CONTEXT_TOKENS_SOURCE_OVERRIDE,
+  CONTEXT_TOKENS_SOURCE_UNKNOWN,
+  captureContextLimitOf,
+  contextLimitForRun,
+  modelKeyOf,
+  storedContextLimitBelongsToAnotherModel,
+} from "./context-limits.ts"
 import type { FilePartFields, MessageBundle } from "./messages.ts"
 import type { ContextManagerOptions, ResolvedOptions } from "./options.ts"
 import type { HotSubject, Subject, SubjectRange } from "./vocabulary.ts"
@@ -185,11 +196,6 @@ const OMISSIONS_TOOL_OUTPUTS_LABEL = "tool outputs"
 const OMISSIONS_REASONING_BLOCKS_LABEL = "reasoning blocks"
 const OMISSIONS_FENCED_BLOCKS_LABEL = "fenced blocks"
 const OMISSIONS_RELOAD_LEAD = "; reload via "
-const CONTEXT_TOKENS_SOURCE_OVERRIDE = "override"
-const CONTEXT_TOKENS_SOURCE_MODEL = "model"
-const CONTEXT_TOKENS_SOURCE_DEFAULT = "default"
-const CONTEXT_TOKENS_SOURCE_UNKNOWN = "unknown"
-const MODEL_KEY_SEPARATOR = "/"
 const STASH_ATTACHMENTS_LEAD = "attachments evicted with this output"
 const STASH_ATTACHMENT_DROPPED_TAIL = "payloads were dropped during eviction; re-run the tool to regenerate them"
 const UNKNOWN_ATTACHMENT_MIME_LABEL = "unknown mime"
@@ -258,16 +264,6 @@ type RunOutcome = {
 
 type ReasoningExpiry = { parts: number; bytes: number; unique: number; uniqueBytes: number }
 
-type ContextTokensSource =
-  | typeof CONTEXT_TOKENS_SOURCE_OVERRIDE
-  | typeof CONTEXT_TOKENS_SOURCE_MODEL
-  | typeof CONTEXT_TOKENS_SOURCE_DEFAULT
-  | typeof CONTEXT_TOKENS_SOURCE_UNKNOWN
-
-type ContextLimitEntry = { tokens: number; source: ContextTokensSource; modelKey: string | undefined }
-
-type ContextLimit = { tokens: number | null; source: ContextTokensSource; modelKey: string | undefined }
-
 type PruneThrottle = { lastScanMs: number }
 
 // The instance-level downgrade-refusal fact, the PruneThrottle pattern: one
@@ -285,8 +281,6 @@ type PageStoreSchemaVerdict =
   | { kind: "admissible" }
   | { kind: "invalid" }
   | { kind: "newer"; observed: number }
-
-type ChatParamsModel = { providerID?: string; modelID?: string; limit?: { context?: number } }
 
 type SessionMetrics = {
   evictions: number
@@ -1359,8 +1353,6 @@ const persistedCounterOf = (totals: Record<string, unknown>, key: RawCounterKey)
 
 type PersistedCounters = Pick<SessionMetrics, RawCounterKey>
 
-type PersistedContextLimit = { tokens: number; source: ContextTokensSource; modelKey: string | undefined }
-
 type PersistedContextLimitSeed = { budget: PersistedContextLimit | undefined }
 
 type PersistedTotals = { tsMs: number; counters: PersistedCounters; budget: PersistedContextLimit | undefined }
@@ -1952,14 +1944,6 @@ const recordSessionCheckpoint = async (
   await pruneCheckpointFiles(options.liveStatePath, options.liveStatePruneMaxAgeMs, pruneThrottle, options.liveStatePruneMinIntervalMs, options.now())
 }
 
-const modelKeyOf = (model: ChatParamsModel | undefined): string | undefined => {
-  const providerID = model?.providerID
-  const modelID = model?.modelID
-  if (typeof providerID !== "string" || providerID.length === 0) return undefined
-  if (typeof modelID !== "string" || modelID.length === 0) return undefined
-  return `${providerID}${MODEL_KEY_SEPARATOR}${modelID}`
-}
-
 // The effective eviction watermark in tokens: the absolute watermarkTokens
 // option wins when set; otherwise the budget times the fractional
 // watermark. The budget drives the fractional path only, so an absolute
@@ -1969,65 +1953,6 @@ const effectiveWatermarkTokensOf = (contextLimitTokens: number | null, options: 
   if (options.watermarkTokens !== undefined) return options.watermarkTokens
   if (contextLimitTokens === null) return null
   return contextLimitTokens * options.watermark
-}
-
-// An entry without an identity (a limit-only chat params event) is never
-// reset: nothing ties it to a model, so any later event retains it.
-const storedContextLimitBelongsToAnotherModel = (stored: ContextLimitEntry | undefined, modelKey: string | undefined): boolean =>
-  modelKey !== undefined && stored !== undefined && stored.modelKey !== undefined && stored.modelKey !== modelKey
-
-const captureContextLimitOf = (model: ChatParamsModel | undefined, overrides: Record<string, number>): ContextLimitEntry | undefined => {
-  const modelKey = modelKeyOf(model)
-  const override = modelKey === undefined ? undefined : overrides[modelKey]
-  if (override !== undefined) return { tokens: override, source: CONTEXT_TOKENS_SOURCE_OVERRIDE, modelKey }
-  const reported = model?.limit?.context
-  if (typeof reported === "number" && Number.isFinite(reported) && reported > 0)
-    return { tokens: reported, source: CONTEXT_TOKENS_SOURCE_MODEL, modelKey }
-  return undefined
-}
-
-const resolveContextLimit = (sessionEntry: ContextLimitEntry | undefined, explicitDefault: number | undefined): ContextLimit => {
-  if (sessionEntry !== undefined) return { tokens: sessionEntry.tokens, source: sessionEntry.source, modelKey: sessionEntry.modelKey }
-  if (explicitDefault !== undefined) return { tokens: explicitDefault, source: CONTEXT_TOKENS_SOURCE_DEFAULT, modelKey: undefined }
-  return { tokens: null, source: CONTEXT_TOKENS_SOURCE_UNKNOWN, modelKey: undefined }
-}
-
-type ContextLimitResolution = { contextLimit: ContextLimit; fallbackSuppressed: boolean }
-
-// Shared by the transform hook and describe so the two surfaces resolve
-// identically. Precedence: a live chat.params capture, the explicit
-// defaultContextTokens option, then the budget persisted for the session;
-// the persisted value fills only the unknown state. The fallback is
-// suppressed when the persisted budget carries a model identity and this
-// sitting's chat.params events name a different model: the session
-// changed models (mid sitting or across a restart), so the old model's
-// budget must not refill and eviction stands down instead. A fallback
-// without a model identity (option-sourced, or a snapshot predating the
-// model key) is never suppressed, matching the tolerant legacy shape.
-const contextLimitForRun = (
-  sessionEntry: ContextLimitEntry | undefined,
-  persistedBudget: PersistedContextLimit | undefined,
-  sittingModelKey: string | undefined,
-  resolvedOptions: Pick<ResolvedOptions, "modelContextTokens" | "defaultContextTokens">,
-): ContextLimitResolution => {
-  const resolved = resolveContextLimit(sessionEntry, resolvedOptions.defaultContextTokens)
-  if (resolved.tokens !== null) return { contextLimit: resolved, fallbackSuppressed: false }
-  if (persistedBudget === undefined) return { contextLimit: resolved, fallbackSuppressed: false }
-  // A budget sourced from config that config no longer carries must not
-  // refill: an override survives only while its model key stays in
-  // modelContextTokens, a default only while defaultContextTokens is set.
-  const configRemoved =
-    (persistedBudget.source === CONTEXT_TOKENS_SOURCE_OVERRIDE &&
-      (persistedBudget.modelKey === undefined || resolvedOptions.modelContextTokens[persistedBudget.modelKey] === undefined)) ||
-    (persistedBudget.source === CONTEXT_TOKENS_SOURCE_DEFAULT && resolvedOptions.defaultContextTokens === undefined)
-  if (configRemoved) return { contextLimit: resolved, fallbackSuppressed: true }
-  if (persistedBudget.modelKey !== undefined && sittingModelKey !== undefined && persistedBudget.modelKey !== sittingModelKey) {
-    return { contextLimit: resolved, fallbackSuppressed: true }
-  }
-  return {
-    contextLimit: { tokens: persistedBudget.tokens, source: persistedBudget.source, modelKey: persistedBudget.modelKey },
-    fallbackSuppressed: false,
-  }
 }
 
 const executeStatsTool = (source: StatsSource, toolContext: unknown): string => {
