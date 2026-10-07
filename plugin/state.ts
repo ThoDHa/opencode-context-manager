@@ -5,7 +5,6 @@ import { rememberFaultForSubject, touchMapEntry, trimMapToBound } from "./sessio
 import type { DedupedPairBytes } from "./dedup.ts"
 import type { ContextTokensSource, PersistedContextLimit } from "./context-limits.ts"
 import type { HotSubject, Subject } from "./vocabulary.ts"
-import { BASH_TOOL_NAME } from "./vocabulary.ts"
 
 const TOUCH_SCAN_INITIAL_WATERMARK = -1
 export const DEFAULT_REMEMBERED_REASONING_PARTS = 4096

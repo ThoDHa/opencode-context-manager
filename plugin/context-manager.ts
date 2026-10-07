@@ -35,7 +35,7 @@ import {
   recordSessionCheckpoint,
 } from "./persistence.ts"
 import type { PageEntry, PageStoreBySession, PageStoreGuard, SessionPageStore } from "./page-store.ts"
-import { pagesForSession, pageStoreMatchesFor, recordPageStoreLines, storeEvictedPage } from "./page-store.ts"
+import { pagesForSession, pageStoreMatchesFor, recordPageStoreLines } from "./page-store.ts"
 import { deduplicateFileAttachments, deduplicateToolOutputs } from "./dedup.ts"
 import type { HygieneCadenceBySession } from "./hygiene.ts"
 import { expireAgedReasoning, fireCollapsePass, purgeErroredToolInputs, REASONING_EXPIRY_NONE, resolveHygieneBatch, stripLegacyHintParts, stripTerminalNoiseFrom } from "./hygiene.ts"
