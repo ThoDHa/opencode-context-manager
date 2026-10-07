@@ -16,6 +16,8 @@ import {
   LEVER1_PROFILE,
   LEVER3_ARM_PLUGIN_ENTRY,
   LEVER3_PROFILE,
+  LEVER4_ARM_PLUGIN_ENTRY,
+  LEVER4_PROFILE,
   LEVER_ARM_PLUGIN_ENTRY,
   LEVER_ON_FULL_PLUGIN_ENTRY,
   SPAWN_LOG_BASENAME,
@@ -1905,6 +1907,149 @@ test("excluded census rows keep their table row but never enter the endpoint pop
     assert.match(content, /- LEVER: n=0 creditsPerTurn mean=n\/a/, "the red block is out of the arm summaries")
     assert.match(content, /- contrast LEVER - OFF: creditsPerTurn delta=n\/a/)
     assert.match(content, /- primary LEVER: turns=0 creditsPerTurn mean=n\/a/, "the red block's 21+ turns are out of the per-turn primary")
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Lever-4 experiment profile (LRU-85-7 pattern, lever-4 dispatch).
+// ---------------------------------------------------------------------------
+
+test("the lever4 profile's seeds carry the cumulative stack plus the eviction multiplier byte-exactly", () => {
+  assert.equal(
+    JSON.stringify(LEVER4_ARM_PLUGIN_ENTRY),
+    '[["./opencode-context-manager/plugin/context-manager.ts",{"manualMode":false,"watermarkTokens":12000,"agedReadEvictionMessages":30,"reasoningRetentionMessages":16,"cacheAwareHints":true,"mutationBatchCadence":3,"evictionBatchMultiplier":2,"metricsMinLineIntervalMs":0}]]',
+    "the lever4 LEVER seed must stay byte-identical",
+  )
+  assert.deepEqual(LEVER4_ARM_PLUGIN_ENTRY[0]![1], {
+    manualMode: false,
+    watermarkTokens: 12000,
+    agedReadEvictionMessages: 30,
+    reasoningRetentionMessages: 16,
+    cacheAwareHints: true,
+    mutationBatchCadence: 3,
+    evictionBatchMultiplier: 2,
+    metricsMinLineIntervalMs: 0,
+  })
+  assert.equal(LEVER4_ARM_PLUGIN_ENTRY[0]![0], LEVER_ARM_PLUGIN_ENTRY[0]![0], "every lever seed points at the same plugin path")
+  const lever4OnFull = LEVER4_PROFILE.pluginSeedByArm["ON-FULL"]!
+  assert.equal(
+    JSON.stringify(lever4OnFull),
+    '[["./opencode-context-manager/plugin/context-manager.ts",{"manualMode":false,"watermarkTokens":12000,"agedReadEvictionMessages":30,"reasoningRetentionMessages":16,"metricsMinLineIntervalMs":0}]]',
+    "the lever4 ON-FULL seed must stay byte-identical",
+  )
+  assert.equal("cacheAwareHints" in lever4OnFull[0]![1], false, "the profile's ON-FULL seed carries no lever keys")
+  assert.equal("mutationBatchCadence" in lever4OnFull[0]![1], false, "the profile's ON-FULL seed carries no lever keys")
+  assert.equal("evictionBatchMultiplier" in lever4OnFull[0]![1], false, "the profile's ON-FULL seed carries no lever keys")
+  assert.equal(LEVER4_PROFILE.pluginSeedByArm["CAL-ON-FULL"], LEVER4_PROFILE.pluginSeedByArm["ON-FULL"], "the calibration token maps to the profile's ON-FULL seed")
+  assert.notEqual(LEVER4_PROFILE.pluginSeedByArm["LEVER"], LEVER3_PROFILE.pluginSeedByArm["LEVER"], "the lever profiles' LEVER seeds are distinct records")
+  assert.notEqual(lever4OnFull, LEVER3_PROFILE.pluginSeedByArm["ON-FULL"], "the lever4 ON-FULL seed is its own record: the interval rider separates it from the shared series 1-3 geometry")
+  assert.deepEqual(LEVER4_PROFILE.dataArms, LEVER1_PROFILE.dataArms)
+  assert.deepEqual(LEVER4_PROFILE.contrasts, LEVER1_PROFILE.contrasts)
+  assert.equal(LEVER4_PROFILE.corroboratesFullModeMetrics, true)
+  assert.equal(LEVER4_PROFILE.defaultsToSelfFlip, true)
+})
+
+test("configMatchesArm separates the lever4 series from the earlier profiles in both directions", () => {
+  assert.equal(configMatchesArm({ plugin: LEVER4_ARM_PLUGIN_ENTRY }, "LEVER", LEVER4_PROFILE), true)
+  assert.equal(configMatchesArm({ plugin: LEVER4_ARM_PLUGIN_ENTRY }, "LEVER", LEVER1_PROFILE), false, "the extra stack keys must fail the lever1 LEVER assertion")
+  assert.equal(configMatchesArm({ plugin: LEVER4_ARM_PLUGIN_ENTRY }, "LEVER", LEVER3_PROFILE), false, "the extra multiplier and interval keys must fail the lever3 LEVER assertion")
+  assert.equal(configMatchesArm({ plugin: LEVER3_ARM_PLUGIN_ENTRY }, "LEVER", LEVER4_PROFILE), false, "the missing multiplier and interval keys must fail the lever4 LEVER assertion")
+  assert.equal(configMatchesArm({ plugin: LEVER_ARM_PLUGIN_ENTRY }, "LEVER", LEVER4_PROFILE), false, "the series-1 seed is not a lever4 seed")
+  const lever4OnFull = LEVER4_PROFILE.pluginSeedByArm["ON-FULL"]!
+  assert.equal(configMatchesArm({ plugin: LEVER4_ARM_PLUGIN_ENTRY }, "ON-FULL", LEVER4_PROFILE), false)
+  assert.equal(configMatchesArm({ plugin: lever4OnFull }, "ON-FULL", LEVER4_PROFILE), true)
+  assert.equal(configMatchesArm({ plugin: lever4OnFull }, "ON-FULL", LEVER1_PROFILE), false, "the interval rider must fail the lever1 ON-FULL assertion")
+  assert.equal(configMatchesArm({ plugin: lever4OnFull }, "ON-FULL", LEVER3_PROFILE), false, "the interval rider must fail the lever3 ON-FULL assertion")
+  assert.equal(configMatchesArm({ plugin: LEVER_ON_FULL_PLUGIN_ENTRY }, "ON-FULL", LEVER4_PROFILE), false, "the shared series 1-3 ON-FULL seed lacks the interval rider")
+  assert.equal(configMatchesArm({ plugin: lever4OnFull }, CALIBRATION_ARM, LEVER4_PROFILE), true, "the calibration token maps to the profile's ON-FULL seed")
+  assert.equal(configMatchesArm({ plugin: [] }, "OFF", LEVER4_PROFILE), true)
+  assert.equal(configMatchesArm({ plugin: LEVER4_ARM_PLUGIN_ENTRY }, "OFF", LEVER4_PROFILE), false)
+  assert.equal(configMatchesArm({ plugin: ON_PLUGIN_ENTRY }, "ON-FULL", LEVER4_PROFILE), false, "the frozen 250k seed is not a lever-profile seed")
+  assert.equal(configMatchesArm(null, "LEVER", LEVER4_PROFILE), false)
+})
+
+test("applyArmToConfig applies the lever4 profile's seeds and refuses arms outside the profile", () => {
+  const flipped = applyArmToConfig({ model: "test-model", theme: "dark", plugin: [] as unknown[] }, "LEVER", LEVER4_PROFILE) as { model: string; theme: string; plugin: unknown }
+  assert.equal(flipped.model, "test-model")
+  assert.equal(flipped.theme, "dark")
+  assert.deepEqual(flipped.plugin, LEVER4_ARM_PLUGIN_ENTRY)
+  const onFull = applyArmToConfig({ plugin: [] }, "ON-FULL", LEVER4_PROFILE) as { plugin: unknown }
+  assert.deepEqual(onFull.plugin, LEVER4_PROFILE.pluginSeedByArm["ON-FULL"])
+  const off = applyArmToConfig({ plugin: LEVER4_ARM_PLUGIN_ENTRY }, "OFF", LEVER4_PROFILE) as { plugin: unknown }
+  assert.deepEqual(off.plugin, [])
+  assert.throws(() => applyArmToConfig({ plugin: [] }, "ON-DRY", LEVER4_PROFILE), /no plugin seed in the lever4 profile/)
+})
+
+test("the lever4 profile rides the identical mirrored 18-block schedule as the other lever profiles", () => {
+  const lever4Schedule = Array.from({ length: TOTAL_DATA_BLOCKS }, (_, index) => armForDataBlock(index + 1, LEVER4_PROFILE))
+  assert.deepEqual(lever4Schedule, [...LEVER_SCHEDULE])
+  assert.deepEqual(Array.from({ length: TOTAL_DATA_BLOCKS }, (_, index) => armForDataBlock(index + 1, LEVER1_PROFILE)), lever4Schedule, "the lever profiles ride one shared schedule")
+  for (const arm of new Set<string>(LEVER_SCHEDULE)) {
+    const indices = lever4Schedule.map((scheduleArm, index) => (scheduleArm === arm ? index + 1 : 0)).filter((index) => index > 0)
+    assert.equal(indices.length, 6, `arm ${arm} holds six runs`)
+    const mean = indices.reduce((sum, index) => sum + index, 0) / indices.length
+    assert.equal(mean, 9.5, `arm ${arm} mean run index`)
+  }
+})
+
+test("readDeepEra separates the lever4 series from the frozen era in both directions", () => {
+  const lever4Era = readDeepEra(flipLogText(LEVER_SCHEDULE), LEVER4_PROFILE)
+  assert.equal(eraDataCount(lever4Era), 18)
+  assert.equal(validateDeepRotation(lever4Era, LEVER4_PROFILE), null)
+  const frozenReaderOnLever4Log = readDeepEra(flipLogText(LEVER_SCHEDULE))
+  assert.equal(validateDeepRotation(frozenReaderOnLever4Log) === null, false, "the frozen reader must refuse a lever4 history")
+  const lever4ReaderOnFrozenLog = readDeepEra(flipLogText(SCHEDULE), LEVER4_PROFILE)
+  assert.equal(validateDeepRotation(lever4ReaderOnFrozenLog, LEVER4_PROFILE) === null, false, "the lever4 reader must refuse a frozen deep history")
+})
+
+test("resolveCliConfig selects lever4 with the self-flip default and the archived lever2 name stays unresolvable", () => {
+  const config = resolveCliConfig([], { AB_EXPERIMENT: "lever4" })
+  assert.equal(config.profile, LEVER4_PROFILE)
+  assert.equal(config.flipCmd, SELF_FLIP_COMMAND, "a lever profile defaults to the self flip")
+  assert.equal(resolveCliConfig([], { AB_EXPERIMENT: "lever4", AB_FLIP_CMD: "/bin/true" }).flipCmd, "/bin/true")
+  assert.equal(isExperimentProfileName("lever4"), true)
+  assert.equal(isExperimentProfileName("lever2"), false, "the reverted lever2 era name must not resolve to a profile")
+})
+
+test("the lever4 census join and readout contrasts run the lever series shape end to end", () => {
+  const temp = tempDir("ab-lever4-readout-")
+  try {
+    const dbPath = join(temp, "opencode.db")
+    const blocks = [
+      { label: "1", arm: "OFF", sessionId: "ses_off", minute: 15 },
+      { label: "2", arm: "ON-FULL", sessionId: "ses_full", minute: 25 },
+      { label: "3", arm: "LEVER", sessionId: "ses_lever", minute: 35 },
+    ]
+    buildOpencodeDb(
+      dbPath,
+      blocks.map((block) => ({ sessionId: block.sessionId, minute: block.minute + 1, modelId: "glm-5.3", input: 100000, output: 10000, cacheWrite: 5000 })),
+    )
+    writeFileSync(join(temp, FLIP_LOG_BASENAME), flipLogText(blocks.map((block) => block.arm)))
+    writeFileSync(
+      join(temp, SPAWN_LOG_BASENAME),
+      spawnLogText(blocks.map((block) => ({ label: block.label, arm: block.arm, sessionId: block.sessionId, exit: 0, minute: block.minute }))),
+    )
+    writeFileSync(
+      join(temp, WORK_LOG_DEEP_BASENAME),
+      workLogText(blocks.map((block) => ({ label: block.label, passed: 57, failed: 0, minute: block.minute + 1 }))),
+    )
+    writeFileSync(
+      join(temp, METRICS_LOG_BASENAME),
+      metricsLogText([
+        { minute: 26, sessionId: "ses_full", generation: 1, evictions: 1 },
+        { minute: 36, sessionId: "ses_lever", generation: 2, evictions: 1 },
+      ]),
+    )
+    const content = readFileSync(runReadout(cliConfigFor(temp, { dbPath, profile: LEVER4_PROFILE })), "utf8")
+    assert.match(content, /profile lever4,/, "the readout stamps the lever4 profile")
+    assert.match(content, /\| 2 \| ON-FULL \|/, "the census join labels the ON-FULL block by era position")
+    assert.match(content, /\| 3 \| LEVER \|/, "the census join labels the LEVER block by era position")
+    assert.match(content, /- contrast LEVER - OFF: creditsPerTurn delta=/)
+    assert.match(content, /- contrast LEVER - ON-FULL: creditsPerTurn delta=/)
+    assert.match(content, /- contrast ON-FULL - OFF: creditsPerTurn delta=/)
+    assert.equal(content.includes("caveat: full-mode metrics corroboration failed"), false, "a corroborating lever4 series carries no corroboration caveat")
   } finally {
     rmSync(temp, { recursive: true, force: true })
   }

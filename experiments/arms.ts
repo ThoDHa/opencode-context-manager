@@ -48,6 +48,8 @@ export type PluginEntryOption = {
   reasoningRetentionMessages: number
   cacheAwareHints?: boolean
   mutationBatchCadence?: number
+  evictionBatchMultiplier?: number
+  metricsMinLineIntervalMs?: number
 }
 export type PluginEntry = [string, PluginEntryOption]
 
@@ -89,6 +91,23 @@ export const LEVER3_ARM_PLUGIN_ENTRY: readonly PluginEntry[] = [
     { manualMode: false, watermarkTokens: 12000, agedReadEvictionMessages: 30, reasoningRetentionMessages: 16, cacheAwareHints: true, mutationBatchCadence: 3 },
   ],
 ]
+// The lever-4 seeds: the LEVER seed extends the lever3 stack with the eviction
+// batch multiplier, and both ON seeds carry the series-4 metrics-visibility
+// rider (metricsMinLineIntervalMs 0), so the ON-FULL seed is its own record
+// rather than the shared series 1-3 geometry constant (the profile docblock
+// below carries the seed delta and the multiplier rationale).
+export const LEVER4_ON_FULL_PLUGIN_ENTRY: readonly PluginEntry[] = [
+  [
+    "./opencode-context-manager/plugin/context-manager.ts",
+    { manualMode: false, watermarkTokens: 12000, agedReadEvictionMessages: 30, reasoningRetentionMessages: 16, metricsMinLineIntervalMs: 0 },
+  ],
+]
+export const LEVER4_ARM_PLUGIN_ENTRY: readonly PluginEntry[] = [
+  [
+    "./opencode-context-manager/plugin/context-manager.ts",
+    { manualMode: false, watermarkTokens: 12000, agedReadEvictionMessages: 30, reasoningRetentionMessages: 16, cacheAwareHints: true, mutationBatchCadence: 3, evictionBatchMultiplier: 2, metricsMinLineIntervalMs: 0 },
+  ],
+]
 
 export const FLIP_ARG_BY_ARM = {
   OFF: "off",
@@ -122,7 +141,7 @@ export const ARM_BY_FLIP_ARG: ArmByFlipArg = {
 // deep profile is the frozen LRU-82 shape and stays the default everywhere;
 // a profile parameter omitted means deep.
 export type ExperimentProfile = {
-  name: "deep" | "lever1" | "lever3"
+  name: "deep" | "lever1" | "lever3" | "lever4"
   dataArms: readonly Arm[]
   pluginSeedByArm: Readonly<Partial<Record<FlipArm, readonly PluginEntry[]>>>
   corroboratesFullModeMetrics: boolean
@@ -184,10 +203,39 @@ export const LEVER3_PROFILE: ExperimentProfile = {
   ],
 }
 
+// The lever-4 series: the shared lever shape with the LEVER arm carrying the
+// full cumulative cache-aware stack (hint stability, the hygiene batch
+// cadence, and the eviction batch multiplier). evictionBatchMultiplier 2 is
+// the conservative first probe of raise-and-batch: it halves the reset-event
+// rate while the per-firing overshoot stays bounded at one extra deficit;
+// larger N amplifies the eviction amortization and the post-eviction
+// starvation together, so the first measurement takes the smallest step.
+// Both ON seeds set metricsMinLineIntervalMs 0, the series-4
+// metrics-visibility rider: write frequency only, no context-behavior
+// change, and the seed delta versus series 1-3, whose ON arms ran the
+// coalescing default 60000. The deep lever2 era name stays retired.
+export const LEVER4_PROFILE: ExperimentProfile = {
+  name: "lever4",
+  dataArms: LEVER_DATA_ARMS,
+  pluginSeedByArm: {
+    "ON-FULL": LEVER4_ON_FULL_PLUGIN_ENTRY,
+    LEVER: LEVER4_ARM_PLUGIN_ENTRY,
+    "CAL-ON-FULL": LEVER4_ON_FULL_PLUGIN_ENTRY,
+  },
+  corroboratesFullModeMetrics: true,
+  defaultsToSelfFlip: true,
+  contrasts: [
+    ["LEVER", "OFF"],
+    ["LEVER", "ON-FULL"],
+    ["ON-FULL", "OFF"],
+  ],
+}
+
 export const EXPERIMENT_PROFILES: Readonly<Record<ExperimentProfile["name"], ExperimentProfile>> = {
   deep: DEEP_PROFILE,
   lever1: LEVER1_PROFILE,
   lever3: LEVER3_PROFILE,
+  lever4: LEVER4_PROFILE,
 }
 
 /**
