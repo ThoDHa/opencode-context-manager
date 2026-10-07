@@ -89,6 +89,7 @@ const COMPACTION_STASH_CANDIDATE_COUNT = 4
 const COMPACTION_STASH_BUNDLE_CHARS =
   COMPACTION_STASH_CANDIDATE_COUNT * THREE_ENTRY_OUTPUT_BYTES + RECENT_WINDOW_FILLER_MESSAGES * FILLER_TEXT_CHARS
 const COLD_NEW_BUNDLE_CHARS = COLD_OUTPUT_BYTES + NEW_OUTPUT_BYTES + RECENT_WINDOW_FILLER_MESSAGES * FILLER_TEXT_CHARS
+const PROTECTED_MULTIPLIER_BUNDLE_CHARS = 2 * THREE_ENTRY_OUTPUT_BYTES + RECENT_WINDOW_FILLER_MESSAGES * FILLER_TEXT_CHARS
 const GREP_TOOL = "grep"
 const RANGE_PATH = "/data/range.txt"
 const READ_OFFSET_LINES = 100
@@ -807,6 +808,59 @@ test("transform evicts multiple entries until the deficit is covered and keeps t
   assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
   assert.ok(toolPartAt(bundle.messages[1], 0).state.output.startsWith(TOMBSTONE_MARKER))
   assert.equal(toolPartAt(bundle.messages[2], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
+})
+
+const buildThreeEntryDeficitBundle = (): StrictBundle =>
+  buildBundle([
+    [pathToolPart("/data/a.txt", THREE_ENTRY_OUTPUT_BYTES)],
+    [pathToolPart("/data/b.txt", THREE_ENTRY_OUTPUT_BYTES)],
+    [pathToolPart("/data/c.txt", THREE_ENTRY_OUTPUT_BYTES)],
+    ...fillerMessages(),
+  ])
+
+test("the eviction batch multiplier default clears exactly one deficit and reports the true deficit", async () => {
+  const hooks = await loadPluginHooks()
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(THREE_ENTRY_BUNDLE_CHARS, PARTIAL_DEFICIT_TOKENS))
+
+  const bundle = buildThreeEntryDeficitBundle()
+  await runTransform(hooks, bundle)
+
+  assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  assert.equal(toolPartAt(bundle.messages[1], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
+  assert.equal(toolPartAt(bundle.messages[2], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
+  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).evictions, 1)
+  const lastRun = (await readStats(hooks, SESSION_ID)).lastRun as Record<string, unknown>
+  assert.equal(lastRun.deficitTokens, PARTIAL_DEFICIT_TOKENS)
+})
+
+test("the eviction batch multiplier at two clears twice the deficit per walk without moving the reported deficit", async () => {
+  const hooks = await loadPluginHooksWith({ evictionBatchMultiplier: 2 })
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(THREE_ENTRY_BUNDLE_CHARS, PARTIAL_DEFICIT_TOKENS))
+
+  const bundle = buildThreeEntryDeficitBundle()
+  await runTransform(hooks, bundle)
+
+  assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  assert.ok(toolPartAt(bundle.messages[1], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  assert.equal(toolPartAt(bundle.messages[2], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
+  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).evictions, 2)
+  const lastRun = (await readStats(hooks, SESSION_ID)).lastRun as Record<string, unknown>
+  assert.equal(lastRun.deficitTokens, PARTIAL_DEFICIT_TOKENS)
+})
+
+test("invalid evictionBatchMultiplier values fall back to the identity multiplier", async () => {
+  for (const invalid of [0, -1, 1.5, "2"]) {
+    const hooks = await loadPluginHooksWith({ evictionBatchMultiplier: invalid })
+    await setContextLimit(hooks, SESSION_ID, contextForDeficit(THREE_ENTRY_BUNDLE_CHARS, PARTIAL_DEFICIT_TOKENS))
+
+    const bundle = buildThreeEntryDeficitBundle()
+    await runTransform(hooks, bundle)
+
+    assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER), `output a must evict for ${String(invalid)}`)
+    assert.equal(toolPartAt(bundle.messages[1], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES), `output b must survive for ${String(invalid)}`)
+    assert.equal(toolPartAt(bundle.messages[2], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES), `output c must survive for ${String(invalid)}`)
+    assert.equal(countersOf(await readStats(hooks, SESSION_ID)).evictions, 1, `exactly one eviction must land for ${String(invalid)}`)
+  }
 })
 
 test("transform evicts the coldest entry first when over watermark regardless of output size", async () => {
@@ -7178,6 +7232,73 @@ test("metrics log flushes immediately on a dedup inside the coalesce interval", 
   }
 })
 
+const purgeMetricsBundle = (): StrictBundle =>
+  buildBundle([
+    [errorToolPart(READ_TOOL, { [PATH_INPUT_KEY]: PURGE_ERROR_PATH }, outputOfBytes(UNCOMPLETED_OUTPUT_BYTES))],
+    ...fillerMessages(RECENT_WINDOW_MESSAGES + 1),
+  ])
+
+test("metrics line carries purgedThisRun on a purge run and stays quiet on the already-purged rerun", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const hooks = await loadPluginHooksWithMetricsLog(metricsPath)
+
+    const bundle = purgeMetricsBundle()
+    await runTransform(hooks, bundle)
+    assert.equal(inputAt(bundle.messages[0]), PURGE_MARKER)
+
+    const lines = metricsLinesIn(metricsPath)
+    assert.equal(lines.length, STATS_LOG_FILE_LINES)
+    assert.equal(lines[0].purgedThisRun, 1)
+
+    await runTransform(hooks, bundle)
+    assert.equal(metricsLinesIn(metricsPath).length, STATS_LOG_FILE_LINES)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("metrics log flushes immediately on a purge inside the coalesce interval", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const hooks = await loadPluginHooksWithCoalesce(metricsPath)
+    await runTransform(hooks, reasoningOnlyBundle())
+    assert.equal(metricsLinesIn(metricsPath).length, STATS_LOG_FILE_LINES)
+
+    await runTransform(hooks, purgeMetricsBundle())
+
+    const lines = metricsLinesIn(metricsPath)
+    assert.equal(lines.length, METRICS_COALESCE_LINES_AFTER_FLUSH)
+    assert.equal(lines[METRICS_COALESCE_LINES_AFTER_FLUSH - 1].purgedThisRun, 1)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("batched cadence keeps purgedThisRun on the fire run and writes nothing while the purge is deferred", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const hooks = await loadPluginHooksWith({ metricsLog: true, metricsPath, mutationBatchCadence: 2 })
+
+    const bundle = purgeMetricsBundle()
+    await runTransform(hooks, bundle)
+    assert.deepEqual(inputAt(bundle.messages[0]), { [PATH_INPUT_KEY]: PURGE_ERROR_PATH })
+    assert.equal(existsSync(metricsPath), false)
+
+    await runTransform(hooks, bundle)
+    assert.equal(inputAt(bundle.messages[0]), PURGE_MARKER)
+
+    const lines = metricsLinesIn(metricsPath)
+    assert.equal(lines.length, STATS_LOG_FILE_LINES)
+    assert.equal(lines[0].purgedThisRun, 1)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
 test("metrics log with metricsMinLineIntervalMs zero keeps writing one line per eventful run", async () => {
   const metricsDir = makeMetricsDir()
   try {
@@ -7954,6 +8075,64 @@ test("the aged tier and the watermark tier evict each output exactly once in a s
   assert.equal(countersOf(stats).evictions, 2)
   assert.equal(countersOf(stats).bytesReclaimed, MIN_EVICTABLE_BYTES * 2)
   assert.equal(countersOf(stats).evictionTokensSaved, tokensForChars(MIN_EVICTABLE_BYTES) * 2)
+})
+
+test("the aged read tier evicts unchanged under an eviction batch multiplier above one", async () => {
+  const hooks = await loadPluginHooksWith({ agedReadEvictionMessages: AGED_EVICTION_MESSAGES, evictionBatchMultiplier: 2 })
+
+  const bundle = agedBundle()
+  await runTransform(hooks, bundle)
+
+  assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).evictions, 1)
+  const lastRun = (await readStats(hooks, SESSION_ID)).lastRun as Record<string, unknown>
+  assert.equal(lastRun.watermarkTokens, null)
+  assert.equal(lastRun.deficitTokens, null)
+})
+
+test("an aged read matching a protected pattern survives under an eviction batch multiplier above one", async () => {
+  const hooks = await loadPluginHooksWith({
+    agedReadEvictionMessages: AGED_EVICTION_MESSAGES,
+    protectedPatterns: [AGED_PROTECTED_GLOB],
+    evictionBatchMultiplier: 2,
+  })
+
+  const bundle = buildBundle([[pathToolPart(AGED_PROTECTED_PATH, MIN_EVICTABLE_BYTES)], ...fillerMessages(AGED_FILLER_COUNT)])
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).evictions, 0)
+})
+
+test("a protected tool output survives the watermark tier under an eviction batch multiplier above one", async () => {
+  const hooks = await loadPluginHooksWith({ evictionBatchMultiplier: 2 })
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(PROTECTED_MULTIPLIER_BUNDLE_CHARS, PARTIAL_DEFICIT_TOKENS))
+
+  const bundle = buildBundle([
+    [completedToolPart(TASK_TOOL, {}, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))],
+    [pathToolPart("/data/a.txt", THREE_ENTRY_OUTPUT_BYTES)],
+    ...fillerMessages(),
+  ])
+  await runTransform(hooks, bundle)
+
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
+  assert.ok(toolPartAt(bundle.messages[1], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  assert.equal(countersOf(await readStats(hooks, SESSION_ID)).evictions, 1)
+})
+
+test("the manual-mode dry run previews the multiplied walk without mutating", async () => {
+  const hooks = await loadPluginHooksWith({ manualMode: true, evictionBatchMultiplier: 2 })
+  await setContextLimit(hooks, SESSION_ID, contextForDeficit(THREE_ENTRY_BUNDLE_CHARS, PARTIAL_DEFICIT_TOKENS))
+
+  const bundle = buildThreeEntryDeficitBundle()
+  await runTransform(hooks, bundle)
+
+  const dryRun = (await readStats(hooks, SESSION_ID)).dryRun as Record<string, unknown>
+  assert.equal(dryRun.wouldEvictCount, 2)
+  assert.deepEqual(dryRun.wouldEvictSubjects, ["/data/a.txt", "/data/b.txt"])
+  assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
+  assert.equal(toolPartAt(bundle.messages[1], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
+  assert.equal(toolPartAt(bundle.messages[2], 0).state.output, outputOfBytes(THREE_ENTRY_OUTPUT_BYTES))
 })
 
 test("an aged output and a not-yet-aged candidate each take one disposition when the threshold exceeds the recent window", async () => {

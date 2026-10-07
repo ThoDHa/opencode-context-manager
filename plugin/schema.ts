@@ -13,13 +13,17 @@ export const DEFAULT_LIVE_STATE_DIR_BASENAME = "context-state"
 
 // Canonical spellings and defaults for the cache-aware pass options: the
 // producer resolves its option surface through these, so a consumer
-// spelling an option differently cannot silently no-op. Both ship
-// default-off and stay off pending the measurement program's conclusion;
-// the README cache-model passage is the frame of record.
+// spelling an option differently cannot silently no-op. cacheAwareHints
+// and mutationBatchCadence ship default-off pending the measurement
+// program's conclusion; evictionBatchMultiplier ships at its identity
+// default 1, which reproduces the deficit-exact walk byte for byte. The
+// README cache-model passage is the frame of record.
 export const OPTION_CACHE_AWARE_HINTS = "cacheAwareHints"
 export const DEFAULT_CACHE_AWARE_HINTS = false
 export const OPTION_MUTATION_BATCH_CADENCE = "mutationBatchCadence"
 export const DEFAULT_MUTATION_BATCH_CADENCE = 0
+export const OPTION_EVICTION_BATCH_MULTIPLIER = "evictionBatchMultiplier"
+export const DEFAULT_EVICTION_BATCH_MULTIPLIER = 1
 
 // Shared by both entry modules so their registrations never drift.
 export const PLUGIN_ID = "context-manager"

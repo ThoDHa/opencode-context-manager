@@ -5,11 +5,13 @@ import { dirname, join } from "node:path"
 import type { Plugin, PluginModule } from "@opencode-ai/plugin"
 import {
   DEFAULT_CACHE_AWARE_HINTS,
+  DEFAULT_EVICTION_BATCH_MULTIPLIER,
   DEFAULT_LIVE_STATE_DIR_BASENAME,
   DEFAULT_METRICS_DIR_SEGMENTS,
   DEFAULT_METRICS_FILE_BASENAME,
   DEFAULT_MUTATION_BATCH_CADENCE,
   OPTION_CACHE_AWARE_HINTS,
+  OPTION_EVICTION_BATCH_MULTIPLIER,
   OPTION_MUTATION_BATCH_CADENCE,
   PLUGIN_ID,
   PLUGIN_VERSION,
@@ -273,6 +275,7 @@ type ContextManagerOptions = {
   hintSubjects?: number
   cacheAwareHints?: boolean
   mutationBatchCadence?: number
+  evictionBatchMultiplier?: number
   protectedTools?: string[]
   protectedPatterns?: string[]
   stashLimit?: number
@@ -389,6 +392,7 @@ type RunOutcome = {
   dedupedUnique: number
   collapsedWindows: number
   collapsedWindowBytes: number
+  purged: number
   faults: number
   reasoningExpired: ReasoningExpiry
   fenceEvicted: FenceEviction
@@ -679,6 +683,11 @@ const resolveOptions = (raw: ContextManagerOptions = {}): ResolvedOptions => {
     // mutations until the session's Nth trigger-carrying run fires them as
     // one batched mutation. The cache reasoning lives at resolveHygieneBatch.
     [OPTION_MUTATION_BATCH_CADENCE]: boundedIntegerOr(raw.mutationBatchCadence, DEFAULT_MUTATION_BATCH_CADENCE, 0),
+    // The eviction walk's deficit multiplier: N clears N x the deficit per
+    // firing, so reset events land rarer and larger; 1 (the default) is the
+    // byte-identical deficit-exact walk. The cache reasoning lives at
+    // isEvictedByWalkPolicy, the one disposition the multiplier widens.
+    [OPTION_EVICTION_BATCH_MULTIPLIER]: boundedIntegerOr(raw.evictionBatchMultiplier, DEFAULT_EVICTION_BATCH_MULTIPLIER, 1),
     protectedTools: Array.isArray(raw.protectedTools) && raw.protectedTools.every(isNonEmptyString) ? raw.protectedTools : DEFAULT_PROTECTED_TOOLS,
     protectedPatterns: protectedPatterns.flatMap((pattern) => {
       const compiled = compiledGlobOf(pattern)
@@ -1283,15 +1292,18 @@ const unpurgedErroredToolStateOf = (part: Record<string, unknown>): Record<strin
   return typedState
 }
 
-const purgeErroredToolInputs = (messages: MessageBundle[], options: ResolvedOptions): void => {
+const purgeErroredToolInputs = (messages: MessageBundle[], options: ResolvedOptions): number => {
   const hotFromIndex = hotFromIndexOf(messages, options)
+  let purged = 0
   for (let msgIndex = 0; msgIndex < hotFromIndex; msgIndex += 1) {
     for (const part of messages[msgIndex].parts) {
       const erroredState = unpurgedErroredToolStateOf(part)
       if (erroredState === undefined) continue
       erroredState["input"] = PURGED_INPUT_MARKER
+      purged += 1
     }
   }
+  return purged
 }
 
 // The pass's batched-cadence trigger: whether a purge would mutate, early
@@ -2332,24 +2344,25 @@ const recordMetricsLine = async (
   contextLimit: ContextLimit,
   run: RunOutcome,
 ): Promise<void> => {
-  const { eviction, deduped: dedupedThisRun, faults: faultsThisRun, reasoningExpired: reasoningExpiredThisRun, fenceEvicted: fenceEvictedThisRun } = run
+  const { eviction, deduped: dedupedThisRun, purged: purgedThisRun, faults: faultsThisRun, reasoningExpired: reasoningExpiredThisRun, fenceEvicted: fenceEvictedThisRun } = run
   const recallsSinceLastLine = metrics.recallHits + metrics.recallMisses - metrics.recallsLoggedThrough
   const nowMs = options.now()
-  // The five recorded-event disjuncts feed both gates so the lists cannot
+  // The six recorded-event disjuncts feed both gates so the lists cannot
   // drift. Eventful runs are the candidates for a line: an eviction, dedup
-  // tombstone, touch, fence event, or stash read, plus reasoning expiry; a
-  // budget-source change alone stays quiet. Among eventful runs, the
-  // significant ones always flush: any recorded event, plus a budget-source
-  // change against the last flushed line (a change the panel renders per
-  // line, and the first line of a session counts as one). Reasoning expiry
-  // re-reports the session's standing aged set on every run, so a
-  // reasoning-only run inside the coalesce window writes nothing; the
-  // window is measured from the session's previous flushed line and a
-  // suppressed run does not move it, so sustained reasoning-only traffic
-  // settles at one line per interval.
+  // tombstone, input purge, touch, fence event, or stash read, plus
+  // reasoning expiry; a budget-source change alone stays quiet. Among
+  // eventful runs, the significant ones always flush: any recorded event,
+  // plus a budget-source change against the last flushed line (a change
+  // the panel renders per line, and the first line of a session counts as
+  // one). Reasoning expiry re-reports the session's standing aged set on
+  // every run, so a reasoning-only run inside the coalesce window writes
+  // nothing; the window is measured from the session's previous flushed
+  // line and a suppressed run does not move it, so sustained
+  // reasoning-only traffic settles at one line per interval.
   const hasRecordedEvent =
     eviction.evicted.length > 0 ||
     dedupedThisRun > 0 ||
+    purgedThisRun > 0 ||
     faultsThisRun > 0 ||
     fenceEvictedThisRun.blocks > 0 ||
     recallsSinceLastLine > 0
@@ -2382,6 +2395,7 @@ const recordMetricsLine = async (
       messagesAgo: entry.messagesAgo,
     })),
     dedupedThisRun,
+    purgedThisRun,
     reasoningExpiredThisRun: reasoningExpiredThisRun.parts,
     reasoningBytesExpiredThisRun: reasoningExpiredThisRun.bytes,
     ...(run.dryRun === undefined
@@ -2870,16 +2884,30 @@ const deficitTokensOf = (estimatedTokens: number, watermarkTokens: number | null
 
 // The one-disposition decision the evictor walk and the dry-run walk
 // share, so the two sites cannot drift: an entry is evicted when the aged
-// read tier claims it, or when the watermark tier still has deficit left
+// read tier claims it, or when the watermark tier still has ground left
 // to cover. A null deficit (no effective watermark) disarms the watermark
-// tier entirely and leaves the aged tier unaffected.
+// tier entirely and leaves the aged tier unaffected. The tier boundary
+// itself is untouched by the batch multiplier: the aged tier's dispositions
+// and the protected-path filters upstream of the walk are identical at
+// every multiplier value, and the reported deficit stays the true
+// estimate-minus-watermark figure.
+//
+// WHY cache-aware: the watermark tier's stop target is the deficit times
+// evictionBatchMultiplier. Each firing cuts history and re-prices the
+// request tail from the cut point at the uncached rate, so N small
+// reset events cost N re-priced tails; clearing N x the deficit per
+// firing amortizes those re-pricings into one rarer, larger cut. At the
+// default 1 the target is the deficit itself and the walk is byte-identical
+// to the ungated evictor.
 const isEvictedByWalkPolicy = (
   entry: EvictableEntry,
   listLength: number,
   options: ResolvedOptions,
   deficitTokens: number | null,
   reclaimedTokens: number,
-): boolean => isAgedReadEntry(entry, listLength, options) || (deficitTokens !== null && reclaimedTokens < deficitTokens)
+): boolean =>
+  isAgedReadEntry(entry, listLength, options) ||
+  (deficitTokens !== null && reclaimedTokens < deficitTokens * options.evictionBatchMultiplier)
 
 // The stand-down measurement: the run record of a transform that evicted
 // nothing. The watermark and deficit ride through when an effective
@@ -3277,8 +3305,9 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
     ...fileDedup.tombstonedPairs,
   ])
   let reasoningExpiredThisRun: ReasoningExpiry = REASONING_EXPIRY_NONE
+  let purgedThisRun = 0
   if (hygieneBatch.fire) {
-    purgeErroredToolInputs(messages, options)
+    purgedThisRun = purgeErroredToolInputs(messages, options)
     reasoningExpiredThisRun = expireAgedReasoning(sessionMetrics, messages, options)
   }
   const fenceEvictedThisRun = evictLargeUserFences(messages, options, sessionPageStore, pageStoreEntries)
@@ -3319,6 +3348,7 @@ const transformHookBody = async (messages: MessageBundle[], deps: TransformHookD
     dedupedUnique: dedupedUniqueThisRun,
     collapsedWindows: rangeCollapse.collapsed,
     collapsedWindowBytes: rangeCollapse.collapsedBytes,
+    purged: purgedThisRun,
     faults: faultsThisRun,
     reasoningExpired: reasoningExpiredThisRun,
     fenceEvicted: fenceEvictedThisRun,
