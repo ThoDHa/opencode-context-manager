@@ -1,5 +1,7 @@
 import type { ResolvedOptions } from "./options.ts"
 import type { RunComposition } from "./state.ts"
+import type { Subject } from "./vocabulary.ts"
+import { BASH_TOOL_NAME } from "./vocabulary.ts"
 
 const FILE_PART_TYPE = "file"
 const FILE_FILENAME_KEY = "filename"
@@ -25,6 +27,23 @@ export const hotFromIndexOf = (messages: MessageBundle[], options: ResolvedOptio
 
 export const retentionFromIndexOf = (messages: MessageBundle[], options: ResolvedOptions): number =>
   messages.length - options.reasoningRetentionMessages
+
+export type ToolAppearance = {
+  msgIndex: number
+  tool: string
+  subjects: Subject[]
+}
+
+export const appearanceTouches = (entrySubjects: Subject[], appearance: ToolAppearance, minSubstringChars: number): boolean =>
+  appearance.subjects.some((appearanceSubject) =>
+    entrySubjects.some(
+      (entrySubject) =>
+        entrySubject.path === appearanceSubject.path ||
+        (appearance.tool === BASH_TOOL_NAME &&
+          entrySubject.path.length > minSubstringChars &&
+          appearanceSubject.path.includes(entrySubject.path)),
+    ),
+  )
 
 export const completedOutputOf = (part: Record<string, unknown>): { output: string; attachments?: unknown } | undefined => {
   if (part["type"] !== "tool") return undefined

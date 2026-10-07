@@ -1,5 +1,6 @@
 import { RAW_COUNTER_KEYS as SCHEMA_RAW_COUNTER_KEYS, TOTALS_KEYS, type DerivedCounterKey as TotalsDerivedKey, type RawCounterKey as SchemaRawCounterKey, type TotalsKey } from "./schema.ts"
-import { estimateTokensFromBytes } from "./messages.ts"
+import { appearanceTouches, estimateTokensFromBytes } from "./messages.ts"
+import type { ToolAppearance } from "./messages.ts"
 import { rememberFaultForSubject, touchMapEntry, trimMapToBound } from "./session-maps.ts"
 import type { DedupedPairBytes } from "./dedup.ts"
 import type { ContextTokensSource, PersistedContextLimit } from "./context-limits.ts"
@@ -15,11 +16,6 @@ const DEFAULT_REMEMBERED_DEDUP_PAIRS = 4096
 // fault-tracked for the entry's lifetime.
 export const DEFAULT_REMEMBERED_FAULT_SUBJECTS = 256
 
-export type ToolAppearance = {
-  msgIndex: number
-  tool: string
-  subjects: Subject[]
-}
 
 export type EvictionResult = {
   hotSubjects: HotSubject[]
@@ -352,17 +348,6 @@ export const metricsForSession = async (
     if (settled !== undefined) return settled
   }
 }
-
-export const appearanceTouches = (entrySubjects: Subject[], appearance: ToolAppearance, minSubstringChars: number): boolean =>
-  appearance.subjects.some((appearanceSubject) =>
-    entrySubjects.some(
-      (entrySubject) =>
-        entrySubject.path === appearanceSubject.path ||
-        (appearance.tool === BASH_TOOL_NAME &&
-          entrySubject.path.length > minSubstringChars &&
-          appearanceSubject.path.includes(entrySubject.path)),
-    ),
-  )
 
 // Keyed fault credit for one unseen appearance: every remembered rendered
 // subject the appearance touches (same path-equality and bash-substring
