@@ -1443,6 +1443,19 @@ test("the per-turn primary averages promoted per-turn credits at position 21+ an
   assert.equal(contrasts[2]!.creditsPerTurnDelta, null)
 })
 
+test("the per-turn primary buckets turns by per-session position, not the arm-concatenated index", () => {
+  const firstRun = Array.from({ length: 25 }, (_, index) => costedTurn(index + 1, 100000, 0))
+  const secondRun = [
+    ...Array.from({ length: 20 }, (_, index) => costedTurn(index + 1, 10000, 0)),
+    ...Array.from({ length: 5 }, (_, index) => costedTurn(index + 21, 300000, 0)),
+  ]
+  const rows = [analysisRow("LEVER", 3, firstRun), analysisRow("LEVER", 6, secondRun)]
+  const { byArm } = computeTurnPrimary(rows, LEVER1_PROFILE)
+  const lever = byArm.find((entry) => entry.arm === "LEVER")!
+  assert.equal(lever.turns, 10, "each run contributes its own turns at per-session position 21+")
+  assert.ok(Math.abs(lever.creditsPerTurnMean! - 75.85) < 1e-9, "the concatenated convention would drag the second run's early turns into the primary")
+})
+
 test("the depth-bucket table aggregates input, cache.read, share, and per-turn credits by turn position", () => {
   const turns = [
     ...Array.from({ length: 5 }, (_, index) => costedTurn(index + 1, 100000, 400000)),
@@ -1479,6 +1492,19 @@ test("the depth-bucket table aggregates input, cache.read, share, and per-turn c
   }
 })
 
+test("the depth-bucket table buckets turns by per-session position, not the arm-concatenated index", () => {
+  const firstRun = [...Array.from({ length: 5 }, (_, index) => costedTurn(index + 1, 100000, 0)), costedTurn(6, 200000, 0)]
+  const secondRun = [costedTurn(1, 40000, 0), costedTurn(2, 40000, 0)]
+  const table = computeDepthBucketTable([analysisRow("LEVER", 3, firstRun), analysisRow("LEVER", 6, secondRun)], LEVER1_PROFILE)
+  const leverRows = table.filter((row) => row.arm === "LEVER")
+  const early = leverRows[0]!
+  assert.equal(early.turns, 7, "the second run's turns 1-2 join the first run's positions 1-5 in the early bucket")
+  assert.ok(Math.abs(early.inputTokensMean! - 580000 / 7) < 1e-9)
+  const mid = leverRows[1]!
+  assert.equal(mid.turns, 1, "only the first run's own turn 6 sits at per-session position 6")
+  assert.ok(Math.abs(mid.inputTokensMean! - 200000) < 1e-9)
+})
+
 test("the eviction-aligned view splits turns 2+ by an eviction in the prior inter-turn gap", () => {
   const turns = [costedTurn(10, 10000, 90000), costedTurn(20, 40000, 60000), costedTurn(30, 100000, 20000), costedTurn(40, 200000, 0)]
   const row: CensusRow = {
@@ -1495,15 +1521,34 @@ test("the eviction-aligned view splits turns 2+ by an eviction in the prior inte
   const view = computeEvictionAlignedView([row], ["LEVER"])
   assert.equal(view.length, 1)
   const lever = view[0]!
-  assert.equal(lever.postEvictionTurns, 2, "the turns at 15 and the gap boundary 29 are post-eviction")
-  assert.ok(Math.abs(lever.postEvictionInputMean! - 70000) < 1e-9)
-  assert.ok(Math.abs(lever.postEvictionCacheReadMean! - 40000) < 1e-9)
-  assert.ok(Math.abs(lever.postEvictionCacheShare! - 80000 / 220000) < 1e-9)
-  assert.equal(lever.cleanTurns, 1, "the quiet gap leaves the turn clean; turn 1 and the stray evictions enter nothing")
-  assert.ok(Math.abs(lever.cleanInputMean! - 200000) < 1e-9)
-  assert.ok(Math.abs(lever.cleanCacheShare! - 0) < 1e-9)
+  assert.equal(lever.postEviction.turns, 2, "the turns at 15 and the gap boundary 29 are post-eviction")
+  assert.ok(Math.abs(lever.postEviction.inputMean! - 70000) < 1e-9)
+  assert.ok(Math.abs(lever.postEviction.cacheReadMean! - 40000) < 1e-9)
+  assert.ok(Math.abs(lever.postEviction.cacheShare! - 80000 / 220000) < 1e-9)
+  assert.equal(lever.evictionClean.turns, 1, "the quiet gap leaves the turn eviction-clean; turn 1 and the stray evictions enter nothing")
+  assert.ok(Math.abs(lever.evictionClean.inputMean! - 200000) < 1e-9)
+  assert.ok(Math.abs(lever.evictionClean.cacheShare! - 0) < 1e-9)
   assert.deepEqual(fullModeArms(LEVER1_PROFILE), ["ON-FULL", "LEVER"])
   assert.deepEqual(fullModeArms(DEEP_PROFILE), ["ON-FULL"], "the dry arm is not a full-mode arm")
+})
+
+test("the event-aligned view splits turns 2+ by any metrics event in the prior inter-turn gap", () => {
+  const turns = [costedTurn(10, 10000, 0), costedTurn(20, 20000, 0), costedTurn(30, 30000, 0), costedTurn(40, 40000, 0)]
+  const row: CensusRow = {
+    ...endpointRow("LEVER", 0, turns.length, 3),
+    turns,
+    metricsEvents: [metricsEventAt(15, true), metricsEventAt(25, false)],
+  }
+  const view = computeEvictionAlignedView([row], ["LEVER"])
+  const lever = view[0]!
+  assert.equal(lever.postEvent.turns, 2, "an eviction-bearing and a quiet metrics line both count as event gaps")
+  assert.ok(Math.abs(lever.postEvent.inputMean! - 25000) < 1e-9)
+  assert.equal(lever.eventClean.turns, 1, "the gap after the last event leaves the final turn event-clean")
+  assert.ok(Math.abs(lever.eventClean.inputMean! - 40000) < 1e-9)
+  assert.equal(lever.postEviction.turns, 1, "only the eviction-bearing gap is post-eviction")
+  assert.ok(Math.abs(lever.postEviction.inputMean! - 20000) < 1e-9)
+  assert.equal(lever.evictionClean.turns, 2, "the eviction-specific case survives alongside the any-event split")
+  assert.ok(Math.abs(lever.evictionClean.inputMean! - 35000) < 1e-9)
 })
 
 test("decideNextBlock walks the lever schedule and refuses broken lever histories", () => {
@@ -1793,8 +1838,10 @@ test("the lever readout emits the three contrasts and reports corroboration fail
     assert.match(healthy, /- primary contrast LEVER\/OFF: creditsPerTurn delta=n\/a ratio=n\/a/)
     assert.match(healthy, /\| arm \| bucket \| turns \| input\/turn \| cache.read\/turn \| cache share \| credits\/turn \|/)
     assert.match(healthy, /\| LEVER \| 1-5 \| 1 \| 100000 \| 0 \| 0\.0% \| 41\.35 \|/)
+    assert.match(healthy, /\| LEVER \| post-event \| 0 \| n\/a \| n\/a \| n\/a \|/)
+    assert.match(healthy, /\| ON-FULL \| event-clean \| 0 \| n\/a \| n\/a \| n\/a \|/)
     assert.match(healthy, /\| LEVER \| post-eviction \| 0 \| n\/a \| n\/a \| n\/a \|/)
-    assert.match(healthy, /### eviction-aligned view \(turns 2\+, full-mode arms\)/)
+    assert.match(healthy, /### event-aligned view \(turns 2\+, full-mode arms\)/)
     assert.equal(healthy.includes("corroboration"), false, "a corroborating series carries no corroboration caveat")
     writeFileSync(
       join(temp, METRICS_LOG_BASENAME),

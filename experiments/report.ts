@@ -13,7 +13,7 @@ import {
   type ArmContrast,
   type ArmSummary,
   type DepthBucketRow,
-  type EvictionAlignedArmRow,
+  type EventAlignedArmRow,
   type TurnPrimaryArm,
   type TurnPrimaryContrast,
 } from "./endpoints.ts"
@@ -22,7 +22,7 @@ import type { CensusRow } from "./census.ts"
 export type ReadoutAnalysis = {
   primary: { byArm: readonly TurnPrimaryArm[]; contrasts: readonly TurnPrimaryContrast[] }
   depthBuckets: readonly DepthBucketRow[]
-  evictionAligned: readonly EvictionAlignedArmRow[]
+  evictionAligned: readonly EventAlignedArmRow[]
 }
 
 export type ReadoutInputs = {
@@ -72,8 +72,8 @@ const formatPrimaryMean = (value: number | null): string => (value === null ? "n
 /**
  * Renders the per-turn analysis views (the frozen-rule instruments): the
  * per-turn primary with its delta and ratio contrasts, the depth-bucket
- * table by turn position, and the eviction-aligned view for full-mode
- * arms.
+ * table by per-session turn position, and the event-aligned view (with its
+ * eviction-specific case) for full-mode arms.
  *
  * @param analysis the computed analysis views
  * @returns the analysis section's markdown lines
@@ -96,15 +96,19 @@ export const renderAnalysis = (analysis: ReadoutAnalysis): string[] => {
       `| ${row.arm} | ${row.bucket} | ${row.turns} | ${formatTokenMean(row.inputTokensMean)} | ${formatTokenMean(row.cacheReadTokensMean)} | ${formatSharePercent(row.cacheShare)} | ${formatPrimaryMean(row.creditsPerTurnMean)} |`,
     )
   }
-  lines.push("### eviction-aligned view (turns 2+, full-mode arms)")
+  lines.push("### event-aligned view (turns 2+, full-mode arms)")
   lines.push("| arm | group | turns | input/turn | cache.read/turn | cache share |", "|---|---|---|---|---|---|")
   for (const row of analysis.evictionAligned) {
-    lines.push(
-      `| ${row.arm} | post-eviction | ${row.postEvictionTurns} | ${formatTokenMean(row.postEvictionInputMean)} | ${formatTokenMean(row.postEvictionCacheReadMean)} | ${formatSharePercent(row.postEvictionCacheShare)} |`,
-    )
-    lines.push(
-      `| ${row.arm} | clean | ${row.cleanTurns} | ${formatTokenMean(row.cleanInputMean)} | ${formatTokenMean(row.cleanCacheReadMean)} | ${formatSharePercent(row.cleanCacheShare)} |`,
-    )
+    for (const [group, split] of [
+      ["post-event", row.postEvent],
+      ["event-clean", row.eventClean],
+      ["post-eviction", row.postEviction],
+      ["eviction-clean", row.evictionClean],
+    ] as const) {
+      lines.push(
+        `| ${row.arm} | ${group} | ${split.turns} | ${formatTokenMean(split.inputMean)} | ${formatTokenMean(split.cacheReadMean)} | ${formatSharePercent(split.cacheShare)} |`,
+      )
+    }
   }
   return lines
 }

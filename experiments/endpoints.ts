@@ -195,11 +195,13 @@ export const computeEndpoints = (rows: readonly (CensusRow & { credits: number }
 
 // ---------------------------------------------------------------------------
 // Per-turn analysis views over the gated endpoint population. Turn
-// positions are 1-based throughout (the LRU-82 readout's convention): the
-// primary window is turn 21 onward, the depth buckets label turn-position
-// ranges, and the eviction-aligned view starts at turn 2, the first turn
-// with a prior inter-turn gap. Per-turn credits carry the frozen promotion
-// factor, so the views price exactly what computeCredits prices per turn.
+// positions are 1-based and per session (the LRU-82 readout's convention):
+// a turn's position is its index within its own run's turn sequence, so a
+// later run's early turns stay early; the primary window is turn 21 onward,
+// the depth buckets label turn-position ranges, and the event-aligned view
+// starts at turn 2, the first turn with a prior inter-turn gap. Per-turn
+// credits carry the frozen promotion factor, so the views price exactly
+// what computeCredits prices per turn.
 // ---------------------------------------------------------------------------
 
 export const PRIMARY_MIN_TURN_POSITION = 21
@@ -209,21 +211,26 @@ const promotedTurnCredits = (turn: TurnRow): number => turnCredits(turn) * PROMO
 const meanOr = (values: readonly number[]): number | null =>
   values.length === 0 ? null : values.reduce((sum, value) => sum + value, 0) / values.length
 
-// Every gated turn of one arm, in census order (the per-turn views all
-// aggregate over this population slice).
-const armTurnsOf = (rows: readonly CensusRow[], arm: Arm): TurnRow[] =>
-  rows.filter((row) => row.arm === arm).flatMap((row) => row.turns)
+// Every gated turn of one arm at a per-session 1-based position window:
+// a turn's position is its index within its own run's turn sequence. The
+// arm-concatenated index misclassifies later runs' early turns as deep,
+// deflating the shallow buckets and inflating the primary window.
+const armTurnsAtPosition = (rows: readonly CensusRow[], arm: Arm, minPosition: number, maxPosition: number = Number.MAX_SAFE_INTEGER): TurnRow[] =>
+  rows
+    .filter((row) => row.arm === arm)
+    .flatMap((row) => row.turns.filter((_, index) => index + 1 >= minPosition && index + 1 <= maxPosition))
 
-type PooledTurnView = {
+// The LRU-82 pooled-turn aggregates: per-turn means plus the pooled cache
+// share, cache.read over the input-side tokens (input plus cache.read;
+// cache.write is priced but not part of the share). The event-aligned
+// view's split groups reuse it as their aggregate shape.
+export type PooledTurnView = {
   turns: number
   inputMean: number | null
   cacheReadMean: number | null
   cacheShare: number | null
 }
 
-// The LRU-82 pooled-turn aggregates: per-turn means plus the pooled cache
-// share, cache.read over the input-side tokens (input plus cache.read;
-// cache.write is priced but not part of the share).
 const pooledTurnView = (turns: readonly TurnRow[]): PooledTurnView => {
   const inputSum = turns.reduce((sum, turn) => sum + turn.inputTokens, 0)
   const cacheReadSum = turns.reduce((sum, turn) => sum + turn.cacheReadTokens, 0)
@@ -255,7 +262,8 @@ export type DepthBucketRow = {
 /**
  * The per-arm depth-bucket table: every profile arm crossed with every
  * turn-position bucket, aggregating the gated rows' turns by their 1-based
- * position. Empty buckets stay in the table with zero turns and null
+ * per-session position (the index within each run's own turn sequence).
+ * Empty buckets stay in the table with zero turns and null
  * figures (reported, non-gating, exactly like the LRU-82 readout's empty
  * 51+ row). Cache share is pooled per bucket (summed cache.read over
  * summed input-side tokens), not a mean of per-turn shares.
@@ -267,9 +275,8 @@ export type DepthBucketRow = {
 export const computeDepthBucketTable = (rows: readonly CensusRow[], profile: ExperimentProfile): DepthBucketRow[] => {
   const table: DepthBucketRow[] = []
   for (const arm of profile.dataArms) {
-    const armTurns = armTurnsOf(rows, arm)
     for (const bucket of TURN_POSITION_BUCKETS) {
-      const bucketTurns = armTurns.filter((_, index) => index + 1 >= bucket.min && index + 1 <= bucket.max)
+      const bucketTurns = armTurnsAtPosition(rows, arm, bucket.min, bucket.max)
       const view = pooledTurnView(bucketTurns)
       table.push({
         arm,
@@ -295,10 +302,10 @@ export type TurnPrimaryContrast = {
 
 /**
  * The primary endpoint of the lever protocol: pooled promoted per-turn
- * credits over every gated turn at position 21 or later, per profile arm,
- * with the profile's contrasts as deltas and ratios (the frozen rule judges
- * the plugin-arm ratio against OFF). The ratio is null when the reference
- * arm's mean is null or zero.
+ * credits over every gated turn at per-session position 21 or later, per
+ * profile arm, with the profile's contrasts as deltas and ratios (the
+ * frozen rule judges the plugin-arm ratio against OFF). The ratio is null
+ * when the reference arm's mean is null or zero.
  *
  * @param rows the gated endpoint population
  * @param profile the experiment profile whose arms and contrasts apply
@@ -306,7 +313,7 @@ export type TurnPrimaryContrast = {
  */
 export const computeTurnPrimary = (rows: readonly CensusRow[], profile: ExperimentProfile): { byArm: TurnPrimaryArm[]; contrasts: TurnPrimaryContrast[] } => {
   const byArm = profile.dataArms.map((arm) => {
-    const primaryTurns = armTurnsOf(rows, arm).filter((_, index) => index + 1 >= PRIMARY_MIN_TURN_POSITION)
+    const primaryTurns = armTurnsAtPosition(rows, arm, PRIMARY_MIN_TURN_POSITION)
     return { arm, turns: primaryTurns.length, creditsPerTurnMean: meanOr(primaryTurns.map(promotedTurnCredits)) }
   })
   const contrasts = profile.contrasts.map(([firstArm, secondArm]) => {
@@ -340,64 +347,68 @@ export const fullModeArms = (profile: ExperimentProfile): Arm[] =>
     return seed !== undefined && seed[0] !== undefined && seed[0][1].manualMode === false
   })
 
-export type EvictionAlignedArmRow = {
+export type EventAlignedArmRow = {
   arm: Arm
-  postEvictionTurns: number
-  postEvictionInputMean: number | null
-  postEvictionCacheReadMean: number | null
-  postEvictionCacheShare: number | null
-  cleanTurns: number
-  cleanInputMean: number | null
-  cleanCacheReadMean: number | null
-  cleanCacheShare: number | null
+  postEvent: PooledTurnView
+  eventClean: PooledTurnView
+  postEviction: PooledTurnView
+  evictionClean: PooledTurnView
 }
 
 // The prior inter-turn gap of the 1-based turn position p >= 2 is the
 // half-open span (turn p-1 creation, turn p creation]: it covers the prior
-// turn's own processing span (where the plugin writes its eviction lines)
-// and everything after it up to the turn under analysis, so an eviction
-// that mutated history before the turn saw its prompt counts for it.
-const evictionLandedInPriorGap = (turns: readonly TurnRow[], events: readonly MetricsEvent[], index: number): boolean =>
+// turn's own processing span (where the plugin writes its metrics lines)
+// and everything after it up to the turn under analysis, so an event that
+// recorded a mutation before the turn saw its prompt counts for it.
+const eventLandedInPriorGap = (
+  turns: readonly TurnRow[],
+  events: readonly MetricsEvent[],
+  index: number,
+  eventMatches: (event: MetricsEvent) => boolean,
+): boolean =>
   events.some(
     (event) =>
-      event.evictedThisRun &&
+      eventMatches(event) &&
       event.timestampMs !== null &&
       event.timestampMs > turns[index - 1]!.createdAtMs &&
       event.timestampMs <= turns[index]!.createdAtMs,
   )
 
 /**
- * The eviction-aligned view (the LRU-82 cost-per-cut signature): for every
- * full-mode arm, the gated turns at position 2 or later split by whether an
- * eviction event landed in the prior inter-turn gap. Post-eviction turns
- * re-send the rebuilt context as uncached input, which is the
- * invalidation-proxy the frozen rule reads.
+ * The event-aligned view (the LRU-82 cost-per-cut signature, generalized
+ * to every logged metrics event): for every full-mode arm, the gated turns
+ * at position 2 or later split by whether the prior inter-turn gap carried
+ * any metrics event (postEvent against eventClean) and by whether it
+ * carried an eviction (postEviction against evictionClean), the view's
+ * eviction-specific case. Post-mutation turns re-send the rebuilt context
+ * as uncached input, which is the invalidation-proxy the frozen rule
+ * reads. The export keeps the eviction-aligned name because the
+ * operational readout wiring (experiments/cli.ts) imports this symbol.
  *
  * @param rows the gated endpoint population
  * @param arms the full-mode arms to cover (fullModeArms of the profile)
- * @returns one row per arm with the split aggregates
+ * @returns one row per arm with both splits' pooled aggregates
  */
-export const computeEvictionAlignedView = (rows: readonly CensusRow[], arms: readonly Arm[]): EvictionAlignedArmRow[] =>
+export const computeEvictionAlignedView = (rows: readonly CensusRow[], arms: readonly Arm[]): EventAlignedArmRow[] =>
   arms.map((arm) => {
-    const postEvictionTurns: TurnRow[] = []
-    const cleanTurns: TurnRow[] = []
+    const postEvent: TurnRow[] = []
+    const eventClean: TurnRow[] = []
+    const postEviction: TurnRow[] = []
+    const evictionClean: TurnRow[] = []
     for (const row of rows.filter((candidate) => candidate.arm === arm)) {
       for (let index = 1; index < row.turns.length; index++) {
-        const target = evictionLandedInPriorGap(row.turns, row.metricsEvents, index) ? postEvictionTurns : cleanTurns
-        target.push(row.turns[index]!)
+        const turn = row.turns[index]!
+        if (eventLandedInPriorGap(row.turns, row.metricsEvents, index, () => true)) postEvent.push(turn)
+        else eventClean.push(turn)
+        if (eventLandedInPriorGap(row.turns, row.metricsEvents, index, (event) => event.evictedThisRun)) postEviction.push(turn)
+        else evictionClean.push(turn)
       }
     }
-    const postEviction = pooledTurnView(postEvictionTurns)
-    const clean = pooledTurnView(cleanTurns)
     return {
       arm,
-      postEvictionTurns: postEvictionTurns.length,
-      postEvictionInputMean: postEviction.inputMean,
-      postEvictionCacheReadMean: postEviction.cacheReadMean,
-      postEvictionCacheShare: postEviction.cacheShare,
-      cleanTurns: cleanTurns.length,
-      cleanInputMean: clean.inputMean,
-      cleanCacheReadMean: clean.cacheReadMean,
-      cleanCacheShare: clean.cacheShare,
+      postEvent: pooledTurnView(postEvent),
+      eventClean: pooledTurnView(eventClean),
+      postEviction: pooledTurnView(postEviction),
+      evictionClean: pooledTurnView(evictionClean),
     }
   })
