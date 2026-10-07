@@ -1,18 +1,8 @@
 import { randomUUID } from "node:crypto"
 import { appendFile, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises"
-import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import type { Plugin, PluginModule } from "@opencode-ai/plugin"
 import {
-  DEFAULT_CACHE_AWARE_HINTS,
-  DEFAULT_EVICTION_BATCH_MULTIPLIER,
-  DEFAULT_LIVE_STATE_DIR_BASENAME,
-  DEFAULT_METRICS_DIR_SEGMENTS,
-  DEFAULT_METRICS_FILE_BASENAME,
-  DEFAULT_MUTATION_BATCH_CADENCE,
-  OPTION_CACHE_AWARE_HINTS,
-  OPTION_EVICTION_BATCH_MULTIPLIER,
-  OPTION_MUTATION_BATCH_CADENCE,
   PLUGIN_ID,
   PLUGIN_VERSION,
   RAW_COUNTER_KEYS as SCHEMA_RAW_COUNTER_KEYS,
@@ -22,65 +12,88 @@ import {
   type TotalsKey,
 } from "./schema.ts"
 
-const EVICTION_MARKER = "[ctx-evicted]"
-const HINT_MARKER = "[ctx-hot]"
-const HINT_LABEL = "recently active:"
-const HINT_LINE_PREFIX = `${HINT_MARKER} ${HINT_LABEL}`
-// Tombstones, purged-input markers, and hint lines live permanently in
-// users' stored session history, so every detector recognizes the
-// previous marker generation next to the current one; only emissions use
-// the current markers.
-const LEGACY_EVICTION_MARKER = "[lru-evicted]"
-const LEGACY_DEDUP_MARKER = "[lru-deduped]"
-const LEGACY_PURGED_INPUT_MARKER = "[lru-purged-input]"
-const LEGACY_HINT_LINE_PREFIX = `[lru-hot] ${HINT_LABEL}`
-const startsWithEitherGeneration = (text: string, current: string, legacy: string): boolean =>
-  text.startsWith(current) || text.startsWith(legacy)
-const SUBJECT_SEPARATOR = ", "
-const MAX_RENDERED_SUBJECT_CHARS = 160
-const ELLIPSIS_MARKER = "…"
-const READ_TOOL_NAME = "read"
-const MAX_DIGEST_CHARS = 200
-const DIGEST_PIECE_SEPARATOR = " | "
-const DIGEST_FIRST_PREVIEW_LABEL = "first"
-const DIGEST_LAST_PREVIEW_LABEL = "last"
-const DIGEST_HEAD_PREVIEW_LABEL = "head"
-const DIGEST_TAIL_PREVIEW_LABEL = "tail"
-const NEWLINE_SPLIT_PATTERN = /\r\n|\r|\n/
-const DEFAULT_CHARS_PER_TOKEN = 4
-const DEFAULT_WATERMARK_RATIO = 0.5
-const DEFAULT_RECENT_WINDOW_MESSAGES = 4
-const DEFAULT_MIN_EVICTABLE_BYTES = 2048
-const DEFAULT_HINT_SUBJECTS = 10
+import type { FilePartFields, MessageBundle } from "./messages.ts"
+import type { ContextManagerOptions, ResolvedOptions } from "./options.ts"
+import type { HotSubject, Subject, SubjectRange } from "./vocabulary.ts"
+import {
+  ATTACHMENT_MIME_KEY,
+  ATTACHMENT_URL_KEY,
+  attachmentPayloadCharsOf,
+  completedOutputOf,
+  ESCAPE_SPAN_PATTERN,
+  estimateTokens,
+  estimateTokensFromBytes,
+  filePartOf,
+  hotFromIndexOf,
+  nonEmptyAttachmentsOf,
+  REASONING_METADATA_KEY,
+  REASONING_PART_TYPE,
+  REASONING_TEXT_KEY,
+  retentionFromIndexOf,
+  runCompositionOf,
+  stableStringify,
+  stripStateAttachments,
+  TEXT_PART_TYPE,
+} from "./messages.ts"
+import {
+  ADVISORY_SUBJECTS_BOUND,
+  defaultIngestionHygienePath,
+  defaultLiveStateDir,
+  defaultMetricsPath,
+  isNonEmptyString,
+  isPatternProtected,
+  isProtectedTool,
+  PATH_SEGMENT_SEPARATOR,
+  resolveOptions,
+} from "./options.ts"
+import {
+  FALLBACK_SESSION_KEY,
+  rememberFaultForSubject,
+  rememberSessionValue,
+  sessionIDFromContext,
+  sessionKeyFromContext,
+  touchMapEntry,
+  trimMapToBound,
+} from "./session-maps.ts"
+import {
+  BASH_TOOL_NAME,
+  boundedSingleLineOf,
+  buildFenceTombstone,
+  buildOutputDigest,
+  buildReloadPointer,
+  buildTombstone,
+  DEDUP_FILE_SUPERSEDED_LEAD,
+  DEDUP_MARKER,
+  DEDUP_RANGE_SUPERSEDED_LEAD,
+  DEDUP_SUPERSEDED_LEAD,
+  EVICTION_MARKER,
+  HINT_LINE_PREFIX,
+  JSON_INDENT_SPACES,
+  LEGACY_DEDUP_MARKER,
+  LEGACY_EVICTION_MARKER,
+  LEGACY_HINT_LINE_PREFIX,
+  LEGACY_PURGED_INPUT_MARKER,
+  orderedRenderedSubjectsOf,
+  PATH_INPUT_KEYS,
+  PURGED_INPUT_MARKER,
+  rangeOf,
+  READ_TOOL_NAME,
+  RECALL_TOOL_NAME,
+  renderSubject,
+  startsWithEitherGeneration,
+  SUBJECT_SEPARATOR,
+  subjectsOf,
+  UNKNOWN_TARGET_LABEL,
+} from "./vocabulary.ts"
+
+export { ADVISORY_BAND_RATIO_DEFAULT, DEFAULT_INGESTION_HYGIENE_ROTATION_MAX_BYTES, DEFAULT_METRICS_ROTATION_MAX_BYTES, DEFAULT_PAGE_STORE_ROTATION_MAX_BYTES } from "./options.ts"
+
 // Cache-aware hint hysteresis: a subject enters the stable line only after
 // HINT_ENTRY_TOUCHES accumulated live touches and leaves only after
 // HINT_EXIT_MISSES consecutive runs without one; entry strictly exceeding
 // exit keeps a flapping subject from rewriting the line it just left.
 const HINT_ENTRY_TOUCHES = 3
 const HINT_EXIT_MISSES = 2
-const DEFAULT_PROTECTED_TOOLS = ["task", "todowrite"]
-const DEFAULT_PROTECTED_PATTERNS: string[] = []
-const PATH_INPUT_KEYS = ["filePath", "path", "file", "directory"]
-const GLOB_DOUBLESTAR_TRAILING_SLASH = "**/"
-const GLOB_DOUBLESTAR = "**"
-const GLOB_SINGLE_STAR = "*"
-const GLOB_QUESTION_MARK = "?"
-const REGEX_SPECIAL_CHARACTERS = /[.*+?^${}()|[\]\\]/g
-const PATH_SEGMENT_SEPARATOR = "/"
-const BASH_TOOL_NAME = "bash"
-const COMMAND_INPUT_KEY = "command"
-const OFFSET_INPUT_KEY = "offset"
-const LIMIT_INPUT_KEY = "limit"
-const PATTERN_INPUT_KEY = "pattern"
-const DEFAULT_MIN_SUBSTRING_MATCH_CHARS = 3
-const UNKNOWN_TARGET_LABEL = "unknown target"
-const PATH_RANGE_SEPARATOR = ":"
-const RANGE_SEPARATOR = "-"
-const DEFAULT_STASH_LIMIT = 50
-const DEFAULT_STASH_SESSIONS = 8
-const DEFAULT_LIMIT_SESSIONS = 8
-const DEFAULT_HINT_SESSIONS = 8
-const RECALL_TOOL_NAME = "recall"
 const RECALL_ARG_NAME = "subject"
 const RECALL_PROBE_ARG_NAME = "countsOnly"
 const RECALL_PROBE_ARG_SCHEMA_TYPE = "boolean"
@@ -105,9 +118,6 @@ const RECALL_PROBE_NEWEST_LABEL = "newest match"
 const RECALL_PROBE_BYTES_UNIT = "bytes"
 const RECALL_PROBE_OLDER_LABEL = "older matches"
 const RECALL_PROBE_ATTACHMENTS_LABEL = "attachments present"
-const RECALL_POINTER_LEAD = " Evicted output stored in the page store; recall it with"
-const DIGEST_POINTER_LEAD = " Output digest: "
-const DIGEST_POINTER_TAIL = "."
 const STASH_MARKER = "[ctx-stash]"
 const STASH_OLDER_LEAD = "older pages in this session for subject"
 const STASH_MESSAGE_LABEL = "at message"
@@ -131,21 +141,7 @@ const PAGE_STORE_RESTORED_LINE = `${STASH_MARKER} ${PAGE_STORE_RESTORED_LEAD}.`
 const PAGE_STORE_OLDER_LEAD = "older pages for subject"
 const PAGE_STORE_MISS_LEAD = "no prior-session page for subject"
 const RECEIVED_LABEL = "received"
-const FALLBACK_SESSION_KEY = "no-session"
-const DEDUP_MARKER = "[ctx-deduped]"
 const TOOL_ERROR_PREFIX = "[ctx-error] "
-const DEDUP_SUPERSEDED_LEAD = "identical call superseded by the newer output at message"
-const DEDUP_RANGE_SUPERSEDED_LEAD = "range read superseded by the retained range at message"
-const DEDUP_FILE_SUPERSEDED_LEAD = "identical attachment superseded by the newer attachment at message"
-const FILE_PART_TYPE = "file"
-const FILE_FILENAME_KEY = "filename"
-const TEXT_PART_TYPE = "text"
-const PURGED_INPUT_MARKER = "[ctx-purged-input]"
-const REASONING_PART_TYPE = "reasoning"
-const REASONING_TEXT_KEY = "text"
-const REASONING_METADATA_KEY = "metadata"
-const DEFAULT_METRICS_SESSIONS = 8
-const DEFAULT_REMEMBERED_EVICTED_SUBJECTS = 100
 const TOUCH_SCAN_INITIAL_WATERMARK = -1
 const DEFAULT_REMEMBERED_REASONING_PARTS = 4096
 const DEFAULT_REMEMBERED_DEDUP_PAIRS = 4096
@@ -158,30 +154,7 @@ const DEFAULT_REMEMBERED_FAULT_SUBJECTS = 256
 // in the candidate sort: a reloaded output is demonstrably needed again, so
 // it re-evicts five messages later than its recency alone would place it.
 const FAULT_PENALTY_MESSAGES = 5
-const DEFAULT_METRICS_LOG_ENABLED = true
-// The default locations derive per resolution instead of once at module
-// load, so the migration below and the resolved options always agree on
-// where the default paths are even if the process home is relocated.
-const defaultMetricsPath = (): string => join(homedir(), ...DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_METRICS_FILE_BASENAME)
-const DEFAULT_LIVE_STATE_LOG_ENABLED = true
-const defaultLiveStateDir = (): string => join(homedir(), ...DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_LIVE_STATE_DIR_BASENAME)
-const DEFAULT_INGESTION_HYGIENE = true
-const DEFAULT_INGESTION_HYGIENE_COPY = true
-const DEFAULT_INGESTION_HYGIENE_FILE_BASENAME = "context-hygiene.jsonl"
-const defaultIngestionHygienePath = (): string => join(homedir(), ...DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_INGESTION_HYGIENE_FILE_BASENAME)
-// 5 MiB: hygiene lines carry the full original output, the fattest lines
-// the plugin writes, and the copy is a paranoid escape hatch rather than
-// a standing record, so its cap sits well under the metrics log's 20 MiB.
-export const DEFAULT_INGESTION_HYGIENE_ROTATION_MAX_BYTES = 5 * 1024 * 1024
 const HYGIENE_COPY_DISABLED_MAX_BYTES = 0
-const DEFAULT_PAGE_STORE_ENABLED = true
-const DEFAULT_PAGE_STORE_FILE_BASENAME = "context-pages.jsonl"
-const defaultPageStorePath = (): string => join(homedir(), ...DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_PAGE_STORE_FILE_BASENAME)
-// 20 MiB: metrics parity rather than the hygiene copy's smaller cap, because
-// page lines carry the same fat verbatim-output content class the metrics
-// log's cap was sized for, and the store is a standing record, not an
-// escape hatch.
-export const DEFAULT_PAGE_STORE_ROTATION_MAX_BYTES = 20 * 1024 * 1024
 // The page-store line contract's own version, stamped on every new line so
 // mixed-version stores classify line by line: a legacy unstamped line reads
 // as this version (v1 is the unstamped shape plus the field), a strictly
@@ -189,26 +162,11 @@ export const DEFAULT_PAGE_STORE_ROTATION_MAX_BYTES = 20 * 1024 * 1024
 // process's appends and rotation so it cannot bury a newer build's pages.
 export const PAGE_STORE_SCHEMA_VERSION = 1
 const LIVE_STATE_FILE_SUFFIX = ".json"
-const MS_PER_SECOND = 1000
-const SECONDS_PER_MINUTE = 60
-const MINUTES_PER_HOUR = 60
-const HOURS_PER_DAY = 24
-const DAYS_PER_PRUNE_INTERVAL = 7
-const DEFAULT_LIVE_STATE_PRUNE_MAX_AGE_MS =
-  DAYS_PER_PRUNE_INTERVAL * HOURS_PER_DAY * MINUTES_PER_HOUR * SECONDS_PER_MINUTE * MS_PER_SECOND
 const LIVE_STATE_TEMP_FILE_SUFFIX = ".tmp"
-const MIN_MS_BETWEEN_PRUNE_SCANS = 60 * MS_PER_SECOND
 const PRUNE_SCAN_NEVER = -1
 const PRUNE_SCAN_THROTTLE_DISABLED = 0
-// 20 MiB: at the observed pre-coalescing rate of about 1.45 MB/day the
-// previous 5 MiB cap kept only about 7 days across its two generations and
-// older lines rotated out permanently within days; coalescing cut that
-// rate by an estimated 70-85 percent, so two generations now hold roughly
-// three weeks at the old rate and several times that at the current one.
-export const DEFAULT_METRICS_ROTATION_MAX_BYTES = 20 * 1024 * 1024
 const METRICS_ROTATION_DISABLED_MAX_BYTES = 0
 const METRICS_ROTATION_SUFFIX = ".1"
-const DEFAULT_METRICS_MIN_LINE_INTERVAL_MS = SECONDS_PER_MINUTE * MS_PER_SECOND
 const METRICS_COALESCING_DISABLED_MS = 0
 const DESCRIBE_TOOL_NAME = "describe"
 const DESCRIBE_TOOL_DESCRIPTION =
@@ -227,28 +185,14 @@ const OMISSIONS_TOOL_OUTPUTS_LABEL = "tool outputs"
 const OMISSIONS_REASONING_BLOCKS_LABEL = "reasoning blocks"
 const OMISSIONS_FENCED_BLOCKS_LABEL = "fenced blocks"
 const OMISSIONS_RELOAD_LEAD = "; reload via "
-const JSON_INDENT_SPACES = 2
 const CONTEXT_TOKENS_SOURCE_OVERRIDE = "override"
 const CONTEXT_TOKENS_SOURCE_MODEL = "model"
 const CONTEXT_TOKENS_SOURCE_DEFAULT = "default"
 const CONTEXT_TOKENS_SOURCE_UNKNOWN = "unknown"
 const MODEL_KEY_SEPARATOR = "/"
-const ATTACHMENTS_STATE_KEY = "attachments"
-const ATTACHMENT_URL_KEY = "url"
-const ATTACHMENT_MIME_KEY = "mime"
-const TOMBSTONE_ATTACHMENTS_NOTICE = "attachments dropped"
 const STASH_ATTACHMENTS_LEAD = "attachments evicted with this output"
 const STASH_ATTACHMENT_DROPPED_TAIL = "payloads were dropped during eviction; re-run the tool to regenerate them"
 const UNKNOWN_ATTACHMENT_MIME_LABEL = "unknown mime"
-const DEFAULT_FENCE_EVICTABLE_LINES = 40
-const DEFAULT_USER_FENCE_EVICTION_ENABLED = false
-const DEFAULT_MANUAL_MODE = false
-const DEFAULT_ADVISORY_BAND_ENABLED = true
-export const ADVISORY_BAND_RATIO_DEFAULT = 0.85
-const ADVISORY_SUBJECTS_BOUND = 3
-const DEFAULT_NOW = (): number => Date.now()
-const FENCE_EVICTION_MARKER = "[ctx-evicted-fence]"
-const FENCE_BLOCK_NOUN = "code block"
 const FENCE_STASH_TOOL_LABEL = "fence"
 const FENCE_BACKTICK = "`"
 const MIN_FENCE_MARKER_TICKS = 3
@@ -256,94 +200,7 @@ const MIN_FENCE_MARKER_TICKS = 3
 const MAX_FENCE_INDENT_SPACES = 3
 const FENCE_INDENT_SPACE = " "
 const FENCE_INFO_SEPARATOR = /\s+/
-const FENCE_LINE_COUNT_LABEL = "lines"
-const FENCE_FIRST_LINE_LABEL = "first line"
-const FENCE_EVICTED_NOTICE = "was evicted to reclaim context."
 const USER_MESSAGE_ROLE = "user"
-
-type UserFenceEvictionOptions = { enabled: boolean; minBlockLines: number }
-
-type ContextManagerOptions = {
-  watermark?: number
-  watermarkTokens?: number
-  agedReadEvictionMessages?: number
-  reasoningRetentionMessages?: number
-  recentWindow?: number
-  minEvictableBytes?: number
-  defaultContextTokens?: number
-  modelContextTokens?: Record<string, number>
-  hintSubjects?: number
-  cacheAwareHints?: boolean
-  mutationBatchCadence?: number
-  evictionBatchMultiplier?: number
-  protectedTools?: string[]
-  protectedPatterns?: string[]
-  stashLimit?: number
-  stashSessions?: number
-  limitSessions?: number
-  hintSessions?: number
-  metricsSessions?: number
-  rememberedEvictedSubjects?: number
-  charsPerToken?: number
-  minSubstringMatchChars?: number
-  metricsLog?: boolean
-  metricsPath?: string
-  metricsRotationMaxBytes?: number
-  metricsMinLineIntervalMs?: number
-  ingestionHygiene?: boolean
-  ingestionHygieneCopy?: boolean
-  ingestionHygienePath?: string
-  ingestionHygieneRotationMaxBytes?: number
-  pageStore?: boolean
-  pageStorePath?: string
-  pageStoreRotationMaxBytes?: number
-  liveStateLog?: boolean
-  liveStatePath?: string
-  liveStatePruneMaxAgeMs?: number
-  liveStatePruneMinIntervalMs?: number
-  manualMode?: boolean
-  advisoryBand?: boolean
-  advisoryBandRatio?: number
-  userFenceEviction?: { enabled?: boolean; minBlockLines?: number }
-  now?: () => number
-  // Test-only fault injection for the compaction hook: when the injected
-  // function throws, the compacting hook's fault boundary exercises its
-  // degradation path. Never documented as a user option.
-  errorCompaction?: () => never
-  // Test-only fault injection for the hygiene hook: when the injected
-  // function throws, the tool.execute.after fault boundary exercises its
-  // degradation path. Never documented as a user option.
-  errorHygiene?: () => never
-  // Test-only fault injection: when the injected function returns a
-  // message, the transform hook's fault boundary treats the run as if the
-  // body threw that message (identity behavior plus lastError). Never
-  // documented as a user option; exists so the fault path is testable
-  // without monkey-patching internals.
-  errorTransform?: () => string | undefined
-}
-
-type CompiledGlob = { regexp: RegExp; matchesSegments: boolean }
-
-type ResolvedOptions = Omit<
-  Required<ContextManagerOptions>,
-  "defaultContextTokens" | "agedReadEvictionMessages" | "reasoningRetentionMessages" | "modelContextTokens" | "protectedPatterns" | "userFenceEviction" | "watermarkTokens"
-> & {
-  defaultContextTokens?: number
-  agedReadEvictionMessages?: number
-  reasoningRetentionMessages: number
-  watermarkTokens?: number
-  modelContextTokens: Record<string, number>
-  protectedPatterns: CompiledGlob[]
-  protectedPatternSources: string[]
-  userFenceEviction: UserFenceEvictionOptions
-}
-
-type SubjectRange = { start: number; end: number }
-
-type Subject = {
-  path: string
-  range?: SubjectRange
-}
 
 type ToolAppearance = {
   msgIndex: number
@@ -361,8 +218,6 @@ type EvictableEntry = {
   attachmentBytes: number
   subjects: Subject[]
 }
-
-type HotSubject = { subject: Subject; lastTouch: number }
 
 type EvictionResult = {
   hotSubjects: HotSubject[]
@@ -578,19 +433,12 @@ type StatsSource = {
 
 type RetainedDuplicate = { msgIndex: number; tool: string; supersedes: boolean }
 
-type FilePartFields = { mime: string; url: string; filename: string }
-
 type RetainedFileDuplicate = { msgIndex: number; label: string }
 
 type DedupTarget = { stateRef: { output: string; attachments?: unknown }; tool: string; input: Record<string, unknown> }
 
 type DedupedPairBytes = { key: string; bytes: number }
 type DedupOutcome = { tombstones: number; tombstonedPairs: DedupedPairBytes[] }
-
-type MessageBundle = {
-  info: { sessionID?: string; role?: unknown }
-  parts: Array<Record<string, unknown>>
-}
 
 type PageEntry = {
   output: string
@@ -606,259 +454,6 @@ type SessionPageStore = Map<string, PageEntry>
 
 type PageStoreBySession = Map<string, SessionPageStore>
 
-const modelContextTokensOf = (raw: Record<string, number> | undefined): Record<string, number> => {
-  if (typeof raw !== "object" || raw === null) return {}
-  const resolved: Record<string, number> = {}
-  for (const [key, tokens] of Object.entries(raw)) {
-    if (typeof tokens === "number" && Number.isFinite(tokens) && tokens > 0) resolved[key] = tokens
-  }
-  return resolved
-}
-
-const userFenceEvictionOf = (raw: ContextManagerOptions["userFenceEviction"]): UserFenceEvictionOptions => {
-  const source = typeof raw === "object" && raw !== null ? raw : {}
-  return {
-    enabled: typeof source.enabled === "boolean" ? source.enabled : DEFAULT_USER_FENCE_EVICTION_ENABLED,
-    minBlockLines:
-      typeof source.minBlockLines === "number" && Number.isInteger(source.minBlockLines) && source.minBlockLines >= 0
-        ? source.minBlockLines
-        : DEFAULT_FENCE_EVICTABLE_LINES,
-  }
-}
-
-const boundedIntegerOr = (value: number | undefined, fallback: number, min: number): number =>
-  typeof value === "number" && Number.isInteger(value) && value >= min ? value : fallback
-
-const isNonEmptyString = (value: unknown): value is string => typeof value === "string" && value.length > 0
-
-const resolveOptions = (raw: ContextManagerOptions = {}): ResolvedOptions => {
-  const protectedPatterns =
-    Array.isArray(raw.protectedPatterns) && raw.protectedPatterns.every(isNonEmptyString)
-      ? raw.protectedPatterns
-      : DEFAULT_PROTECTED_PATTERNS
-  const recentWindow = typeof raw.recentWindow === "number" && raw.recentWindow >= 0 ? Math.floor(raw.recentWindow) : DEFAULT_RECENT_WINDOW_MESSAGES
-  return {
-    watermark: typeof raw.watermark === "number" && raw.watermark > 0 && raw.watermark < 1 ? raw.watermark : DEFAULT_WATERMARK_RATIO,
-    // Absolute watermark, the staged-eviction lever: when set it wins over
-    // the fractional watermark (budget x watermark), so a user can engage
-    // only sessions above, say, 250k tokens without touching the fraction.
-    // Same numeric discipline as the rotation cap: finite, above 0,
-    // drop-on-invalid.
-    watermarkTokens:
-      typeof raw.watermarkTokens === "number" && Number.isFinite(raw.watermarkTokens) && raw.watermarkTokens > 0
-        ? raw.watermarkTokens
-        : undefined,
-    // The aged read tier's age threshold in messages from the list tail.
-    // Unset disables the tier entirely; a set value must be a positive
-    // integer, anything else falling back to unset (the same
-    // drop-on-invalid discipline as the other staged levers).
-    agedReadEvictionMessages:
-      typeof raw.agedReadEvictionMessages === "number" && Number.isInteger(raw.agedReadEvictionMessages) && raw.agedReadEvictionMessages > 0
-        ? raw.agedReadEvictionMessages
-        : undefined,
-    // The reasoning expiry boundary's message age from the list tail,
-    // clamped from below at recentWindow: a value below the window would
-    // expire the pending tool-use continuation's signature-carrying
-    // thinking block mid-turn, so the window is a floor, not a peer.
-    reasoningRetentionMessages: Math.max(
-      recentWindow,
-      typeof raw.reasoningRetentionMessages === "number" && Number.isInteger(raw.reasoningRetentionMessages) && raw.reasoningRetentionMessages > 0
-        ? raw.reasoningRetentionMessages
-        : recentWindow,
-    ),
-    recentWindow,
-    minEvictableBytes: typeof raw.minEvictableBytes === "number" && raw.minEvictableBytes >= 0 ? raw.minEvictableBytes : DEFAULT_MIN_EVICTABLE_BYTES,
-    defaultContextTokens:
-      typeof raw.defaultContextTokens === "number" && Number.isFinite(raw.defaultContextTokens) && raw.defaultContextTokens > 0
-        ? raw.defaultContextTokens
-        : undefined,
-    modelContextTokens: modelContextTokensOf(raw.modelContextTokens),
-    hintSubjects:
-      typeof raw.hintSubjects === "number" && Number.isInteger(raw.hintSubjects) && raw.hintSubjects >= 0
-        ? raw.hintSubjects
-        : DEFAULT_HINT_SUBJECTS,
-    [OPTION_CACHE_AWARE_HINTS]: typeof raw.cacheAwareHints === "boolean" ? raw.cacheAwareHints : DEFAULT_CACHE_AWARE_HINTS,
-    // The hygiene passes' batch cadence in trigger-carrying runs: 0 (the
-    // default) keeps every pass firing per request; N defers the passes'
-    // mutations until the session's Nth trigger-carrying run fires them as
-    // one batched mutation. The cache reasoning lives at resolveHygieneBatch.
-    [OPTION_MUTATION_BATCH_CADENCE]: boundedIntegerOr(raw.mutationBatchCadence, DEFAULT_MUTATION_BATCH_CADENCE, 0),
-    // The eviction walk's deficit multiplier: N clears N x the deficit per
-    // firing, so reset events land rarer and larger; 1 (the default) is the
-    // byte-identical deficit-exact walk. The cache reasoning lives at
-    // isEvictedByWalkPolicy, the one disposition the multiplier widens.
-    [OPTION_EVICTION_BATCH_MULTIPLIER]: boundedIntegerOr(raw.evictionBatchMultiplier, DEFAULT_EVICTION_BATCH_MULTIPLIER, 1),
-    protectedTools: Array.isArray(raw.protectedTools) && raw.protectedTools.every(isNonEmptyString) ? raw.protectedTools : DEFAULT_PROTECTED_TOOLS,
-    protectedPatterns: protectedPatterns.flatMap((pattern) => {
-      const compiled = compiledGlobOf(pattern)
-      return compiled === undefined ? [] : [compiled]
-    }),
-    protectedPatternSources: protectedPatterns,
-    stashLimit: boundedIntegerOr(raw.stashLimit, DEFAULT_STASH_LIMIT, 0),
-    stashSessions: boundedIntegerOr(raw.stashSessions, DEFAULT_STASH_SESSIONS, 1),
-    limitSessions: boundedIntegerOr(raw.limitSessions, DEFAULT_LIMIT_SESSIONS, 1),
-    hintSessions: boundedIntegerOr(raw.hintSessions, DEFAULT_HINT_SESSIONS, 1),
-    metricsSessions: boundedIntegerOr(raw.metricsSessions, DEFAULT_METRICS_SESSIONS, 1),
-    rememberedEvictedSubjects: boundedIntegerOr(raw.rememberedEvictedSubjects, DEFAULT_REMEMBERED_EVICTED_SUBJECTS, 0),
-    charsPerToken:
-      typeof raw.charsPerToken === "number" && Number.isFinite(raw.charsPerToken) && raw.charsPerToken > 0
-        ? raw.charsPerToken
-        : DEFAULT_CHARS_PER_TOKEN,
-    minSubstringMatchChars: boundedIntegerOr(raw.minSubstringMatchChars, DEFAULT_MIN_SUBSTRING_MATCH_CHARS, 0),
-    metricsLog: typeof raw.metricsLog === "boolean" ? raw.metricsLog : DEFAULT_METRICS_LOG_ENABLED,
-    metricsPath: isNonEmptyString(raw.metricsPath) ? raw.metricsPath : defaultMetricsPath(),
-    metricsRotationMaxBytes:
-      typeof raw.metricsRotationMaxBytes === "number" && Number.isFinite(raw.metricsRotationMaxBytes) && raw.metricsRotationMaxBytes >= 0
-        ? raw.metricsRotationMaxBytes
-        : DEFAULT_METRICS_ROTATION_MAX_BYTES,
-    metricsMinLineIntervalMs:
-      typeof raw.metricsMinLineIntervalMs === "number" && Number.isFinite(raw.metricsMinLineIntervalMs) && raw.metricsMinLineIntervalMs >= 0
-        ? raw.metricsMinLineIntervalMs
-        : DEFAULT_METRICS_MIN_LINE_INTERVAL_MS,
-    ingestionHygiene: typeof raw.ingestionHygiene === "boolean" ? raw.ingestionHygiene : DEFAULT_INGESTION_HYGIENE,
-    ingestionHygieneCopy: typeof raw.ingestionHygieneCopy === "boolean" ? raw.ingestionHygieneCopy : DEFAULT_INGESTION_HYGIENE_COPY,
-    ingestionHygienePath: isNonEmptyString(raw.ingestionHygienePath) ? raw.ingestionHygienePath : defaultIngestionHygienePath(),
-    ingestionHygieneRotationMaxBytes:
-      typeof raw.ingestionHygieneRotationMaxBytes === "number" &&
-      Number.isFinite(raw.ingestionHygieneRotationMaxBytes) &&
-      raw.ingestionHygieneRotationMaxBytes >= 0
-        ? raw.ingestionHygieneRotationMaxBytes
-        : DEFAULT_INGESTION_HYGIENE_ROTATION_MAX_BYTES,
-    pageStore: typeof raw.pageStore === "boolean" ? raw.pageStore : DEFAULT_PAGE_STORE_ENABLED,
-    pageStorePath: isNonEmptyString(raw.pageStorePath) ? raw.pageStorePath : defaultPageStorePath(),
-    pageStoreRotationMaxBytes:
-      typeof raw.pageStoreRotationMaxBytes === "number" &&
-      Number.isFinite(raw.pageStoreRotationMaxBytes) &&
-      raw.pageStoreRotationMaxBytes >= 0
-        ? raw.pageStoreRotationMaxBytes
-        : DEFAULT_PAGE_STORE_ROTATION_MAX_BYTES,
-    liveStateLog: typeof raw.liveStateLog === "boolean" ? raw.liveStateLog : DEFAULT_LIVE_STATE_LOG_ENABLED,
-    liveStatePath: isNonEmptyString(raw.liveStatePath) ? raw.liveStatePath : defaultLiveStateDir(),
-    liveStatePruneMaxAgeMs:
-      typeof raw.liveStatePruneMaxAgeMs === "number" && Number.isFinite(raw.liveStatePruneMaxAgeMs) && raw.liveStatePruneMaxAgeMs >= 0
-        ? raw.liveStatePruneMaxAgeMs
-        : DEFAULT_LIVE_STATE_PRUNE_MAX_AGE_MS,
-    liveStatePruneMinIntervalMs:
-      typeof raw.liveStatePruneMinIntervalMs === "number" &&
-      Number.isFinite(raw.liveStatePruneMinIntervalMs) &&
-      raw.liveStatePruneMinIntervalMs >= 0
-        ? raw.liveStatePruneMinIntervalMs
-        : MIN_MS_BETWEEN_PRUNE_SCANS,
-    manualMode: typeof raw.manualMode === "boolean" ? raw.manualMode : DEFAULT_MANUAL_MODE,
-    // The advisory pressure band below the effective watermark: a boolean
-    // switch per the boolean-option discipline, and a ratio with the
-    // watermark's numeric discipline narrowed to (0, 1), since a ratio
-    // outside that open interval either sits at or beyond the watermark
-    // itself (the critical zone) or at non-positive pressure.
-    advisoryBand: typeof raw.advisoryBand === "boolean" ? raw.advisoryBand : DEFAULT_ADVISORY_BAND_ENABLED,
-    advisoryBandRatio:
-      typeof raw.advisoryBandRatio === "number" && Number.isFinite(raw.advisoryBandRatio) && raw.advisoryBandRatio > 0 && raw.advisoryBandRatio < 1
-        ? raw.advisoryBandRatio
-        : ADVISORY_BAND_RATIO_DEFAULT,
-    userFenceEviction: userFenceEvictionOf(raw.userFenceEviction),
-    // Test-injection seam for wall-clock time: the coalesce window, the
-    // prune throttle, and the metrics-line timestamp all read this one
-    // source. The default is real time; only tests override it, so it is
-    // deliberately absent from the README's option surface and describe.
-    now: typeof raw.now === "function" ? raw.now : DEFAULT_NOW,
-    errorTransform: typeof raw.errorTransform === "function" ? raw.errorTransform : undefined,
-    errorCompaction: typeof raw.errorCompaction === "function" ? raw.errorCompaction : undefined,
-    errorHygiene: typeof raw.errorHygiene === "function" ? raw.errorHygiene : undefined,
-  }
-}
-
-const isProtectedTool = (tool: string, options: ResolvedOptions): boolean => options.protectedTools.includes(tool)
-
-const globSourceOf = (pattern: string): string => {
-  let source = ""
-  let index = 0
-  while (index < pattern.length) {
-    if (pattern.startsWith(GLOB_DOUBLESTAR_TRAILING_SLASH, index)) {
-      source += "(?:.*/)?"
-      index += GLOB_DOUBLESTAR_TRAILING_SLASH.length
-    } else if (pattern.startsWith(GLOB_DOUBLESTAR, index)) {
-      source += ".*"
-      index += GLOB_DOUBLESTAR.length
-    } else if (pattern.startsWith(GLOB_SINGLE_STAR, index)) {
-      source += "[^/]*"
-      index += GLOB_SINGLE_STAR.length
-    } else if (pattern.startsWith(GLOB_QUESTION_MARK, index)) {
-      source += "[^/]"
-      index += GLOB_QUESTION_MARK.length
-    } else {
-      source += pattern.charAt(index).replace(REGEX_SPECIAL_CHARACTERS, "\\$&")
-      index += 1
-    }
-  }
-  return source
-}
-
-const compiledGlobOf = (pattern: string): CompiledGlob | undefined => {
-  try {
-    return { regexp: new RegExp(`^${globSourceOf(pattern)}$`), matchesSegments: !pattern.includes(PATH_SEGMENT_SEPARATOR) }
-  } catch {
-    // An uncompilable pattern protects nothing instead of breaking option
-    // resolution: invalid patterns keep their skip-silently semantics.
-    return undefined
-  }
-}
-
-const globMatches = (compiled: CompiledGlob, value: string): boolean => {
-  if (compiled.regexp.test(value)) return true
-  if (compiled.matchesSegments === false) return false
-  return value.split(PATH_SEGMENT_SEPARATOR).some((segment) => segment.length > 0 && compiled.regexp.test(segment))
-}
-
-const isPatternProtected = (subjects: Subject[], options: ResolvedOptions): boolean =>
-  options.protectedPatterns.some((compiled) => subjects.some((subject) => globMatches(compiled, subject.path)))
-
-const hotFromIndexOf = (messages: MessageBundle[], options: ResolvedOptions): number =>
-  messages.length - options.recentWindow
-
-const retentionFromIndexOf = (messages: MessageBundle[], options: ResolvedOptions): number =>
-  messages.length - options.reasoningRetentionMessages
-
-const rangeOf = (input: Record<string, unknown>): SubjectRange | undefined => {
-  const offset = input[OFFSET_INPUT_KEY]
-  const limit = input[LIMIT_INPUT_KEY]
-  if (typeof offset !== "number" || typeof limit !== "number") return undefined
-  return { start: offset, end: offset + limit }
-}
-
-const patternSubjectOf = (input: Record<string, unknown>): Subject | undefined => {
-  const pattern = input[PATTERN_INPUT_KEY]
-  if (typeof pattern !== "string" || pattern.length === 0) return undefined
-  return { path: pattern }
-}
-
-const subjectsOf = (tool: string, input: Record<string, unknown>): Subject[] => {
-  const range = rangeOf(input)
-  const subjects: Subject[] = []
-  for (const key of PATH_INPUT_KEYS) {
-    const value = input[key]
-    if (typeof value === "string" && value.length > 0) subjects.push(range ? { path: value, range } : { path: value })
-  }
-  const patternSubject = patternSubjectOf(input)
-  if (patternSubject) subjects.push(patternSubject)
-  const command = input[COMMAND_INPUT_KEY]
-  if (tool === BASH_TOOL_NAME && typeof command === "string" && command.length > 0) subjects.push({ path: command })
-  return subjects
-}
-
-const boundedSingleLineOf = (text: string): string => {
-  const singleLine = text.replaceAll("\n", " ")
-  return singleLine.length > MAX_RENDERED_SUBJECT_CHARS
-    ? `${singleLine.slice(0, MAX_RENDERED_SUBJECT_CHARS - ELLIPSIS_MARKER.length)}${ELLIPSIS_MARKER}`
-    : singleLine
-}
-
-const renderSubject = (subject: Subject): string => {
-  const rendered = subject.range
-    ? `${subject.path}${PATH_RANGE_SEPARATOR}${subject.range.start}${RANGE_SEPARATOR}${subject.range.end}`
-    : subject.path
-  return boundedSingleLineOf(rendered)
-}
-
 const appearanceTouches = (entrySubjects: Subject[], appearance: ToolAppearance, minSubstringChars: number): boolean =>
   appearance.subjects.some((appearanceSubject) =>
     entrySubjects.some(
@@ -869,44 +464,6 @@ const appearanceTouches = (entrySubjects: Subject[], appearance: ToolAppearance,
           appearanceSubject.path.includes(entrySubject.path)),
     ),
   )
-
-const completedOutputOf = (part: Record<string, unknown>): { output: string; attachments?: unknown } | undefined => {
-  if (part["type"] !== "tool") return undefined
-  const state = part["state"]
-  if (typeof state !== "object" || state === null) return undefined
-  const typedState = state as Record<string, unknown>
-  if (typedState["status"] !== "completed" || typeof typedState["output"] !== "string") return undefined
-  return typedState as { output: string; attachments?: unknown }
-}
-
-const attachmentPayloadCharsOf = (state: Record<string, unknown>): number => {
-  const attachments = state[ATTACHMENTS_STATE_KEY]
-  if (!Array.isArray(attachments)) return 0
-  let chars = 0
-  for (const attachment of attachments) {
-    const url =
-      typeof attachment === "object" && attachment !== null ? (attachment as Record<string, unknown>)[ATTACHMENT_URL_KEY] : undefined
-    if (typeof url === "string") chars += url.length
-  }
-  return chars
-}
-
-const nonEmptyAttachmentsOf = (state: { attachments?: unknown }): unknown[] | undefined => {
-  const attachments = state[ATTACHMENTS_STATE_KEY]
-  return Array.isArray(attachments) && attachments.length > 0 ? attachments : undefined
-}
-
-const stripStateAttachments = (state: { attachments?: unknown }): void => {
-  if (!Array.isArray(state[ATTACHMENTS_STATE_KEY])) return
-  delete state[ATTACHMENTS_STATE_KEY]
-}
-
-const stableStringify = (value: unknown): string => {
-  if (Array.isArray(value)) return `[${value.map((element) => stableStringify(element)).join(",")}]`
-  if (typeof value !== "object" || value === null) return JSON.stringify(value)
-  const entries = Object.entries(value).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-  return `{${entries.map(([key, entryValue]) => `${JSON.stringify(key)}:${stableStringify(entryValue)}`).join(",")}}`
-}
 
 const dedupKeyOf = (tool: string, input: Record<string, unknown>): string => JSON.stringify([tool, stableStringify(input)])
 
@@ -958,15 +515,6 @@ const deduplicateToolOutputs = (messages: MessageBundle[], options: ResolvedOpti
     }
   }
   return { tombstones, tombstonedPairs }
-}
-
-const filePartOf = (part: Record<string, unknown>): FilePartFields | undefined => {
-  if (part["type"] !== FILE_PART_TYPE) return undefined
-  const mime = part[ATTACHMENT_MIME_KEY]
-  const url = part[ATTACHMENT_URL_KEY]
-  if (typeof mime !== "string" || typeof url !== "string") return undefined
-  const filename = part[FILE_FILENAME_KEY]
-  return { mime, url, filename: typeof filename === "string" ? filename : "" }
 }
 
 const fileDedupKeyOf = (file: FilePartFields): string => JSON.stringify([file.mime, file.url])
@@ -1129,23 +677,6 @@ const countUniqueDedupedPairs = (metrics: SessionMetrics, pairs: DedupedPairByte
   return { unique, bytes }
 }
 
-const estimateTokensFromBytes = (bytes: number, charsPerToken: number): number => Math.ceil(bytes / charsPerToken)
-
-const estimateTokens = (messages: MessageBundle[], charsPerToken: number): number => {
-  let chars = 0
-  for (const message of messages) {
-    for (const part of message.parts) {
-      if (part["type"] === TEXT_PART_TYPE && typeof part["text"] === "string") {
-        chars += part["text"].length
-      } else {
-        const outputRef = completedOutputOf(part)
-        if (outputRef) chars += outputRef.output.length
-      }
-    }
-  }
-  return estimateTokensFromBytes(chars, charsPerToken)
-}
-
 type RunComposition = {
   toolPoolBytes: number
   textChars: number
@@ -1172,22 +703,6 @@ type RetentionBreakdown = {
   pool: number
   reasons: { inWindow: number; protectedTool: number; patternProtected: number; faultShielded: number; retainedRead: number }
   faultShieldedShiftMessages: number
-}
-
-// Terminal escape sequences counted for escapeBytes and stripped by
-// ingestion hygiene: CSI sequences (ESC [ ... final byte) and OSC
-// sequences (ESC ] ... BEL or ST terminator). Matched spans count their
-// whole length; a truncated CSI without a final byte, an unterminated
-// OSC, and a lone ESC without an introducer are not counted. The OSC
-// payload is non-greedy, so consecutive OSC spans each end at their own
-// terminator instead of swallowing the text between them. Deterministic
-// single pass.
-const ESCAPE_SPAN_PATTERN = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*?(?:\x07|\x1b\\)/g
-
-const escapeBytesOf = (output: string): number => {
-  let bytes = 0
-  for (const span of output.match(ESCAPE_SPAN_PATTERN) ?? []) bytes += span.length
-  return bytes
 }
 
 // At-birth tool-output hygiene, applied by tool.execute.after so the
@@ -1225,58 +740,6 @@ const stripTerminalNoiseFrom = (output: string): string => {
   }
   const stripped = lines.join("\n")
   return stripped === output ? output : stripped
-}
-
-// The post-transform composition of one run's message list: live tool
-// outputs, text parts, and the reasoning still inside the retention age.
-// Called after every pass has edited the list, so the three sums are the
-// view the model actually receives. The estimate relation is exact for
-// the two sums the estimate counts: estimatedTokens equals
-// ceil((toolPoolBytes + textChars) / charsPerToken) over this same list,
-// while reasoningInWindowBytes and attachmentBytes are bill components
-// the estimate omits. reasoningInWindowBytes keeps its key while meaning
-// retained bytes: the sum runs over the reasoningRetentionMessages
-// boundary, not the hot window, so it covers the reasoning the request
-// actually carries for any retention setting. attachmentBytes reuses the
-// evictor's own attachment accounting (tool-state attachment url payloads
-// via attachmentPayloadCharsOf) — a superset of eviction's tool-state
-// attachment accounting, extended with file-part url lengths; embedded
-// images inside file parts, data-URI text outputs, and non-attachment
-// host content are the known gaps, not a second measure.
-const runCompositionOf = (messages: MessageBundle[], options: ResolvedOptions): RunComposition => {
-  const retentionFromIndex = retentionFromIndexOf(messages, options)
-  let toolPoolBytes = 0
-  let textChars = 0
-  let reasoningInWindowBytes = 0
-  let escapeBytes = 0
-  let attachmentBytes = 0
-  for (let msgIndex = 0; msgIndex < messages.length; msgIndex += 1) {
-    const inRetainedWindow = msgIndex >= retentionFromIndex
-    for (const part of messages[msgIndex].parts) {
-      if (part["type"] === TEXT_PART_TYPE) {
-        const text = part["text"]
-        if (typeof text === "string") textChars += text.length
-        continue
-      }
-      if (part["type"] === REASONING_PART_TYPE) {
-        const text = part[REASONING_TEXT_KEY]
-        if (inRetainedWindow && typeof text === "string") reasoningInWindowBytes += text.length
-        continue
-      }
-      if (part["type"] === FILE_PART_TYPE) {
-        const file = filePartOf(part)
-        if (file !== undefined) attachmentBytes += file.url.length
-        continue
-      }
-      const outputRef = completedOutputOf(part)
-      if (outputRef) {
-        toolPoolBytes += outputRef.output.length
-        escapeBytes += escapeBytesOf(outputRef.output)
-        attachmentBytes += attachmentPayloadCharsOf(outputRef)
-      }
-    }
-  }
-  return { toolPoolBytes, textChars, reasoningInWindowBytes, escapeBytes, attachmentBytes }
 }
 
 // The one purge-candidate decision the pass and its batched-cadence
@@ -1521,69 +984,8 @@ const evictLargeUserFences = (messages: MessageBundle[], options: ResolvedOption
   return { blocks, bytes, pagesDropped }
 }
 
-const boundedDigestOf = (text: string): string =>
-  text.length > MAX_DIGEST_CHARS ? `${text.slice(0, MAX_DIGEST_CHARS - ELLIPSIS_MARKER.length)}${ELLIPSIS_MARKER}` : text
-
-const digestPreviewOf = (label: string, line: string): string => `${label} "${line}"`
-
-const buildOutputDigest = (tool: string, subject: string, output: string): string => {
-  const lines = output.split(NEWLINE_SPLIT_PATTERN)
-  const headLine = lines[0]
-  const tailLine = lines[lines.length - 1]
-  if (tool === READ_TOOL_NAME) {
-    return boundedDigestOf(
-      [subject, digestPreviewOf(DIGEST_FIRST_PREVIEW_LABEL, headLine), digestPreviewOf(DIGEST_LAST_PREVIEW_LABEL, tailLine)].join(DIGEST_PIECE_SEPARATOR),
-    )
-  }
-  if (tool === BASH_TOOL_NAME) {
-    return boundedDigestOf(
-      [subject, digestPreviewOf(DIGEST_HEAD_PREVIEW_LABEL, headLine), digestPreviewOf(DIGEST_TAIL_PREVIEW_LABEL, tailLine)].join(DIGEST_PIECE_SEPARATOR),
-    )
-  }
-  return boundedDigestOf(lines.join(" "))
-}
-
-const buildTombstone = (tool: string, subject: string, bytes: number, messagesAgo: number, attachmentsDropped: boolean, digest: string): string =>
-  `${EVICTION_MARKER} ${tool} ${subject} (${bytes} bytes${attachmentsDropped ? `, ${TOMBSTONE_ATTACHMENTS_NOTICE}` : ""}, ~${messagesAgo} messages ago) was evicted to reclaim context; re-run the tool to reload its output.${DIGEST_POINTER_LEAD}${digest}${DIGEST_POINTER_TAIL}`
-
-const buildReloadPointer = (subject: string): string =>
-  `${RECALL_POINTER_LEAD} ${RECALL_TOOL_NAME} (subject "${subject}").`
-
-const buildFenceTombstone = (language: string | undefined, contentLines: number, subject: string): string =>
-  `${FENCE_EVICTION_MARKER} ${language === undefined ? FENCE_BLOCK_NOUN : `${language} ${FENCE_BLOCK_NOUN}`} (${contentLines} ${FENCE_LINE_COUNT_LABEL}, ${FENCE_FIRST_LINE_LABEL} "${subject}") ${FENCE_EVICTED_NOTICE}${buildReloadPointer(subject)}`
-
 const pageKeyOf = (tool: string, subject: string, msgIndex: number, partIndex: number, stashSlot?: number): string =>
   `${tool}:${subject}:${msgIndex}:${partIndex}${stashSlot === undefined ? "" : `:${stashSlot}`}`
-
-const touchMapEntry = <T>(map: Map<string, T>, key: string): T | undefined => {
-  const existing = map.get(key)
-  if (existing === undefined) return undefined
-  map.delete(key)
-  map.set(key, existing)
-  return existing
-}
-
-const trimMapToBound = <T>(map: Map<string, T>, bound: number): void => {
-  while (map.size >= bound) {
-    const leastRecentlyActive = map.keys().next()
-    if (leastRecentlyActive.done === true) break
-    map.delete(leastRecentlyActive.value)
-  }
-}
-
-const rememberSessionValue = <T>(map: Map<string, T>, key: string, value: T, bound: number): void => {
-  map.delete(key)
-  trimMapToBound(map, bound)
-  map.set(key, value)
-}
-
-// One fault on a subject: the increment refreshes its recency so a hot
-// subject survives at the map's bound, and the map is trimmed before the
-// write so a brand-new subject never overflows the bound.
-const rememberFaultForSubject = (faultCounts: Map<string, number>, subject: string, bound: number): void => {
-  const existing = faultCounts.get(subject)
-  rememberSessionValue(faultCounts, subject, (existing ?? 0) + 1, bound)
-}
 
 const pagesForSession = (pageStores: PageStoreBySession, sessionKey: string, sessionBound: number): SessionPageStore => {
   const touched = touchMapEntry(pageStores, sessionKey)
@@ -1668,14 +1070,6 @@ const attachmentSummaryOf = (attachment: unknown): string => {
 
 const pageAttachmentsLineFor = (attachments: unknown[]): string =>
   `${STASH_MARKER} ${STASH_ATTACHMENTS_LEAD}: ${attachments.map(attachmentSummaryOf).join(SUBJECT_SEPARATOR)}; ${STASH_ATTACHMENT_DROPPED_TAIL}.`
-
-const sessionIDFromContext = (source: unknown): string | undefined => {
-  const sessionID =
-    typeof source === "object" && source !== null ? (source as { sessionID?: unknown }).sessionID : undefined
-  return typeof sessionID === "string" && sessionID.length > 0 ? sessionID : undefined
-}
-
-const sessionKeyFromContext = (source: unknown): string => sessionIDFromContext(source) ?? FALLBACK_SESSION_KEY
 
 // The store's line shape, validated field by field: a line failing any
 // required field is skipped (per-line tolerance, mirroring the log seeder's
@@ -3041,21 +2435,6 @@ const evictLeastRecentlyUsed = (
     evicted,
     pagesDropped,
   }
-}
-
-const orderedRenderedSubjectsOf = (hotSubjects: HotSubject[], limit: number): string[] => {
-  if (limit <= 0) return []
-  const seen = new Set<string>()
-  const rendered: string[] = []
-  const ordered = [...hotSubjects].sort((a, b) => b.lastTouch - a.lastTouch)
-  for (const { subject } of ordered) {
-    const renderedSubject = renderSubject(subject)
-    if (seen.has(renderedSubject)) continue
-    seen.add(renderedSubject)
-    rendered.push(renderedSubject)
-    if (rendered.length >= limit) break
-  }
-  return rendered
 }
 
 const buildHintLine = (hotSubjects: HotSubject[], limit: number): string | undefined => {
