@@ -1,4 +1,6 @@
 import type { ResolvedOptions } from "./options.ts"
+import { rememberSessionValue } from "./session-maps.ts"
+import type { MetricsStore } from "./state.ts"
 
 export const CONTEXT_TOKENS_SOURCE_OVERRIDE = "override"
 export const CONTEXT_TOKENS_SOURCE_MODEL = "model"
@@ -85,4 +87,31 @@ export const contextLimitForRun = (
     contextLimit: { tokens: persistedBudget.tokens, source: persistedBudget.source, modelKey: persistedBudget.modelKey },
     fallbackSuppressed: false,
   }
+}
+
+export const chatParamsHookBody = (
+  input: { sessionID: string; model?: ChatParamsModel },
+  contextLimits: Map<string, ContextLimitEntry>,
+  modelKeyBySession: Map<string, string | undefined>,
+  metricsBySession: MetricsStore,
+  options: ResolvedOptions,
+): void => {
+  const modelKey = modelKeyOf(input.model)
+  // The sitting's newest model identity rides the transform side: the
+  // persisted-budget fallback suppresses itself against it when the
+  // session changed models, mid sitting or across a restart.
+  rememberSessionValue(modelKeyBySession, input.sessionID, modelKey, options.limitSessions)
+  const captured = captureContextLimitOf(input.model, options.modelContextTokens)
+  if (captured !== undefined) {
+    rememberSessionValue(contextLimits, input.sessionID, captured, options.limitSessions)
+    return
+  }
+  const stored = contextLimits.get(input.sessionID)
+  if (!storedContextLimitBelongsToAnotherModel(stored, modelKey)) return
+  contextLimits.delete(input.sessionID)
+  // A model change also invalidates the persisted-budget fallback:
+  // without this, the deleted live capture would refill from the
+  // previous model's rehydrated budget on the next run.
+  const metrics = metricsBySession.get(input.sessionID)
+  if (metrics !== undefined) metrics.persistedBudget = undefined
 }

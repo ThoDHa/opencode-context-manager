@@ -1,4 +1,5 @@
 import type { ResolvedOptions } from "./options.ts"
+import type { RunComposition } from "./state.ts"
 
 const FILE_PART_TYPE = "file"
 const FILE_FILENAME_KEY = "filename"

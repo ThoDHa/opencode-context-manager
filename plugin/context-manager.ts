@@ -1,27 +1,13 @@
 import { randomUUID } from "node:crypto"
-import { appendFile, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises"
-import { dirname, join } from "node:path"
+import { appendFile, readFile } from "node:fs/promises"
 import type { Plugin, PluginModule } from "@opencode-ai/plugin"
-import {
-  PLUGIN_ID,
-  PLUGIN_VERSION,
-  RAW_COUNTER_KEYS as SCHEMA_RAW_COUNTER_KEYS,
-  TOTALS_KEYS,
-  type DerivedCounterKey as TotalsDerivedKey,
-  type RawCounterKey as SchemaRawCounterKey,
-  type TotalsKey,
-} from "./schema.ts"
+import { PLUGIN_ID } from "./schema.ts"
 
-import type { ChatParamsModel, ContextLimit, ContextLimitEntry, ContextTokensSource, PersistedContextLimit } from "./context-limits.ts"
+import type { ChatParamsModel, ContextLimitEntry } from "./context-limits.ts"
 import {
-  CONTEXT_TOKENS_SOURCE_DEFAULT,
-  CONTEXT_TOKENS_SOURCE_MODEL,
-  CONTEXT_TOKENS_SOURCE_OVERRIDE,
   CONTEXT_TOKENS_SOURCE_UNKNOWN,
-  captureContextLimitOf,
+  chatParamsHookBody,
   contextLimitForRun,
-  modelKeyOf,
-  storedContextLimitBelongsToAnotherModel,
 } from "./context-limits.ts"
 import type { FilePartFields, MessageBundle } from "./messages.ts"
 import type { ContextManagerOptions, ResolvedOptions } from "./options.ts"
@@ -33,7 +19,6 @@ import {
   completedOutputOf,
   ESCAPE_SPAN_PATTERN,
   estimateTokens,
-  estimateTokensFromBytes,
   filePartOf,
   hotFromIndexOf,
   nonEmptyAttachmentsOf,
@@ -48,13 +33,8 @@ import {
 } from "./messages.ts"
 import {
   ADVISORY_SUBJECTS_BOUND,
-  defaultIngestionHygienePath,
-  defaultLiveStateDir,
-  defaultMetricsPath,
-  isNonEmptyString,
   isPatternProtected,
   isProtectedTool,
-  PATH_SEGMENT_SEPARATOR,
   resolveOptions,
 } from "./options.ts"
 import {
@@ -96,8 +76,52 @@ import {
   subjectsOf,
   UNKNOWN_TARGET_LABEL,
 } from "./vocabulary.ts"
+import type {
+  AdvisoryResult,
+  DryRunResult,
+  EvictedEntryInfo,
+  EvictionResult,
+  FenceEviction,
+  MetricsHydration,
+  MetricsStore,
+  PersistedTotals,
+  ReasoningExpiry,
+  RetentionBreakdown,
+  RunOutcome,
+  SessionMetrics,
+  ToolAppearance,
+} from "./state.ts"
+import {
+  appearanceTouches,
+  countFaults,
+  countUniqueDedupedPairs,
+  createSessionMetrics,
+  DEFAULT_REMEMBERED_FAULT_SUBJECTS,
+  DEFAULT_REMEMBERED_REASONING_PARTS,
+  metricsForSession,
+  recordRunOutcome,
+  rememberError,
+  rememberUniqueKey,
+  totalsOf,
+  withSessionMetricsEntry,
+} from "./state.ts"
+import type { PruneThrottle } from "./persistence.ts"
+import {
+  appendHygieneCopy,
+  isRecord,
+  logRotationIsDue,
+  METRICS_ROTATION_DISABLED_MAX_BYTES,
+  migrateLegacyDefaultPaths,
+  newestPersistedTotalsOf,
+  PRUNE_SCAN_NEVER,
+  recordMetricsLine,
+  recordSessionCheckpoint,
+  rotateMetricsLogPastCap,
+} from "./persistence.ts"
 
 export { ADVISORY_BAND_RATIO_DEFAULT, DEFAULT_INGESTION_HYGIENE_ROTATION_MAX_BYTES, DEFAULT_METRICS_ROTATION_MAX_BYTES, DEFAULT_PAGE_STORE_ROTATION_MAX_BYTES } from "./options.ts"
+export { METRIC_NUMBER_KEYS, METRICS_CURSOR_KEYS, RAW_COUNTER_KEYS } from "./state.ts"
+export type { MetricsCursorKey } from "./state.ts"
 
 // Cache-aware hint hysteresis: a subject enters the stable line only after
 // HINT_ENTRY_TOUCHES accumulated live touches and leaves only after
@@ -153,32 +177,16 @@ const PAGE_STORE_OLDER_LEAD = "older pages for subject"
 const PAGE_STORE_MISS_LEAD = "no prior-session page for subject"
 const RECEIVED_LABEL = "received"
 const TOOL_ERROR_PREFIX = "[ctx-error] "
-const TOUCH_SCAN_INITIAL_WATERMARK = -1
-const DEFAULT_REMEMBERED_REASONING_PARTS = 4096
-const DEFAULT_REMEMBERED_DEDUP_PAIRS = 4096
-// How many distinct faulted subjects one session's metrics entry remembers
-// (LRU, refreshed on every increment): between the evicted-subject cap and
-// the reasoning-part cap, sized so a session's reloaded outputs stay
-// fault-tracked for the entry's lifetime.
-const DEFAULT_REMEMBERED_FAULT_SUBJECTS = 256
 // How many messages of eviction deferral one recorded fault buys a subject
 // in the candidate sort: a reloaded output is demonstrably needed again, so
 // it re-evicts five messages later than its recency alone would place it.
 const FAULT_PENALTY_MESSAGES = 5
-const HYGIENE_COPY_DISABLED_MAX_BYTES = 0
 // The page-store line contract's own version, stamped on every new line so
 // mixed-version stores classify line by line: a legacy unstamped line reads
 // as this version (v1 is the unstamped shape plus the field), a strictly
 // newer version is refused rather than interpreted, and refusal halts this
 // process's appends and rotation so it cannot bury a newer build's pages.
 export const PAGE_STORE_SCHEMA_VERSION = 1
-const LIVE_STATE_FILE_SUFFIX = ".json"
-const LIVE_STATE_TEMP_FILE_SUFFIX = ".tmp"
-const PRUNE_SCAN_NEVER = -1
-const PRUNE_SCAN_THROTTLE_DISABLED = 0
-const METRICS_ROTATION_DISABLED_MAX_BYTES = 0
-const METRICS_ROTATION_SUFFIX = ".1"
-const METRICS_COALESCING_DISABLED_MS = 0
 const DESCRIBE_TOOL_NAME = "describe"
 const DESCRIBE_TOOL_DESCRIPTION =
   "Return live metrics for the Context Manager in this session: eviction counters, expired reasoning counts, faults (post-eviction re-references of evicted subjects), session page store occupancy, the effective context limit and its headroom, and the most recent transform run's token estimate; also the newest run's declared omissions (tool evictions, expired reasoning parts, evicted fenced blocks) with the recall reload pointer when one exists, the newest run's retention audit over the live tool-output pool when one exists, the manual-mode dry run when armed, the newest run's advisory pressure-band preview when the estimate enters the band, the newest run's post-transform composition (tool outputs, text, retained reasoning), the echoed option surface including charsPerToken, the remembered-evicted-subjects bound, and the protected tools and patterns, and the last transform error when one occurred."
@@ -208,12 +216,6 @@ const FENCE_INDENT_SPACE = " "
 const FENCE_INFO_SEPARATOR = /\s+/
 const USER_MESSAGE_ROLE = "user"
 
-type ToolAppearance = {
-  msgIndex: number
-  tool: string
-  subjects: Subject[]
-}
-
 type EvictableEntry = {
   stateRef: { output: string; attachments?: unknown }
   tool: string
@@ -224,47 +226,6 @@ type EvictableEntry = {
   attachmentBytes: number
   subjects: Subject[]
 }
-
-type EvictionResult = {
-  hotSubjects: HotSubject[]
-  appearances: ToolAppearance[]
-  estimatedTokens: number
-  watermarkTokens: number | null
-  deficitTokens: number | null
-  evicted: EvictedEntryInfo[]
-  pagesDropped: number
-}
-
-type EvictedEntryInfo = {
-  tool: string
-  subject: string
-  subjects: Subject[]
-  bytes: number
-  attachmentBytes: number
-  messagesAgo: number
-}
-
-type LastRunMetrics = { estimatedTokens: number; watermarkTokens: number | null; deficitTokens: number | null }
-
-type RunOutcome = {
-  eviction: EvictionResult
-  deduped: number
-  dedupedBytesUnique: number
-  dedupedUnique: number
-  collapsedWindows: number
-  collapsedWindowBytes: number
-  purged: number
-  faults: number
-  reasoningExpired: ReasoningExpiry
-  fenceEvicted: FenceEviction
-  dryRun: DryRunResult | undefined
-  advisory: AdvisoryResult | undefined
-  composition: RunComposition
-}
-
-type ReasoningExpiry = { parts: number; bytes: number; unique: number; uniqueBytes: number }
-
-type PruneThrottle = { lastScanMs: number }
 
 // The instance-level downgrade-refusal fact, the PruneThrottle pattern: one
 // flag per plugin process, set the first time any walk of the store (the
@@ -282,141 +243,6 @@ type PageStoreSchemaVerdict =
   | { kind: "invalid" }
   | { kind: "newer"; observed: number }
 
-type SessionMetrics = {
-  evictions: number
-  bytesReclaimed: number
-  recallHits: number
-  recallMisses: number
-  pagesDropped: number
-  deduped: number
-  dedupedBytesUnique: number
-  dedupedUnique: number
-  collapsedWindows: number
-  collapsedWindowBytes: number
-  reasoningExpiredUnique: number
-  reasoningBytesExpiredUnique: number
-  faults: number
-  fenceEvicted: number
-  processedContextBytes: number
-  evictedSubjects: Subject[]
-  faultScanThrough: number
-  // Per-entry memory for the unique-event counters: content identities of
-  // reasoning parts and dedup pairs already counted. They reset when the
-  // metrics store evicts and reseeds the entry, so unique counts are
-  // per-entry-lifetime, not per-process; identical content counts once.
-  reasoningSeenKeys: string[]
-  dedupedPairKeys: string[]
-  // Per-entry fault bookkeeping: the rendered primary subject of every
-  // reloaded (recall hit) or re-touched (keyed post-eviction
-  // appearance) evicted output, mapped to its fault count. Like the
-  // seen-key lists it resets when the metrics store evicts and reseeds
-  // the entry, so fault memory is per-entry-lifetime and never persisted.
-  faultCounts: Map<string, number>
-  // The rendered primary subjects of remembered evicted entries, pushed
-  // beside evictedSubjects at the same points and trimmed at the same
-  // bound: the keyed fault credit matches appearances against these
-  // because the fault map's keys live in the rendered subject domain
-  // recall matches on.
-  evictedRenderedSubjects: string[]
-  recallsLoggedThrough: number
-  // Per-process bookkeeping for the metrics line coalesce gate: the moment
-  // of the session's last flushed line and the budget source it carried.
-  // Never persisted; a restart simply writes on its next eventful run.
-  lastLineAtMs?: number
-  lastLineContextLimitSource?: ContextTokensSource
-  // The budget resolved at this session's previous sitting, rehydrated
-  // with the counters so a restart does not flicker the budget to
-  // unknown; a live chat.params capture always wins over it.
-  persistedBudget?: PersistedContextLimit
-  // The manual-mode dry run from this session's newest run: run-scoped
-  // diagnostic state for describe, never persisted, replaced every run.
-  lastDryRun?: DryRunResult
-  // The newest run's declared omissions (tool evictions, expired reasoning
-  // parts, evicted fenced blocks): run-scoped diagnostic state for describe
-  // and the compaction footer, never persisted, replaced every run.
-  lastOmissions?: LastOmissions
-  // The newest run's advisory band preview: run-scoped diagnostic state
-  // for describe, undefined when disarmed, when no effective watermark
-  // exists, or when the estimate sits below the band start; persisted
-  // only through the session checkpoint's optional advisory field.
-  lastAdvisory?: AdvisoryResult
-  // The newest run's retention audit (pool size and per-reason protection
-  // counts over the unfiltered candidate pool): run-scoped diagnostic
-  // state for describe and the panel, replaced every run; persisted only
-  // through the session checkpoint's optional retention field.
-  lastRetention?: RetentionBreakdown
-  // The newest run's composition (toolPoolBytes, textChars,
-  // reasoningInWindowBytes): run-scoped diagnostic state for describe,
-  // never persisted, replaced every run.
-  lastComposition?: RunComposition
-  // The newest fault-isolated failure on this session's transform: set by
-  // the transform boundary when the body throws, surfaced through
-  // describe, never persisted, replaced by the next run's outcome.
-  lastError?: LastError
-  lastRun?: LastRunMetrics
-  logWriteError?: string
-  stateWriteError?: string
-  hygieneWriteError?: string
-  pageStoreWriteError?: string
-  // Set when this session observed a page-store line from a newer schema
-  // version, or when an eviction ran while the instance guard held: the
-  // store's writes and rotation are halted and describe explains why.
-  pageStoreSchemaError?: string
-}
-
-type LastError = { message: string; atMs: number }
-
-type MetricsStore = Map<string, SessionMetrics>
-
-// The raw counters a session's persisted totals can seed, declared once in
-// schema.ts and anchored to SessionMetrics by the exhaustiveness
-// assertion below so a renamed or removed counter fails to compile here
-// instead of silently missing its seed. The runtime seeder iterates this
-// same list.
-export const RAW_COUNTER_KEYS: readonly RawCounterKey[] = Object.freeze(SCHEMA_RAW_COUNTER_KEYS)
-type RawCounterKey = SchemaRawCounterKey
-
-// Two-directional exhaustiveness: every number-valued SessionMetrics key
-// other than the per-process cursors must appear in RawCounterKey, so a
-// newly added counter fails to compile until it is added to the seeded set.
-// Cursor inventory beyond the two number cursors in MetricsCursorKey: the
-// optional coalesce-gate fields lastLineAtMs and lastLineContextLimitSource escape
-// this check through optionality and are seeded implicitly (undefined means
-// never written, so a restart writes on its next eventful run), the
-// persistedBudget fallback is seeded from the record's budget fields
-// (undefined when the record carries none), and the reasoningSeenKeys and
-// dedupedPairKeys lists are seeded empty. A new REQUIRED numeric field must
-// land in RAW_COUNTER_KEYS or MetricsCursorKey to compile; a new OPTIONAL
-// one must be justified the same way.
-type NumberValuedSessionMetricKey = {
-  [K in keyof SessionMetrics]-?: SessionMetrics[K] extends number ? K : never
-}[keyof SessionMetrics]
-export type MetricsCursorKey = "faultScanThrough" | "recallsLoggedThrough"
-export const METRICS_CURSOR_KEYS: readonly MetricsCursorKey[] = ["faultScanThrough", "recallsLoggedThrough"]
-type UnseededMetricKeys = Exclude<Exclude<NumberValuedSessionMetricKey, MetricsCursorKey>, RawCounterKey>
-type AssertEveryMetricSeeded = UnseededMetricKeys extends never ? true : never
-const everyMetricIsSeeded: AssertEveryMetricSeeded = true
-
-// The persisted totals shape, derived from the shared schema key list so a
-// key added in schema.ts appears here and in the panel parser without a
-// second edit.
-type CumulativeCounters = { [K in TotalsKey]: number }
-
-type SessionCheckpoint = {
-  ts: string
-  session: string
-  manualMode: boolean
-  contextLimit: number | null
-  contextLimitSource: ContextTokensSource
-  contextLimitModelKey: number | null | string
-  lastRun: LastRunMetrics
-  advisory?: AdvisoryResult
-  retention?: RetentionBreakdown
-  totals: CumulativeCounters
-  pageStore: { entries: number; capacity: number }
-  hotSubjects: string[]
-}
-
 type StatsSource = {
   options: ResolvedOptions
   limits: Map<string, ContextLimitEntry>
@@ -431,33 +257,9 @@ type RetainedFileDuplicate = { msgIndex: number; label: string }
 
 type DedupTarget = { stateRef: { output: string; attachments?: unknown }; tool: string; input: Record<string, unknown> }
 
-type DedupedPairBytes = { key: string; bytes: number }
 type DedupOutcome = { tombstones: number; tombstonedPairs: DedupedPairBytes[] }
 
-type PageEntry = {
-  output: string
-  tool: string
-  subject: string
-  msgIndex: number
-  partIndex: number
-  attachments?: unknown[]
-  stashSlot?: number
-}
-
-type SessionPageStore = Map<string, PageEntry>
-
 type PageStoreBySession = Map<string, SessionPageStore>
-
-const appearanceTouches = (entrySubjects: Subject[], appearance: ToolAppearance, minSubstringChars: number): boolean =>
-  appearance.subjects.some((appearanceSubject) =>
-    entrySubjects.some(
-      (entrySubject) =>
-        entrySubject.path === appearanceSubject.path ||
-        (appearance.tool === BASH_TOOL_NAME &&
-          entrySubject.path.length > minSubstringChars &&
-          appearanceSubject.path.includes(entrySubject.path)),
-    ),
-  )
 
 const dedupKeyOf = (tool: string, input: Record<string, unknown>): string => JSON.stringify([tool, stableStringify(input)])
 
@@ -637,68 +439,6 @@ const applyRangeCollapse = (messages: MessageBundle[], plan: RangeCollapsePlan):
   for (const edit of plan.edits) messages[edit.msgIndex].parts[edit.partIndex] = edit.replacement
 }
 
-// Membership test plus bounded remember shared by the unique-event counters:
-// returns true the first time a key is seen, false for repeats. The list
-// trims to the bound, so an event forgotten after a bound worth of newer
-// keys could count once more; the default bounds dwarf real standing sets.
-// The linear scan is O(events x bound) per run, capped by the bound at a
-// few million short-string compares worst case, which stays well under the
-// transform's existing per-run serialization cost; a Set would complicate
-// the FIFO trim for no measurable win at real session sizes.
-const rememberUniqueKey = (seenKeys: string[], key: string, rememberedBound: number): boolean => {
-  if (seenKeys.includes(key)) return false
-  seenKeys.push(key)
-  while (seenKeys.length > rememberedBound) seenKeys.shift()
-  return true
-}
-
-// A pair's key covers tool and input (or mime and url for file parts), the
-// same content identity the dedup pass itself keys retained duplicates by,
-// so identical-input occurrences count once: a standing duplicate
-// re-tombstones every run, but only its first creation counts as unique.
-// Like the reasoning seen-set, the key list lives on the session's metrics
-// entry and resets if that entry is evicted from the metrics store and
-// reseeded within one process.
-const countUniqueDedupedPairs = (metrics: SessionMetrics, pairs: DedupedPairBytes[]): { unique: number; bytes: number } => {
-  let unique = 0
-  let bytes = 0
-  for (const pair of pairs) {
-    if (rememberUniqueKey(metrics.dedupedPairKeys, pair.key, DEFAULT_REMEMBERED_DEDUP_PAIRS)) {
-      unique += 1
-      bytes += pair.bytes
-    }
-  }
-  return { unique, bytes }
-}
-
-type RunComposition = {
-  toolPoolBytes: number
-  textChars: number
-  reasoningInWindowBytes: number
-  escapeBytes: number
-  attachmentBytes: number
-}
-
-// The newest run's declared omissions by category, recorded when the run
-// outcome lands: the tombstoned outputs no longer carry their pre-eviction
-// shape, so run time is the last point these facts exist whole.
-type LastOmissions = {
-  toolEvictions: number
-  reasoningParts: number
-  fenceBlocks: number
-}
-
-// The newest run's retention audit, recorded beside the run outcome: the
-// live tool-output pool size with per-reason protection counts over the
-// unfiltered candidate pool. Reasons are diagnostic, not exclusive: an
-// entry matching several counts under each. The fault shift reports the
-// largest sort-key lead the recorded faults bought at classify time.
-type RetentionBreakdown = {
-  pool: number
-  reasons: { inWindow: number; protectedTool: number; patternProtected: number; faultShielded: number; retainedRead: number }
-  faultShieldedShiftMessages: number
-}
-
 // At-birth tool-output hygiene, applied by tool.execute.after so the
 // rewrite persists into session storage: strips the same CSI/OSC spans
 // the composition walk counts (the shared ESCAPE_SPAN_PATTERN), collapses
@@ -841,8 +581,6 @@ const stripLegacyHintParts = (messages: MessageBundle[]): void => {
 type FenceSpan = { startLine: number; endLine: number; language: string | undefined }
 
 type FenceReplacement = { startOffset: number; endOffset: number; replacement: string; bytes: number }
-
-type FenceEviction = { blocks: number; bytes: number; pagesDropped: number }
 
 const leadingBackticksOf = (line: string): number => {
   let ticks = 0
@@ -1281,380 +1019,6 @@ const executeReadEvicted = async (
   return newest.attachments === undefined ? output : `${output}\n${pageAttachmentsLineFor(newest.attachments)}`
 }
 
-// Raw counters start at zero, derived from the shared schema key list so a
-// counter added there is initialized here too instead of reading undefined.
-// The cast is a type escape: Object.fromEntries types as a string-indexed
-// record, so the schema tuple's key coverage is asserted with the cast
-// rather than carried by the type.
-const zeroedRawCounters = Object.fromEntries(RAW_COUNTER_KEYS.map((key) => [key, 0])) as Record<RawCounterKey, number>
-
-const createSessionMetrics = (): SessionMetrics => ({
-  ...zeroedRawCounters,
-  evictedSubjects: [],
-  faultScanThrough: TOUCH_SCAN_INITIAL_WATERMARK,
-  reasoningSeenKeys: [],
-  dedupedPairKeys: [],
-  faultCounts: new Map(),
-  evictedRenderedSubjects: [],
-  recallsLoggedThrough: 0,
-})
-
-// Runtime inventory of SessionMetrics's numeric keys, derived from a real
-// seeded entry: the runtime artifact the schema-lockstep pin asserts
-// against (raw counters plus the two cursors), since type stripping makes
-// the compile-time exhaustiveness assertion inert. The cursors are
-// required numeric fields on SessionMetrics, so the seeded entry already
-// carries them.
-const seededMetrics = createSessionMetrics()
-// Type escape, same justification as zeroedRawCounters: SessionMetrics's
-// key set is asserted against the schema list at authoring time, but the
-// type system cannot express that structural overlap for keyed access.
-export const METRIC_NUMBER_KEYS: readonly string[] = Object.freeze(
-  Object.keys(seededMetrics)
-    .filter((key) => typeof (seededMetrics as Record<string, unknown>)[key] === "number")
-    .sort(),
-)
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value)
-
-const persistedMsOf = (value: unknown): number | undefined => {
-  if (typeof value !== "string") return undefined
-  const ms = Date.parse(value)
-  return Number.isNaN(ms) ? undefined : ms
-}
-
-// Absent keys default to 0 (records written before a counter existed),
-// while a present-but-non-finite value rejects the whole record: a corrupt
-// raw counter means the record cannot be trusted, so the seeder refuses it
-// and falls through to the next-newest record. Absence marks the upgrade
-// boundaries instead: a totals block missing the first-crossing
-// reasoning-bytes key predates the 2026-09 reasoning reset, and a block
-// missing any of the 2026-10-02 renamed keys (recallHits, recallMisses,
-// pagesDropped, faults, dedupedBytesUnique) predates that reset, so its
-// totals were accumulated under spellings and semantics the current schema
-// cannot mean; the seeder rejects such records wholesale and the session
-// restarts at zero rather than rehydrating figures the new schema cannot
-// mean.
-const UPGRADE_REQUIRED_COUNTER_KEYS: readonly RawCounterKey[] = [
-  "reasoningBytesExpiredUnique",
-  "recallHits",
-  "recallMisses",
-  "pagesDropped",
-  "faults",
-  "dedupedBytesUnique",
-]
-
-const persistedCounterOf = (totals: Record<string, unknown>, key: RawCounterKey): number | undefined => {
-  const value = totals[key]
-  if (value === undefined) return UPGRADE_REQUIRED_COUNTER_KEYS.includes(key) ? undefined : 0
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined
-}
-
-type PersistedCounters = Pick<SessionMetrics, RawCounterKey>
-
-type PersistedContextLimitSeed = { budget: PersistedContextLimit | undefined }
-
-type PersistedTotals = { tsMs: number; counters: PersistedCounters; budget: PersistedContextLimit | undefined }
-
-const CONTEXT_TOKENS_SOURCES: readonly ContextTokensSource[] = [
-  CONTEXT_TOKENS_SOURCE_OVERRIDE,
-  CONTEXT_TOKENS_SOURCE_MODEL,
-  CONTEXT_TOKENS_SOURCE_DEFAULT,
-  CONTEXT_TOKENS_SOURCE_UNKNOWN,
-]
-
-const isContextTokensSource = (value: unknown): value is ContextTokensSource =>
-  (CONTEXT_TOKENS_SOURCES as readonly unknown[]).includes(value)
-
-// Absent or null budget fields mean the record predates budget
-// persistence or the session genuinely had no budget (both rehydrate to
-// unknown, exactly the pre-persistence behavior), while a
-// present-but-invalid pair rejects the whole record under the same
-// discipline as a corrupt raw counter: the record cannot be trusted.
-// The persisted model key is optional metadata: absent or null
-// rehydrates to no model identity (an untracked or option-sourced
-// budget), while a blank or non-string value rejects the record. Undefined return
-// rejects the seed; a defined one carries the budget or unknown.
-const persistedContextLimitSeedOf = (parsed: Record<string, unknown>): PersistedContextLimitSeed | undefined => {
-  const tokens = parsed["contextLimit"]
-  if (tokens === undefined || tokens === null) return { budget: undefined }
-  if (typeof tokens !== "number" || Number.isFinite(tokens) === false || tokens <= 0) return undefined
-  const source = parsed["contextLimitSource"]
-  if (isContextTokensSource(source) === false) return undefined
-  const rawModelKey = parsed["contextLimitModelKey"]
-  if (rawModelKey !== undefined && rawModelKey !== null && (typeof rawModelKey !== "string" || rawModelKey.length === 0)) return undefined
-  return { budget: { tokens, source, modelKey: typeof rawModelKey === "string" ? rawModelKey : undefined } }
-}
-
-const persistedCountersOf = (value: unknown): PersistedCounters | undefined => {
-  if (!isRecord(value)) return undefined
-  const counters = {} as PersistedCounters
-  for (const key of RAW_COUNTER_KEYS) {
-    const seeded = persistedCounterOf(value, key)
-    if (seeded === undefined) return undefined
-    counters[key] = seeded
-  }
-  return counters
-}
-
-const checkpointTotalsSeedOf = async (options: ResolvedOptions, sessionKey: string): Promise<PersistedTotals | undefined> => {
-  if (options.liveStateLog === false) return undefined
-  if (!isSafeSessionFileStem(sessionKey)) return undefined
-  let content: string
-  try {
-    content = await readFile(join(options.liveStatePath, `${sessionKey}${LIVE_STATE_FILE_SUFFIX}`), "utf8")
-  } catch {
-    return undefined
-  }
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(content)
-  } catch {
-    return undefined
-  }
-  if (!isRecord(parsed) || parsed["session"] !== sessionKey) return undefined
-  const tsMs = persistedMsOf(parsed["ts"])
-  const counters = persistedCountersOf(parsed["totals"])
-  const budgetSeed = persistedContextLimitSeedOf(parsed)
-  if (tsMs === undefined || counters === undefined || budgetSeed === undefined) return undefined
-  return { tsMs, counters, budget: budgetSeed.budget }
-}
-
-const logTotalsSeedOf = async (options: ResolvedOptions, sessionKey: string): Promise<PersistedTotals | undefined> => {
-  if (options.metricsLog === false) return undefined
-  let content: string
-  try {
-    content = await readFile(options.metricsPath, "utf8")
-  } catch {
-    return undefined
-  }
-  // Newest line first: the last match for the session wins, matching the
-  // panel's newest-line preference including equal timestamps.
-  const lines = content.split("\n")
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const trimmed = lines[index].trim()
-    if (trimmed.length === 0) continue
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(trimmed)
-    } catch {
-      continue
-    }
-    if (!isRecord(parsed) || parsed["session"] !== sessionKey) continue
-    const tsMs = persistedMsOf(parsed["ts"])
-    const counters = persistedCountersOf(parsed["totals"])
-    const budgetSeed = persistedContextLimitSeedOf(parsed)
-    if (tsMs === undefined || counters === undefined || budgetSeed === undefined) continue
-    return { tsMs, counters, budget: budgetSeed.budget }
-  }
-  return undefined
-}
-
-// The newest record wins, mirroring the panel's snapshot-versus-log
-// preference: the snapshot covers quiet runs, while a strictly newer log
-// line means another writer landed after the last snapshot.
-const newestPersistedTotalsOf = async (options: ResolvedOptions, sessionKey: string): Promise<PersistedTotals | undefined> => {
-  const [snapshotSeed, logSeed] = await Promise.all([checkpointTotalsSeedOf(options, sessionKey), logTotalsSeedOf(options, sessionKey)])
-  if (snapshotSeed === undefined) return logSeed
-  if (logSeed === undefined) return snapshotSeed
-  return logSeed.tsMs > snapshotSeed.tsMs ? logSeed : snapshotSeed
-}
-
-const seedSessionCounters = (metrics: SessionMetrics, persisted: PersistedTotals): void => {
-  Object.assign(metrics, persisted.counters)
-  metrics.persistedBudget = persisted.budget
-  // Raised with the seeded reads: without it the first post-restart run
-  // would count every pre-restart stash read as read-since-last-line and
-  // write a spurious eventful line.
-  metrics.recallsLoggedThrough = persisted.counters.recallHits + persisted.counters.recallMisses
-}
-
-type MetricsHydrationEntry = { promise: Promise<void>; settled: boolean }
-
-type MetricsHydration = Map<string, MetricsHydrationEntry>
-
-// One hydration per session key while it is in flight, and one seed per
-// entry lifetime: the settled guard is replaced only when a freshly
-// re-created entry asks for a reseed (the metrics store evicted the key and
-// this call created it again), and that replacement loads from disk again
-// rather than from the first-touch record, which this process's own later
-// runs have already superseded. An entry still in the map is never
-// re-seeded. Read or parse failures resolve to no seed, never an error.
-const startMetricsHydration = (
-  metrics: MetricsStore,
-  hydrations: MetricsHydration,
-  persistedTotalsForSession: (sessionKey: string) => Promise<PersistedTotals | undefined>,
-  sessionKey: string,
-  reseed: boolean,
-): Promise<void> => {
-  const guard = hydrations.get(sessionKey)
-  if (guard !== undefined && (guard.settled === false || reseed === false)) return guard.promise
-  const promise = persistedTotalsForSession(sessionKey)
-    .then((persisted) => {
-      if (persisted === undefined) return
-      const current = metrics.get(sessionKey)
-      if (current !== undefined) seedSessionCounters(current, persisted)
-    })
-    .catch(() => {})
-  const next: MetricsHydrationEntry = { promise, settled: false }
-  hydrations.set(sessionKey, next)
-  void promise.then(() => {
-    next.settled = true
-  })
-  return promise
-}
-
-const metricsForSession = async (
-  metrics: MetricsStore,
-  hydrations: MetricsHydration,
-  persistedTotalsForSession: (sessionKey: string) => Promise<PersistedTotals | undefined>,
-  sessionKey: string,
-  sessionBound: number,
-): Promise<SessionMetrics> => {
-  // An eventful run on a zeroed entry (freshly created because the metrics
-  // store evicted this key, or created while its seed was still loading)
-  // would persist a regressed newest record and poison later rehydration,
-  // so loop until the entry survives the hydration await; the settled
-  // guard makes retries microtask-cheap. A re-created entry reseeds.
-  for (;;) {
-    const existing = touchMapEntry(metrics, sessionKey)
-    const reseed = existing === undefined
-    if (reseed) {
-      trimMapToBound(metrics, sessionBound)
-      metrics.set(sessionKey, createSessionMetrics())
-    }
-    await startMetricsHydration(metrics, hydrations, persistedTotalsForSession, sessionKey, reseed)
-    const settled = touchMapEntry(metrics, sessionKey)
-    if (settled !== undefined) return settled
-  }
-}
-
-// Keyed fault credit for one unseen appearance: every remembered rendered
-// subject the appearance touches (same path-equality and bash-substring
-// discipline as the aggregate scan, with the rendered string wrapped as a
-// path subject) gains one fault, credited once per appearance even when
-// several remembered entries share the subject.
-const creditKeyedFaults = (metrics: SessionMetrics, appearance: ToolAppearance, minSubstringChars: number): void => {
-  const credited = new Set<string>()
-  for (const rendered of metrics.evictedRenderedSubjects) {
-    if (credited.has(rendered)) continue
-    if (appearanceTouches([{ path: rendered }], appearance, minSubstringChars)) {
-      credited.add(rendered)
-      rememberFaultForSubject(metrics.faultCounts, rendered, DEFAULT_REMEMBERED_FAULT_SUBJECTS)
-    }
-  }
-}
-
-const countFaults = (metrics: SessionMetrics, appearances: ToolAppearance[], minSubstringChars: number): number => {
-  let faults = 0
-  let latestIndex = metrics.faultScanThrough
-  for (const appearance of appearances) {
-    if (appearance.msgIndex <= metrics.faultScanThrough) continue
-    if (appearanceTouches(metrics.evictedSubjects, appearance, minSubstringChars)) faults += 1
-    creditKeyedFaults(metrics, appearance, minSubstringChars)
-    latestIndex = appearance.msgIndex
-  }
-  metrics.faultScanThrough = latestIndex
-  return faults
-}
-
-const lastRunMetricsOf = (eviction: EvictionResult): LastRunMetrics => ({
-  estimatedTokens: eviction.estimatedTokens,
-  watermarkTokens: eviction.watermarkTokens,
-  deficitTokens: eviction.deficitTokens,
-})
-
-const recordRunOutcome = (metrics: SessionMetrics, run: RunOutcome, rememberedSubjectsBound: number): void => {
-  const { eviction, deduped: dedupedThisRun, dedupedBytesUnique: dedupedBytesThisRun, dedupedUnique: dedupedUniqueThisRun, collapsedWindows: collapsedWindowsThisRun, collapsedWindowBytes: collapsedWindowBytesThisRun, faults: faultsThisRun, reasoningExpired: reasoningExpiredThisRun, fenceEvicted: fenceEvictedThisRun } = run
-  metrics.lastRun = lastRunMetricsOf(eviction)
-  metrics.evictions += eviction.evicted.length
-  metrics.pagesDropped += eviction.pagesDropped
-  for (const entry of eviction.evicted) {
-    metrics.bytesReclaimed += entry.bytes + entry.attachmentBytes
-    metrics.evictedSubjects.push(...entry.subjects)
-    metrics.evictedRenderedSubjects.push(entry.subject)
-  }
-  while (metrics.evictedSubjects.length > rememberedSubjectsBound) metrics.evictedSubjects.shift()
-  while (metrics.evictedRenderedSubjects.length > rememberedSubjectsBound) metrics.evictedRenderedSubjects.shift()
-  metrics.deduped += dedupedThisRun
-  metrics.dedupedBytesUnique += dedupedBytesThisRun
-  metrics.dedupedUnique += dedupedUniqueThisRun
-  metrics.collapsedWindows += collapsedWindowsThisRun
-  metrics.collapsedWindowBytes += collapsedWindowBytesThisRun
-  // Lifetime totals credit only the unique pair: the standing aged set is
-  // re-expired on every request, so accumulating the per-run parts and
-  // bytes would multiply both by the request count. The per-request truth
-  // stays on the line's reasoningExpiredThisRun fields and in
-  // expireAgedReasoning's return value.
-  metrics.reasoningExpiredUnique += reasoningExpiredThisRun.unique
-  metrics.reasoningBytesExpiredUnique += reasoningExpiredThisRun.uniqueBytes
-  metrics.faults += faultsThisRun
-  metrics.fenceEvicted += fenceEvictedThisRun.blocks
-  metrics.bytesReclaimed += fenceEvictedThisRun.bytes
-  metrics.pagesDropped += fenceEvictedThisRun.pagesDropped
-  // The processed-context total rides the post-transform composition: the
-  // request the provider bills carries this list, so the running byte sum
-  // is what the derived token total divides (sum-of-chars, one ceil at
-  // read, never a sum of per-run ceils).
-  metrics.processedContextBytes += run.composition.toolPoolBytes + run.composition.textChars
-}
-
-// Whether appending incomingBytes would push the file past its rotation
-// cap: the rename predicate of rotateMetricsLogPastCap, extracted so a
-// caller can act in the exact window a rename would fire without
-// duplicating the size arithmetic.
-const logRotationIsDue = async (path: string, incomingBytes: number, capBytes: number): Promise<boolean> => {
-  if (capBytes === METRICS_ROTATION_DISABLED_MAX_BYTES) return false
-  let currentBytes: number
-  try {
-    currentBytes = (await stat(path)).size
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") return false
-    throw error
-  }
-  return currentBytes + incomingBytes > capBytes
-}
-
-const rotateMetricsLogPastCap = async (path: string, incomingBytes: number, capBytes: number): Promise<void> => {
-  if (await logRotationIsDue(path, incomingBytes, capBytes)) await rename(path, `${path}${METRICS_ROTATION_SUFFIX}`)
-}
-
-// The disk-copy escape hatch for ingestion hygiene: before a rewritten
-// output lands, one JSONL line carries the tool name, the title when
-// available, both lengths, and the full original, mirroring the host's
-// own full-text-to-disk discipline. A cap of 0 disables the copy entirely
-// (the strip still applies); a failed write degrades to hygieneWriteError
-// on the session's diagnostics and never blocks the tool result.
-const appendHygieneCopy = async (
-  options: ResolvedOptions,
-  metrics: MetricsStore,
-  sessionKey: string,
-  rewrite: { tool: string; title: string | undefined; original: string; stripped: string },
-): Promise<void> => {
-  if (options.ingestionHygieneRotationMaxBytes === HYGIENE_COPY_DISABLED_MAX_BYTES) return
-  const line = {
-    ts: new Date(options.now()).toISOString(),
-    session: sessionKey,
-    tool: rewrite.tool,
-    ...(rewrite.title === undefined ? {} : { title: rewrite.title }),
-    originalChars: rewrite.original.length,
-    strippedChars: rewrite.stripped.length,
-    output: rewrite.original,
-  }
-  try {
-    const hygieneJsonLine = `${JSON.stringify(line)}\n`
-    await rotateMetricsLogPastCap(options.ingestionHygienePath, Buffer.byteLength(hygieneJsonLine), options.ingestionHygieneRotationMaxBytes)
-    await appendFile(options.ingestionHygienePath, hygieneJsonLine)
-    const entry = touchMapEntry(metrics, sessionKey)
-    if (entry !== undefined) delete entry.hygieneWriteError
-  } catch (error) {
-    withSessionMetricsEntry(metrics, sessionKey, options.metricsSessions, (target) => {
-      target.hygieneWriteError = error instanceof Error ? error.message : String(error)
-    })
-  }
-}
-
 // The persistent half of the stash: every entry the evictor stashed this run
 // becomes one JSONL line beside the metrics log, so a later session's
 // recall can reload an original its own in-memory stash never held.
@@ -1720,228 +1084,6 @@ const recordPageStoreLines = async (
       target.pageStoreWriteError = error instanceof Error ? error.message : String(error)
     })
   }
-}
-
-const recordMetricsLine = async (
-  options: ResolvedOptions,
-  metrics: SessionMetrics,
-  sessionKey: string,
-  pluginSession: string,
-  contextLimit: ContextLimit,
-  run: RunOutcome,
-): Promise<void> => {
-  const { eviction, deduped: dedupedThisRun, purged: purgedThisRun, faults: faultsThisRun, reasoningExpired: reasoningExpiredThisRun, fenceEvicted: fenceEvictedThisRun } = run
-  const recallsSinceLastLine = metrics.recallHits + metrics.recallMisses - metrics.recallsLoggedThrough
-  const nowMs = options.now()
-  // The six recorded-event disjuncts feed both gates so the lists cannot
-  // drift. Eventful runs are the candidates for a line: an eviction, dedup
-  // tombstone, input purge, touch, fence event, or stash read, plus
-  // reasoning expiry; a budget-source change alone stays quiet. Among
-  // eventful runs, the significant ones always flush: any recorded event,
-  // plus a budget-source change against the last flushed line (a change
-  // the panel renders per line, and the first line of a session counts as
-  // one). Reasoning expiry re-reports the session's standing aged set on
-  // every run, so a reasoning-only run inside the coalesce window writes
-  // nothing; the window is measured from the session's previous flushed
-  // line and a suppressed run does not move it, so sustained
-  // reasoning-only traffic settles at one line per interval.
-  const hasRecordedEvent =
-    eviction.evicted.length > 0 ||
-    dedupedThisRun > 0 ||
-    purgedThisRun > 0 ||
-    faultsThisRun > 0 ||
-    fenceEvictedThisRun.blocks > 0 ||
-    recallsSinceLastLine > 0
-  const isEventful = hasRecordedEvent || reasoningExpiredThisRun.parts > 0
-  if (options.metricsLog === false || isEventful === false) return
-  const hasSignificantEvent = hasRecordedEvent || contextLimit.source !== metrics.lastLineContextLimitSource
-  const withinCoalesceWindow = metrics.lastLineAtMs !== undefined && nowMs - metrics.lastLineAtMs < options.metricsMinLineIntervalMs
-  if (options.metricsMinLineIntervalMs > METRICS_COALESCING_DISABLED_MS && hasSignificantEvent === false && withinCoalesceWindow) return
-  const line = {
-    ts: new Date(nowMs).toISOString(),
-    session: sessionKey,
-    pluginVersion: PLUGIN_VERSION,
-    pluginSession,
-    contextLimit: contextLimit.tokens,
-    contextLimitSource: contextLimit.source,
-    contextLimitModelKey: contextLimit.modelKey ?? null,
-    estimatedTokens: eviction.estimatedTokens,
-    toolPoolBytes: run.composition.toolPoolBytes,
-    textChars: run.composition.textChars,
-    reasoningInWindowBytes: run.composition.reasoningInWindowBytes,
-    escapeBytes: run.composition.escapeBytes,
-    attachmentBytes: run.composition.attachmentBytes,
-    watermarkTokens: eviction.watermarkTokens,
-    deficitTokens: eviction.deficitTokens,
-    evictedThisRun: eviction.evicted.map((entry) => ({
-      tool: entry.tool,
-      subject: entry.subject,
-      bytes: entry.bytes,
-      attachmentBytes: entry.attachmentBytes,
-      messagesAgo: entry.messagesAgo,
-    })),
-    dedupedThisRun,
-    purgedThisRun,
-    reasoningExpiredThisRun: reasoningExpiredThisRun.parts,
-    reasoningBytesExpiredThisRun: reasoningExpiredThisRun.bytes,
-    ...(run.dryRun === undefined
-      ? {}
-      : {
-          wouldEvictThisRun: run.dryRun.wouldEvictCount,
-          wouldEvictBytesThisRun: run.dryRun.wouldEvictBytes,
-        }),
-    fenceEvictedThisRun: fenceEvictedThisRun.blocks,
-    faultsThisRun,
-    recallsSinceLastLine,
-    totals: totalsOf(metrics, options.charsPerToken),
-  }
-  try {
-    const metricsJsonLine = `${JSON.stringify(line)}\n`
-    await rotateMetricsLogPastCap(options.metricsPath, Buffer.byteLength(metricsJsonLine), options.metricsRotationMaxBytes)
-    await appendFile(options.metricsPath, metricsJsonLine)
-    metrics.recallsLoggedThrough = metrics.recallHits + metrics.recallMisses
-    metrics.lastLineAtMs = nowMs
-    metrics.lastLineContextLimitSource = contextLimit.source
-    delete metrics.logWriteError
-  } catch (error) {
-    metrics.logWriteError = error instanceof Error ? error.message : String(error)
-  }
-}
-
-// Derived counters are computed from the raw counters over the
-// charsPerToken factor (the byte keys they divide are named per entry);
-// everything else copies the same-named SessionMetrics field. Keyed by the
-// schema's derived-counter list, so a new estimate lands here once.
-const DERIVED_TOTAL_SOURCES: { [K in TotalsDerivedKey]: RawCounterKey } = {
-  evictionTokensSaved: "bytesReclaimed",
-  dedupTokensSaved: "dedupedBytesUnique",
-  collapsedWindowTokensSaved: "collapsedWindowBytes",
-  reasoningTokensSaved: "reasoningBytesExpiredUnique",
-  processedContextTokens: "processedContextBytes",
-}
-
-const totalsOf = (metrics: SessionMetrics, charsPerToken: number): CumulativeCounters => {
-  const metricsAsCounters = metrics as unknown as Record<TotalsKey, number>
-  const totals = {} as CumulativeCounters
-  for (const key of TOTALS_KEYS) {
-    const bytesKey = DERIVED_TOTAL_SOURCES[key as TotalsDerivedKey]
-    totals[key] = bytesKey === undefined ? metricsAsCounters[key] : estimateTokensFromBytes(metricsAsCounters[bytesKey], charsPerToken)
-  }
-  return totals
-}
-
-const sessionCheckpointOf = (
-  sessionKey: string,
-  contextLimit: ContextLimit,
-  options: ResolvedOptions,
-  metrics: SessionMetrics,
-  lastRun: LastRunMetrics,
-  pageStore: SessionPageStore,
-  hotSubjects: HotSubject[],
-): SessionCheckpoint => ({
-  ts: new Date(options.now()).toISOString(),
-  session: sessionKey,
-  manualMode: options.manualMode,
-  contextLimit: contextLimit.tokens,
-  contextLimitSource: contextLimit.source,
-  contextLimitModelKey: contextLimit.modelKey ?? null,
-  lastRun,
-  // Spread, not a present-undefined key: a below-band run must leave the
-  // field absent from the JSON so pre-band readers and round-trip
-  // deep-equals see the pre-change shape.
-  ...(metrics.lastAdvisory === undefined ? {} : { advisory: metrics.lastAdvisory }),
-  // Same tolerance for the retention audit: a snapshot carrying it renders
-  // the panel's retention row, one without it renders none.
-  // Same absent-when-empty rule as the describe block: a run that scanned
-  // no live outputs leaves the field out of the JSON, so the panel renders
-  // no retention row and round-trip deep-equals see the pre-change shape.
-  ...(metrics.lastRetention === undefined || metrics.lastRetention.pool === 0 ? {} : { retention: metrics.lastRetention }),
-  totals: totalsOf(metrics, options.charsPerToken),
-  pageStore: { entries: pageStore.size, capacity: options.stashLimit },
-  hotSubjects: orderedRenderedSubjectsOf(hotSubjects, options.hintSubjects),
-})
-
-// Prune runs after the snapshot write has landed, so every failure here
-// is a skipped file, never a surfaced error. The directory scan itself is
-// throttled to at most one per plugin instance per
-// liveStatePruneMinIntervalMs (default MIN_MS_BETWEEN_PRUNE_SCANS, 0
-// disables the throttle): opencode instantiates the plugin once per
-// process, so an instance-level budget is a per-process budget in
-// production. Per-session snapshots fire far more often than state files
-// expire, so the scan that usually finds nothing is the expensive part. A
-// scan landing inside the window is skipped entirely, which only
-// postpones pruning; once the window elapses the next snapshot write
-// scans again. Tests inject a 0 interval to assert scan effects
-// time-independently; the throttled path is pinned time-independently by
-// asserting that a stale file planted right after a completed scan
-// survives the next snapshot write, and the window expiry is pinned by
-// the injected now() clock, whose advanceMs crosses the throttle interval
-// in zero real time.
-const isPrunableStateFileName = (name: string): boolean =>
-  name.endsWith(LIVE_STATE_FILE_SUFFIX) || name.endsWith(`${LIVE_STATE_FILE_SUFFIX}${LIVE_STATE_TEMP_FILE_SUFFIX}`)
-
-const pruneCheckpointFiles = async (
-  dir: string,
-  maxAgeMs: number,
-  throttle: PruneThrottle,
-  minIntervalMs: number,
-  nowMs: number,
-): Promise<void> => {
-  if (maxAgeMs <= 0) return
-  if (minIntervalMs > PRUNE_SCAN_THROTTLE_DISABLED) {
-    if (throttle.lastScanMs !== PRUNE_SCAN_NEVER && nowMs - throttle.lastScanMs < minIntervalMs) return
-    throttle.lastScanMs = nowMs
-  }
-  let names: string[]
-  try {
-    names = await readdir(dir)
-  } catch {
-    return
-  }
-  for (const name of names) {
-    if (!isPrunableStateFileName(name)) continue
-    const path = join(dir, name)
-    try {
-      const info = await stat(path)
-      if (nowMs - info.mtimeMs > maxAgeMs) await unlink(path)
-    } catch {
-      continue
-    }
-  }
-}
-
-const isSafeSessionFileStem = (sessionKey: string): boolean =>
-  sessionKey.length > 0 && sessionKey !== "." && sessionKey !== ".." && !sessionKey.includes(PATH_SEGMENT_SEPARATOR)
-
-const recordSessionCheckpoint = async (
-  options: ResolvedOptions,
-  sessionKey: string,
-  contextLimit: ContextLimit,
-  metrics: SessionMetrics,
-  pageStore: SessionPageStore,
-  hotSubjects: HotSubject[],
-  pruneThrottle: PruneThrottle,
-): Promise<void> => {
-  if (options.liveStateLog === false) return
-  const lastRun = metrics.lastRun
-  if (lastRun === undefined) return
-  if (!isSafeSessionFileStem(sessionKey)) return
-  const snapshot = sessionCheckpointOf(sessionKey, contextLimit, options, metrics, lastRun, pageStore, hotSubjects)
-  const stateFile = join(options.liveStatePath, `${sessionKey}${LIVE_STATE_FILE_SUFFIX}`)
-  const tempFile = `${stateFile}${LIVE_STATE_TEMP_FILE_SUFFIX}`
-  try {
-    await mkdir(options.liveStatePath, { recursive: true })
-    // Write to a sibling temp file and rename so a concurrent reader sees
-    // either the previous snapshot or the new one, never a torn write.
-    await writeFile(tempFile, `${JSON.stringify(snapshot, null, JSON_INDENT_SPACES)}\n`)
-    await rename(tempFile, stateFile)
-    delete metrics.stateWriteError
-  } catch (error) {
-    metrics.stateWriteError = error instanceof Error ? error.message : String(error)
-    await unlink(tempFile).catch(() => {})
-    return
-  }
-  await pruneCheckpointFiles(options.liveStatePath, options.liveStatePruneMaxAgeMs, pruneThrottle, options.liveStatePruneMinIntervalMs, options.now())
 }
 
 // The effective eviction watermark in tokens: the absolute watermarkTokens
@@ -2248,8 +1390,6 @@ const measureWithoutEvicting = (candidates: EvictionCandidates, watermarkTokens:
   }
 }
 
-type DryRunResult = { deficitTokens: number; wouldEvictCount: number; wouldEvictBytes: number; wouldEvictSubjects: string[] }
-
 // The advisory pressure band below the effective watermark: the newest
 // run's preview of how close the session sits to eviction. The band start
 // is ratio x effective watermark and the estimate tested is the shared
@@ -2257,14 +1397,6 @@ type DryRunResult = { deficitTokens: number; wouldEvictCount: number; wouldEvict
 // the preview and the evictor can never disagree about the session's size.
 // Returns undefined when disarmed, when no effective watermark exists, or
 // when the estimate sits below the band start; never mutates anything.
-type AdvisoryResult = {
-  ratio: number
-  bandStartTokens: number
-  estimatedTokens: number
-  deficitTokens: number
-  subjects: string[]
-}
-
 const measureAdvisory = (candidates: EvictionCandidates, effectiveWatermarkTokens: number | null, options: ResolvedOptions): AdvisoryResult | undefined => {
   if (!options.advisoryBand || effectiveWatermarkTokens === null) return undefined
   const bandStartTokens = options.advisoryBandRatio * effectiveWatermarkTokens
@@ -2696,142 +1828,6 @@ const guardTool = (tool: (args: unknown, toolContext: unknown) => Promise<string
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       return `${TOOL_ERROR_PREFIX}${message}`
-    }
-  }
-}
-
-// Create-or-update on the session metrics store: the shared shape behind
-// rememberError and the hygiene copy's error surfacing, so a diagnostic
-// recorded for a session with no entry yet (a fault, compaction event, or
-// hygiene write error before the first transform) still lands on a
-// created entry that respects the session bound. An existing entry is
-// refreshed to most-recent recency: a session emitting diagnostics is an
-// active session. The fresh entry is keyed by the diagnostic's session,
-// not seeded from any persisted record, so a later reseed overwriting it
-// is accepted (faults and write errors are run-scoped diagnostics).
-const withSessionMetricsEntry = (
-  metrics: MetricsStore,
-  sessionKey: string,
-  sessionBound: number,
-  apply: (entry: SessionMetrics) => void,
-): void => {
-  const existing = touchMapEntry(metrics, sessionKey)
-  if (existing !== undefined) {
-    apply(existing)
-    return
-  }
-  trimMapToBound(metrics, sessionBound)
-  const entry = createSessionMetrics()
-  apply(entry)
-  metrics.set(sessionKey, entry)
-}
-
-const rememberError = (metrics: MetricsStore, sessionKey: string, lastError: LastError, sessionBound: number): void =>
-  withSessionMetricsEntry(metrics, sessionKey, sessionBound, (entry) => {
-    entry.lastError = lastError
-  })
-
-const chatParamsHookBody = (
-  input: { sessionID: string; model?: ChatParamsModel },
-  contextLimits: Map<string, ContextLimitEntry>,
-  modelKeyBySession: Map<string, string | undefined>,
-  metricsBySession: MetricsStore,
-  options: ResolvedOptions,
-): void => {
-  const modelKey = modelKeyOf(input.model)
-  // The sitting's newest model identity rides the transform side: the
-  // persisted-budget fallback suppresses itself against it when the
-  // session changed models, mid sitting or across a restart.
-  rememberSessionValue(modelKeyBySession, input.sessionID, modelKey, options.limitSessions)
-  const captured = captureContextLimitOf(input.model, options.modelContextTokens)
-  if (captured !== undefined) {
-    rememberSessionValue(contextLimits, input.sessionID, captured, options.limitSessions)
-    return
-  }
-  const stored = contextLimits.get(input.sessionID)
-  if (!storedContextLimitBelongsToAnotherModel(stored, modelKey)) return
-  contextLimits.delete(input.sessionID)
-  // A model change also invalidates the persisted-budget fallback:
-  // without this, the deleted live capture would refill from the
-  // previous model's rehydrated budget on the next run.
-  const metrics = metricsBySession.get(input.sessionID)
-  if (metrics !== undefined) metrics.persistedBudget = undefined
-}
-
-// One-time data migration for the plugin family rename: stored metrics,
-// live state, and hygiene copies under the previous lru-* basenames move to
-// the current names on the first default-path load, before any hook is
-// returned, so the producer and the panel readers observe the same
-// locations and accumulated history stays reachable. Each kind migrates
-// only while the plugin actually uses it (the metricsLog, liveStateLog,
-// and hygiene-copy switches respectively). Every rename targets its new
-// name only while that name does not exist yet, and an existing current
-// name wins with the legacy file left readable beside it; the rotated
-// sibling carries the same check of its own, so a load that moved the
-// primary but failed on the sibling moves the stranded sibling on the
-// next default-path load. A configured path option bypasses migration
-// entirely: the user chose their own locations. A failed rename degrades
-// the way the write paths do, never blocking plugin load: the legacy file
-// stays in place and the next default-path load retries, since the
-// condition simply re-runs each time.
-const LEGACY_METRICS_FILE_BASENAME = "lru-metrics.jsonl"
-const LEGACY_LIVE_STATE_DIR_BASENAME = "lru-state"
-const LEGACY_INGESTION_HYGIENE_FILE_BASENAME = "lru-hygiene.jsonl"
-
-const pathExists = async (path: string): Promise<boolean> => {
-  try {
-    await stat(path)
-    return true
-  } catch {
-    return false
-  }
-}
-
-const migrateLegacyFileWithRotatedSibling = async (oldPath: string, newPath: string): Promise<void> => {
-  if ((await pathExists(newPath)) === false && (await pathExists(oldPath))) await rename(oldPath, newPath)
-  const oldRotatedPath = `${oldPath}${METRICS_ROTATION_SUFFIX}`
-  if ((await pathExists(oldRotatedPath)) === false) return
-  const newRotatedPath = `${newPath}${METRICS_ROTATION_SUFFIX}`
-  if (await pathExists(newRotatedPath)) return
-  await rename(oldRotatedPath, newRotatedPath)
-}
-
-const migrateLegacyDirectory = async (oldDir: string, newDir: string): Promise<void> => {
-  if ((await pathExists(newDir)) || (await pathExists(oldDir)) === false) return
-  await rename(oldDir, newDir)
-}
-
-const usesDefaultPath = (path: string | undefined): boolean => !isNonEmptyString(path)
-
-// One default-location migration: the legacy basename beside the derived
-// default path, moved to the default path itself. Undefined when the user
-// configured their own path or the kind's logging is off.
-const legacyPathMigration = (
-  rawPath: string | undefined,
-  migrationEnabled: boolean,
-  defaultPath: () => string,
-  legacyBasename: string,
-  migrate: (oldPath: string, newPath: string) => Promise<void>,
-): (() => Promise<void>) | undefined => {
-  if (usesDefaultPath(rawPath) === false || migrationEnabled === false) return undefined
-  return () => {
-    const newPath = defaultPath()
-    return migrate(join(dirname(newPath), legacyBasename), newPath)
-  }
-}
-
-const migrateLegacyDefaultPaths = async (raw: ContextManagerOptions): Promise<void> => {
-  for (const migration of [
-    legacyPathMigration(raw.metricsPath, raw.metricsLog !== false, defaultMetricsPath, LEGACY_METRICS_FILE_BASENAME, migrateLegacyFileWithRotatedSibling),
-    legacyPathMigration(raw.liveStatePath, raw.liveStateLog !== false, defaultLiveStateDir, LEGACY_LIVE_STATE_DIR_BASENAME, migrateLegacyDirectory),
-    legacyPathMigration(raw.ingestionHygienePath, raw.ingestionHygieneCopy !== false, defaultIngestionHygienePath, LEGACY_INGESTION_HYGIENE_FILE_BASENAME, migrateLegacyFileWithRotatedSibling),
-  ]) {
-    if (migration === undefined) continue
-    try {
-      await migration()
-    } catch {
-      // Degrade like the write paths: the old location stays in place, the
-      // plugin loads, and the next default-path load retries the move.
     }
   }
 }
