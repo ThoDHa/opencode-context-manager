@@ -22,7 +22,15 @@ import {
   pageStoreMatchesFor,
   recordPageStoreSummaryLines,
 } from "../plugin/page-store.ts"
-import type { PageStoreGuard, PageSummaryRecord, StoredPageMatch } from "../plugin/page-store.ts"
+import type {
+  PageStoreBySession,
+  PageStoreGuard,
+  PageSummaryLookup,
+  PageSummaryRecord,
+  SessionPageStore,
+  StoredPageMatch,
+} from "../plugin/page-store.ts"
+import { executeReadEvicted, RECALL_TOOL_ARGS, RECALL_VERBATIM_ARG_SCHEMA } from "../plugin/tools.ts"
 import { loadPanelData, PANEL_COMMAND_CATEGORY, PANEL_COMMAND_NAME, PANEL_COMMAND_NAMESPACE, PANEL_COMMAND_SLASH_NAME } from "../plugin/panel-data.ts"
 import { PLUGIN_ID, PLUGIN_VERSION, OPTION_CACHE_AWARE_HINTS, OPTION_MUTATION_BATCH_CADENCE, TOTALS_KEYS } from "../plugin/schema.ts"
 import type { MetricsStore } from "../plugin/state.ts"
@@ -169,6 +177,11 @@ const RECALL_PROBE_NEWEST_LABEL = "newest match"
 const RECALL_PROBE_BYTES_UNIT = "bytes"
 const RECALL_PROBE_OLDER_LABEL = "older matches"
 const RECALL_PROBE_ATTACHMENTS_LABEL = "attachments present"
+const RECALL_PROBE_SUMMARY_LABEL = "summary"
+const RECALL_VERBATIM_ARG_NAME = "verbatim"
+const SUMMARY_MARKER = "[ctx-summary]"
+const SUMMARY_SERVE_INSTRUCTION = "condensed summary of the evicted output; pass verbatim: true to reload the full original"
+const STASH_SUMMARY_SUBJECT = "/data/stash-summarized.txt"
 const PROBE_HIT_SUBJECT = "/data/probe-hit.txt"
 const PROBE_SIBLING_SUBJECT = "/data/probe-sibling.txt"
 const PROBE_MISS_SUBJECT = "/data/probe-miss.txt"
@@ -691,8 +704,14 @@ const probeCountsLineFor = (
   newestMatchBytes: number,
   olderMatches: number,
   attachmentsPresent: boolean,
-): string =>
-  `${STASH_MARKER} ${RECALL_PROBE_LEAD} "${subject}": ${RECALL_PROBE_IN_SESSION_LABEL} ${inSessionMatches}, ${RECALL_PROBE_PAGE_STORE_LABEL} ${pageStoreMatches}, ${RECALL_PROBE_NEWEST_LABEL} ${newestMatchBytes} ${RECALL_PROBE_BYTES_UNIT}, ${RECALL_PROBE_OLDER_LABEL} ${olderMatches}, ${RECALL_PROBE_ATTACHMENTS_LABEL}: ${attachmentsPresent ? "true" : "false"}.`
+  summaryBytes?: number,
+): string => {
+  const summaryClause = summaryBytes === undefined ? "" : `, ${RECALL_PROBE_SUMMARY_LABEL} ${summaryBytes} ${RECALL_PROBE_BYTES_UNIT}`
+  return `${STASH_MARKER} ${RECALL_PROBE_LEAD} "${subject}": ${RECALL_PROBE_IN_SESSION_LABEL} ${inSessionMatches}, ${RECALL_PROBE_PAGE_STORE_LABEL} ${pageStoreMatches}, ${RECALL_PROBE_NEWEST_LABEL} ${newestMatchBytes} ${RECALL_PROBE_BYTES_UNIT}${summaryClause}, ${RECALL_PROBE_OLDER_LABEL} ${olderMatches}, ${RECALL_PROBE_ATTACHMENTS_LABEL}: ${attachmentsPresent ? "true" : "false"}.`
+}
+
+const summaryServeTextFor = (summary: string): string =>
+  `${SUMMARY_MARKER} ${SUMMARY_SERVE_INSTRUCTION}.\n${summary}`
 
 const faultMapBoundSubject = (index: number): string => `${FAULT_MAP_SUBJECT_PREFIX}${index}.txt`
 
@@ -2595,6 +2614,246 @@ test("recall without countsOnly or with false returns today's byte-identical res
   assert.deepEqual(Object.keys(recallDefinition.args), [RECALL_ARG_NAME, RECALL_PROBE_ARG_NAME])
   assert.equal(recallDefinition.args[RECALL_ARG_NAME].type, "string")
   assert.equal(recallDefinition.args[RECALL_PROBE_ARG_NAME].type, "boolean")
+})
+
+const directRecallOptions = (): ResolvedOptions =>
+  resolveOptions({ metricsLog: false, liveStateLog: false, ingestionHygieneCopy: false, pageStore: false })
+
+const stashWithPageFor = (subject: string, msgIndex = 0): PageStoreBySession => {
+  const store: SessionPageStore = new Map([
+    [
+      pageKeyOf(READ_TOOL, subject, msgIndex, 0),
+      { output: outputOfBytes(MIN_EVICTABLE_BYTES), tool: READ_TOOL, subject, msgIndex, partIndex: 0 },
+    ],
+  ])
+  return new Map([[SESSION_ID, store]])
+}
+
+const summaryLookupOf = (records: PageSummaryRecord[]): PageSummaryLookup => {
+  const byPageKey = new Map(
+    records.map((record): [string, PageSummaryRecord] => [
+      pageKeyOf(record.tool, record.subject, record.msgIndex, record.partIndex, record.stashSlot),
+      record,
+    ]),
+  )
+  return (tool, subject, msgIndex, partIndex, stashSlot) =>
+    byPageKey.get(pageKeyOf(tool, subject, msgIndex, partIndex, stashSlot))
+}
+
+type DirectRecallDeps = {
+  pageStores?: PageStoreBySession
+  metrics?: MetricsStore
+  summaryLookup?: PageSummaryLookup
+}
+
+const executeRecallDirect = async (deps: DirectRecallDeps, args: Record<string, unknown>): Promise<string> =>
+  executeReadEvicted(
+    deps.pageStores ?? new Map(),
+    deps.metrics ?? new Map(),
+    new Map(),
+    async () => undefined,
+    METRICS_SESSION_BOUND,
+    directRecallOptions(),
+    args,
+    { sessionID: SESSION_ID },
+    { newerSchemaObserved: false },
+    deps.summaryLookup,
+  )
+
+test("an in-session stash hit consults the injected summary map and serves the summary without counting a reload", async () => {
+  const metrics: MetricsStore = new Map()
+  const pageStores = stashWithPageFor(STASH_SUMMARY_SUBJECT)
+
+  const result = await executeRecallDirect(
+    { pageStores, metrics, summaryLookup: summaryLookupOf([summaryRecordOf(STASH_SUMMARY_SUBJECT)]) },
+    { [RECALL_ARG_NAME]: STASH_SUMMARY_SUBJECT },
+  )
+
+  assert.equal(result, summaryServeTextFor(PAGE_STORE_SUMMARY_TEXT))
+  assert.equal(metrics.size, 0)
+})
+
+test("verbatim true bypasses the injected summary map and reloads the full in-session page with the hit counted", async () => {
+  const metrics: MetricsStore = new Map()
+  const pageStores = stashWithPageFor(STASH_SUMMARY_SUBJECT)
+
+  const result = await executeRecallDirect(
+    { pageStores, metrics, summaryLookup: summaryLookupOf([summaryRecordOf(STASH_SUMMARY_SUBJECT)]) },
+    { [RECALL_ARG_NAME]: STASH_SUMMARY_SUBJECT, [RECALL_VERBATIM_ARG_NAME]: true },
+  )
+
+  assert.equal(result, outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(metrics.get(SESSION_ID)?.recallHits, 1)
+  assert.ok(metrics.get(SESSION_ID)?.faultCounts.has(STASH_SUMMARY_SUBJECT))
+})
+
+test("a summary map miss on the stash path serves the full original byte-identically and counts the hit", async () => {
+  const metrics: MetricsStore = new Map()
+  const pageStores = stashWithPageFor(STASH_SUMMARY_SUBJECT)
+
+  const result = await executeRecallDirect(
+    { pageStores, metrics, summaryLookup: summaryLookupOf([]) },
+    { [RECALL_ARG_NAME]: STASH_SUMMARY_SUBJECT },
+  )
+
+  assert.equal(result, outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(metrics.get(SESSION_ID)?.recallHits, 1)
+})
+
+test("a mapped summary with mismatched key fields never serves over the stash page", async () => {
+  const metrics: MetricsStore = new Map()
+  const pageStores = stashWithPageFor(STASH_SUMMARY_SUBJECT)
+
+  const result = await executeRecallDirect(
+    { pageStores, metrics, summaryLookup: summaryLookupOf([summaryRecordOf(STASH_SUMMARY_SUBJECT, { msgIndex: 7 })]) },
+    { [RECALL_ARG_NAME]: STASH_SUMMARY_SUBJECT },
+  )
+
+  assert.equal(result, outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.equal(metrics.get(SESSION_ID)?.recallHits, 1)
+})
+
+test("an in-session probe reports the mapped summary bytes beside the original figures without counting", async () => {
+  const metrics: MetricsStore = new Map()
+  const pageStores = stashWithPageFor(STASH_SUMMARY_SUBJECT)
+
+  const result = await executeRecallDirect(
+    { pageStores, metrics, summaryLookup: summaryLookupOf([summaryRecordOf(STASH_SUMMARY_SUBJECT)]) },
+    { [RECALL_ARG_NAME]: STASH_SUMMARY_SUBJECT, [RECALL_PROBE_ARG_NAME]: true },
+  )
+
+  assert.equal(
+    result,
+    probeCountsLineFor(STASH_SUMMARY_SUBJECT, 1, 0, MIN_EVICTABLE_BYTES, 0, false, PAGE_STORE_SUMMARY_TEXT.length),
+  )
+  assert.equal(metrics.size, 0)
+})
+
+test("recall serves a stored summary alone with the recovery lead and counts no reload while verbatim true recovers the full original", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    seedPageStore(storePath, [
+      pageLineOf(PAGE_STORE_SUMMARY_SUBJECT, outputOfBytes(MIN_EVICTABLE_BYTES)),
+      summaryLineOf(PAGE_STORE_SUMMARY_SUBJECT),
+    ])
+    const hooks = await loadPluginHooksWithPageStore(storePath)
+
+    assert.equal(await recallTool(hooks, PAGE_STORE_SUMMARY_SUBJECT, SESSION_ID), summaryServeTextFor(PAGE_STORE_SUMMARY_TEXT))
+    const counters = countersOf(await readStats(hooks, SESSION_ID))
+    assert.equal(counters.recallHits, 0)
+    assert.equal(counters.faults, 0)
+
+    assert.equal(
+      await recallToolArgs(hooks, { [RECALL_ARG_NAME]: PAGE_STORE_SUMMARY_SUBJECT, [RECALL_VERBATIM_ARG_NAME]: true }, SESSION_ID),
+      `${outputOfBytes(MIN_EVICTABLE_BYTES)}\n${PAGE_STORE_RESTORED_LINE}`,
+    )
+    assert.equal(countersOf(await readStats(hooks, SESSION_ID)).recallHits, 1)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a page without a summary serves the full original byte-identically beside a summarized sibling", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    seedPageStore(storePath, [
+      pageLineOf(PAGE_STORE_SUMMARY_SIBLING_SUBJECT, outputOfBytes(MIN_EVICTABLE_BYTES)),
+      pageLineOf(PAGE_STORE_SUMMARY_SUBJECT, outputOfBytes(MIN_EVICTABLE_BYTES)),
+      summaryLineOf(PAGE_STORE_SUMMARY_SUBJECT),
+    ])
+    const hooks = await loadPluginHooksWithPageStore(storePath)
+
+    assert.equal(
+      await recallTool(hooks, PAGE_STORE_SUMMARY_SIBLING_SUBJECT, SESSION_ID),
+      `${outputOfBytes(MIN_EVICTABLE_BYTES)}\n${PAGE_STORE_RESTORED_LINE}`,
+    )
+    assert.equal(await recallTool(hooks, PAGE_STORE_SUMMARY_SUBJECT, SESSION_ID), summaryServeTextFor(PAGE_STORE_SUMMARY_TEXT))
+    assert.equal(countersOf(await readStats(hooks, SESSION_ID)).recallHits, 1)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("recall with countsOnly true reports the summary and original figures for a summarized page and leaves counters untouched", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    seedPageStore(storePath, [
+      pageLineOf(PAGE_STORE_SUMMARY_SUBJECT, outputOfBytes(MIN_EVICTABLE_BYTES)),
+      summaryLineOf(PAGE_STORE_SUMMARY_SUBJECT),
+    ])
+    const hooks = await loadPluginHooksWithPageStore(storePath)
+
+    assert.equal(
+      await recallToolArgs(hooks, { [RECALL_ARG_NAME]: PAGE_STORE_SUMMARY_SUBJECT, [RECALL_PROBE_ARG_NAME]: true }, SESSION_ID),
+      probeCountsLineFor(PAGE_STORE_SUMMARY_SUBJECT, 0, 1, MIN_EVICTABLE_BYTES, 0, false, PAGE_STORE_SUMMARY_TEXT.length),
+    )
+
+    const counters = countersOf(await readStats(hooks, SESSION_ID))
+    assert.equal(counters.recallHits, 0)
+    assert.equal(counters.recallMisses, 0)
+    assert.equal(counters.faults, 0)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a summary keyed to the newest page serves alone despite attachments and older pages while verbatim recovers the full shape", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    seedPageStore(storePath, [
+      pageLineOf(PAGE_STORE_SUMMARY_SUBJECT, "older page for the summarized subject"),
+      pageLineOf(PAGE_STORE_SUMMARY_SUBJECT, outputOfBytes(MIN_EVICTABLE_BYTES), {
+        msgIndex: 4,
+        attachments: [attachmentItemOf(ATTACHMENT_MIME_PNG, ATTACHMENT_PAYLOAD_CHARS_PRIMARY, "call_pagestore")],
+      }),
+      summaryLineOf(PAGE_STORE_SUMMARY_SUBJECT, { msgIndex: 4 }),
+    ])
+    const hooks = await loadPluginHooksWithPageStore(storePath)
+
+    assert.equal(await recallTool(hooks, PAGE_STORE_SUMMARY_SUBJECT, SESSION_ID), summaryServeTextFor(PAGE_STORE_SUMMARY_TEXT))
+    assert.equal(
+      await recallToolArgs(hooks, { [RECALL_ARG_NAME]: PAGE_STORE_SUMMARY_SUBJECT, [RECALL_VERBATIM_ARG_NAME]: true }, SESSION_ID),
+      [
+        outputOfBytes(MIN_EVICTABLE_BYTES),
+        PAGE_STORE_RESTORED_LINE,
+        pageStoreOlderLineFor(PAGE_STORE_SUMMARY_SUBJECT, 1),
+        attachmentManifestLineFor([attachmentSummaryFor(ATTACHMENT_MIME_PNG, ATTACHED_URL_PRIMARY_CHARS)]),
+      ].join("\n"),
+    )
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a summary keyed to an older page never serves over the newest page", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    seedPageStore(storePath, [
+      pageLineOf(PAGE_STORE_SUMMARY_SUBJECT, "older page for the summarized subject"),
+      pageLineOf(PAGE_STORE_SUMMARY_SUBJECT, outputOfBytes(MIN_EVICTABLE_BYTES), { msgIndex: 4 }),
+      summaryLineOf(PAGE_STORE_SUMMARY_SUBJECT),
+    ])
+    const hooks = await loadPluginHooksWithPageStore(storePath)
+
+    assert.equal(
+      await recallTool(hooks, PAGE_STORE_SUMMARY_SUBJECT, SESSION_ID),
+      `${outputOfBytes(MIN_EVICTABLE_BYTES)}\n${PAGE_STORE_RESTORED_LINE}\n${pageStoreOlderLineFor(PAGE_STORE_SUMMARY_SUBJECT, 1)}`,
+    )
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("the recall argument schema exports carry the verbatim boolean beside the probe and compose the registration record", () => {
+  assert.equal(RECALL_VERBATIM_ARG_SCHEMA.type, "boolean")
+  assert.ok(RECALL_VERBATIM_ARG_SCHEMA.description.length > 0)
+  assert.deepEqual(Object.keys(RECALL_TOOL_ARGS), [RECALL_ARG_NAME, RECALL_PROBE_ARG_NAME, RECALL_VERBATIM_ARG_NAME])
+  assert.equal(RECALL_TOOL_ARGS[RECALL_VERBATIM_ARG_NAME], RECALL_VERBATIM_ARG_SCHEMA)
 })
 
 test("transform tombstones an older identical call with the dedup marker and keeps the newest output verbatim", async () => {

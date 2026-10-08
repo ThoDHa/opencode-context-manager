@@ -3,7 +3,15 @@ import type { ContextLimitEntry } from "./context-limits.ts"
 import { ATTACHMENT_MIME_KEY, ATTACHMENT_URL_KEY } from "./messages.ts"
 import type { ResolvedOptions } from "./options.ts"
 import { pageStoreMatchesFor } from "./page-store.ts"
-import type { PageEntry, PageStoreBySession, PageStoreGuard, SessionPageStore } from "./page-store.ts"
+import type {
+  PageEntry,
+  PageStoreBySession,
+  PageStoreGuard,
+  PageSummaryLookup,
+  PageSummaryRecord,
+  SessionPageStore,
+  StoredPageMatch,
+} from "./page-store.ts"
 import { rememberFaultForSubject, sessionIDFromContext, sessionKeyFromContext, touchMapEntry } from "./session-maps.ts"
 import { createSessionMetrics, DEFAULT_REMEMBERED_FAULT_SUBJECTS, metricsForSession, totalsOf } from "./state.ts"
 import type { MetricsHydration, MetricsStore, PersistedTotals } from "./state.ts"
@@ -11,11 +19,15 @@ import { JSON_INDENT_SPACES, RECALL_TOOL_NAME, SUBJECT_SEPARATOR } from "./vocab
 
 export const RECALL_ARG_NAME = "subject"
 export const RECALL_PROBE_ARG_NAME = "countsOnly"
+export const RECALL_VERBATIM_ARG_NAME = "verbatim"
 const RECALL_PROBE_ARG_SCHEMA_TYPE = "boolean"
 const RECALL_PROBE_ARG_DESCRIPTION =
   "Set true to price the reload before paying for it: match counts return instead of any content and nothing is counted"
+const RECALL_VERBATIM_ARG_SCHEMA_TYPE = "boolean"
+const RECALL_VERBATIM_ARG_DESCRIPTION =
+  "Set true to bypass a stored condensed summary and reload the full original page"
 export const RECALL_TOOL_DESCRIPTION =
-  "Return the full original content of anything the Context Manager evicted and stored in the page store: a tool call output or a fenced code block from an old user message. Pass the subject exactly as it appears in the eviction notice. Pass countsOnly true to price the reload first: a counts-only summary (match counts, newest-match bytes, attachments-present flag) returns instead of any content, with no counter or fault side effects."
+  "Return the full original content of anything the Context Manager evicted and stored in the page store: a tool call output or a fenced code block from an old user message. Pass the subject exactly as it appears in the eviction notice. When the store holds a condensed summary for the newest match, the summary returns by default with the recovery instruction in its lead line, and verbatim true recovers the full original. Pass countsOnly true to price the reload first: a counts-only summary (match counts, newest-match bytes, stored summary bytes when one serves, attachments-present flag) returns instead of any content, with no counter or fault side effects."
 const RECALL_ARG_DESCRIPTION = "The subject exactly as named in the eviction notice"
 const RECALL_ARG_SCHEMA_TYPE = "string"
 export const RECALL_ARG_SCHEMA: Record<string, string> = {
@@ -26,13 +38,28 @@ export const RECALL_PROBE_ARG_SCHEMA: Record<string, string> = {
   type: RECALL_PROBE_ARG_SCHEMA_TYPE,
   description: RECALL_PROBE_ARG_DESCRIPTION,
 }
+export const RECALL_VERBATIM_ARG_SCHEMA: Record<string, string> = {
+  type: RECALL_VERBATIM_ARG_SCHEMA_TYPE,
+  description: RECALL_VERBATIM_ARG_DESCRIPTION,
+}
+// The recall tool's registration record, composed here so the arg surface
+// and the execution side cannot drift; the entry spreads it verbatim.
+export const RECALL_TOOL_ARGS: Record<string, Record<string, string>> = {
+  [RECALL_ARG_NAME]: RECALL_ARG_SCHEMA,
+  [RECALL_PROBE_ARG_NAME]: RECALL_PROBE_ARG_SCHEMA,
+  [RECALL_VERBATIM_ARG_NAME]: RECALL_VERBATIM_ARG_SCHEMA,
+}
 const RECALL_PROBE_LEAD = "counts-only probe for"
 const RECALL_PROBE_IN_SESSION_LABEL = "in-session matches"
 const RECALL_PROBE_PAGE_STORE_LABEL = "page-store matches"
 const RECALL_PROBE_NEWEST_LABEL = "newest match"
 const RECALL_PROBE_BYTES_UNIT = "bytes"
+const RECALL_PROBE_SUMMARY_LABEL = "summary"
 const RECALL_PROBE_OLDER_LABEL = "older matches"
 const RECALL_PROBE_ATTACHMENTS_LABEL = "attachments present"
+const SUMMARY_MARKER = "[ctx-summary]"
+const SUMMARY_SERVE_INSTRUCTION =
+  "condensed summary of the evicted output; pass verbatim: true to reload the full original"
 const STASH_MARKER = "[ctx-stash]"
 const STASH_OLDER_LEAD = "older pages in this session for subject"
 const STASH_MESSAGE_LABEL = "at message"
@@ -150,9 +177,41 @@ const missResponseFor = (subject: string, pageStore: SessionPageStore | undefine
 
 // The counts-only summary a probe hit returns: match counts and sizes read
 // straight off the matches the full reload would walk, no content copied.
-const probeCountsLineFor = (subject: string, inSessionMatches: number, pageStoreMatches: number, matches: PageEntry[]): string => {
+// When a summary would serve, the stored summary's size joins the figures
+// so the caller can price both the default and the verbatim reload.
+const probeCountsLineFor = (
+  subject: string,
+  inSessionMatches: number,
+  pageStoreMatches: number,
+  matches: StoredPageMatch[],
+  summaryBytes?: number,
+): string => {
   const newest = matches[matches.length - 1]
-  return `${STASH_MARKER} ${RECALL_PROBE_LEAD} "${subject}": ${RECALL_PROBE_IN_SESSION_LABEL} ${inSessionMatches}, ${RECALL_PROBE_PAGE_STORE_LABEL} ${pageStoreMatches}, ${RECALL_PROBE_NEWEST_LABEL} ${newest.output.length} ${RECALL_PROBE_BYTES_UNIT}, ${RECALL_PROBE_OLDER_LABEL} ${matches.length - 1}, ${RECALL_PROBE_ATTACHMENTS_LABEL}: ${newest.attachments !== undefined}.`
+  const summaryClause = summaryBytes === undefined ? "" : `, ${RECALL_PROBE_SUMMARY_LABEL} ${summaryBytes} ${RECALL_PROBE_BYTES_UNIT}`
+  return `${STASH_MARKER} ${RECALL_PROBE_LEAD} "${subject}": ${RECALL_PROBE_IN_SESSION_LABEL} ${inSessionMatches}, ${RECALL_PROBE_PAGE_STORE_LABEL} ${pageStoreMatches}, ${RECALL_PROBE_NEWEST_LABEL} ${newest.output.length} ${RECALL_PROBE_BYTES_UNIT}${summaryClause}, ${RECALL_PROBE_OLDER_LABEL} ${matches.length - 1}, ${RECALL_PROBE_ATTACHMENTS_LABEL}: ${newest.attachments !== undefined}.`
+}
+
+// The summary-first serve: the recovery instruction rides the lead line so
+// the escape hatch is one verbatim call away, then the summary text alone.
+const summaryServeTextFor = (summary: PageSummaryRecord): string =>
+  `${SUMMARY_MARKER} ${SUMMARY_SERVE_INSTRUCTION}.\n${summary.summary}`
+
+// The summary that would serve for a matched page: the instance's in-memory
+// summary map is consulted first (a summary written this session may not be
+// re-read from the store yet), then the store line merged onto the match.
+const servingSummaryForMatch = (
+  match: StoredPageMatch,
+  summaryLookup: PageSummaryLookup | undefined,
+): PageSummaryRecord | undefined =>
+  summaryLookup?.(match.tool, match.subject, match.msgIndex, match.partIndex, match.stashSlot) ?? match.summary
+
+const probeSummaryBytesFor = (
+  matches: StoredPageMatch[],
+  summaryLookup: PageSummaryLookup | undefined,
+  verbatim: boolean,
+): number | undefined => {
+  if (verbatim || matches.length === 0) return undefined
+  return servingSummaryForMatch(matches[matches.length - 1], summaryLookup)?.summary.length
 }
 
 export const executeReadEvicted = async (
@@ -165,11 +224,16 @@ export const executeReadEvicted = async (
   args: unknown,
   toolContext: unknown,
   pageStoreGuard: PageStoreGuard,
+  // The instance's in-memory summary map consult seam (the map itself is
+  // owned by the summaries module); absent until the entry wires it, which
+  // leaves serving exactly the pre-summary behavior.
+  summaryLookup?: PageSummaryLookup,
 ): Promise<string> => {
   const source = typeof args === "object" && args !== null ? (args as Record<string, unknown>) : undefined
   const subject = source?.[RECALL_ARG_NAME]
   if (typeof subject !== "string" || subject.length === 0) return invalidSubjectTextFor(typeof subject)
   const countsOnly = source?.[RECALL_PROBE_ARG_NAME] === true
+  const verbatim = source?.[RECALL_VERBATIM_ARG_NAME] === true
   const sessionKey = sessionKeyFromContext(toolContext)
   const pageStore = pageStores.get(sessionKey)
   const matches = pageStore === undefined ? [] : pageMatchesFor(pageStore, subject)
@@ -195,26 +259,40 @@ export const executeReadEvicted = async (
     // record: fault counts feed the eviction sort key through
     // faultAdjustedLastTouchOf, so probe side effects would leak into
     // eviction ordering.
-    if (countsOnly) return probeCountsLineFor(subject, 0, pages.length, pages)
+    if (countsOnly) return probeCountsLineFor(subject, 0, pages.length, pages, probeSummaryBytesFor(pages, summaryLookup, verbatim))
+    const newest = pages[pages.length - 1]
+    // The summary-first serve stays read-only by contract: no hit count,
+    // no fault record, no hydration await; only a verbatim recall is the
+    // full reload event today's serve is.
+    if (!verbatim) {
+      const summary = servingSummaryForMatch(newest, summaryLookup)
+      if (summary !== undefined) return summaryServeTextFor(summary)
+    }
     // A page-store hit counts and fault-protects exactly like an in-session
     // hit: the reload is the same event to the eviction policy.
     const sessionMetrics = await metricsForSession(metrics, hydrations, persistedTotalsForSession, sessionKey, metricsSessionBound)
     sessionMetrics.recallHits += 1
     rememberFaultForSubject(sessionMetrics.faultCounts, subject, DEFAULT_REMEMBERED_FAULT_SUBJECTS)
-    const newest = pages[pages.length - 1]
     const olderCount = pages.length - 1
     const restored = `${newest.output}\n${PAGE_STORE_RESTORED_LINE}`
     const withOlder = olderCount === 0 ? restored : `${restored}\n${pageStoreOlderLineFor(subject, olderCount)}`
     return newest.attachments === undefined ? withOlder : `${withOlder}\n${pageAttachmentsLineFor(newest.attachments)}`
   }
-  if (countsOnly) return probeCountsLineFor(subject, matches.length, 0, matches)
+  if (countsOnly) return probeCountsLineFor(subject, matches.length, 0, matches, probeSummaryBytesFor(matches, summaryLookup, verbatim))
+  const newest = matches[matches.length - 1]
+  // The in-session stash path consults the same summary map so an
+  // in-session reload and a cross-session recall return the same shape;
+  // absent a summary this is exactly today's serve.
+  if (!verbatim) {
+    const summary = servingSummaryForMatch(newest, summaryLookup)
+    if (summary !== undefined) return summaryServeTextFor(summary)
+  }
   // Refreshed before the await so the hit counts even if stash churn during
   // the hydration read evicts this session's stash entry.
   touchMapEntry(pageStores, sessionKey)
   const sessionMetrics = await metricsForSession(metrics, hydrations, persistedTotalsForSession, sessionKey, metricsSessionBound)
   sessionMetrics.recallHits += 1
   rememberFaultForSubject(sessionMetrics.faultCounts, subject, DEFAULT_REMEMBERED_FAULT_SUBJECTS)
-  const newest = matches[matches.length - 1]
   const older = matches.slice(0, -1)
   const output = older.length === 0 ? newest.output : `${newest.output}\n${olderMatchesLineFor(subject, older)}`
   return newest.attachments === undefined ? output : `${output}\n${pageAttachmentsLineFor(newest.attachments)}`
