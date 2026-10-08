@@ -14,8 +14,18 @@ import contextManagerEntry, {
   PAGE_STORE_SCHEMA_VERSION,
   RAW_COUNTER_KEYS,
 } from "../plugin/context-manager.ts"
+import { resolveOptions } from "../plugin/options.ts"
+import type { ResolvedOptions } from "../plugin/options.ts"
+import {
+  pageKeyOf,
+  PAGE_STORE_SUMMARY_LINE_KIND,
+  pageStoreMatchesFor,
+  recordPageStoreSummaryLines,
+} from "../plugin/page-store.ts"
+import type { PageStoreGuard, PageSummaryRecord, StoredPageMatch } from "../plugin/page-store.ts"
 import { loadPanelData, PANEL_COMMAND_CATEGORY, PANEL_COMMAND_NAME, PANEL_COMMAND_NAMESPACE, PANEL_COMMAND_SLASH_NAME } from "../plugin/panel-data.ts"
 import { PLUGIN_ID, PLUGIN_VERSION, OPTION_CACHE_AWARE_HINTS, OPTION_MUTATION_BATCH_CADENCE, TOTALS_KEYS } from "../plugin/schema.ts"
+import type { MetricsStore } from "../plugin/state.ts"
 
 const contextManagerFactory = contextManagerEntry.server
 
@@ -10416,9 +10426,22 @@ const PAGE_STORE_CUSTOM_ROTATION_CAP = 4096
 const PAGE_STORE_INVALID_ROTATION_CAPS = [-1, Number.NaN, Number.POSITIVE_INFINITY]
 const PAGE_STORE_SCHEMA_NEWER_SUBJECT = "/data/page-store-schema-newer.txt"
 const PAGE_STORE_SCHEMA_LEGACY_SUBJECT = "/data/page-store-schema-legacy.txt"
+const PAGE_STORE_SCHEMA_OLDER_SUBJECT = "/data/page-store-schema-older.txt"
 const PAGE_STORE_SCHEMA_GARBAGE_SUBJECT = "/data/page-store-schema-garbage.txt"
 const PAGE_STORE_SCHEMA_NEWER_OUTPUT = "newer-schema output that must never surface"
 const PAGE_STORE_SCHEMA_GARBAGE_OUTPUT = "garbage-schema output that must never surface"
+const PAGE_STORE_FUTURE_KIND = "future-kind"
+const PAGE_STORE_FUTURE_KIND_SUBJECT = "/data/page-store-future-kind.txt"
+const PAGE_STORE_FUTURE_KIND_OUTPUT = "future-kind output that must never surface"
+const PAGE_STORE_SUMMARY_SUBJECT = "/data/page-store-summary.txt"
+const PAGE_STORE_SUMMARY_SIBLING_SUBJECT = "/data/page-store-summary-sibling.txt"
+const PAGE_STORE_SUMMARY_TEXT = "condensed: the build listed three targets and one warning"
+const PAGE_STORE_SUMMARY_NEWER_TEXT = "newer summary that must win the per-key merge"
+const PAGE_STORE_SUMMARY_OLDER_TEXT = "older summary that must lose the per-key merge"
+const PAGE_STORE_SUMMARY_MODEL = "zai/glm-5.3"
+const PAGE_STORE_SUMMARY_TOKENS = 48
+const PAGE_STORE_SUMMARY_STASH_SLOT = 3
+const PAGE_STORE_MALFORMED_FIELD_VALUE = 42
 
 const pageStorePathIn = (dir: string): string => join(dir, PAGE_STORE_LOG_FILE_NAME)
 
@@ -10448,6 +10471,56 @@ const pageLineOf = (subject: string, output: string, extra: Record<string, unkno
   output,
   ...extra,
 })
+
+const summaryLineOf = (subject: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+  ts: PAGE_STORE_SEED_TS,
+  schemaVersion: PAGE_STORE_SCHEMA_VERSION,
+  session: SESSION_ID,
+  kind: PAGE_STORE_SUMMARY_LINE_KIND,
+  tool: READ_TOOL,
+  subject,
+  msgIndex: 0,
+  partIndex: 0,
+  summary: PAGE_STORE_SUMMARY_TEXT,
+  summaryModel: PAGE_STORE_SUMMARY_MODEL,
+  summaryTokens: PAGE_STORE_SUMMARY_TOKENS,
+  ...extra,
+})
+
+const summaryRecordOf = (subject: string, extra: Partial<PageSummaryRecord> = {}): PageSummaryRecord => ({
+  tool: READ_TOOL,
+  subject,
+  msgIndex: 0,
+  partIndex: 0,
+  summary: PAGE_STORE_SUMMARY_TEXT,
+  summaryModel: PAGE_STORE_SUMMARY_MODEL,
+  summaryTokens: PAGE_STORE_SUMMARY_TOKENS,
+  ...extra,
+})
+
+const directPageStoreOptionsFor = (storePath: string, extra: Record<string, unknown> = {}): ResolvedOptions =>
+  resolveOptions({
+    metricsLog: false,
+    liveStateLog: false,
+    ingestionHygieneCopy: false,
+    pageStore: true,
+    pageStorePath: storePath,
+    ...extra,
+  })
+
+const writeSummaryLinesDirect = async (
+  storePath: string,
+  summaries: PageSummaryRecord[],
+  extra: Record<string, unknown> = {},
+  guard: PageStoreGuard = { newerSchemaObserved: false },
+): Promise<MetricsStore> => {
+  const metrics: MetricsStore = new Map()
+  await recordPageStoreSummaryLines(directPageStoreOptionsFor(storePath, extra), metrics, SESSION_ID, summaries, guard)
+  return metrics
+}
+
+const mergedPagesFor = async (storePath: string, subject: string): Promise<StoredPageMatch[]> =>
+  pageStoreMatchesFor(directPageStoreOptionsFor(storePath), subject, { newerSchemaObserved: false }, new Map(), SESSION_ID)
 
 const runPageStoreEviction = async (hooks: HookMap, sessionID: string, path: string): Promise<StrictBundle> => {
   await setContextLimit(hooks, sessionID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
@@ -10906,4 +10979,216 @@ test("pageStore options resolve beside the metrics log defaults round trip and f
   const invalidSwitchOptions = (await readStats(invalidSwitchHooks, SESSION_ID)).options as Record<string, unknown>
   assert.equal(invalidSwitchOptions.pageStore, true)
   assert.equal(invalidSwitchOptions.pageStorePath, DEFAULT_PAGE_STORE_PATH)
+})
+
+test("an older-stamped page line still serves through recall and leaves the store writable without a schema diagnostic", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    seedPageStore(storePath, [
+      pageLineOf(PAGE_STORE_SCHEMA_OLDER_SUBJECT, outputOfBytes(MIN_EVICTABLE_BYTES), { schemaVersion: PAGE_STORE_SCHEMA_VERSION - 1 }),
+    ])
+    const hooks = await loadPluginHooksWithPageStore(storePath)
+
+    assert.equal(
+      await recallTool(hooks, PAGE_STORE_SCHEMA_OLDER_SUBJECT, SESSION_ID),
+      `${outputOfBytes(MIN_EVICTABLE_BYTES)}\n${PAGE_STORE_RESTORED_LINE}`,
+    )
+    assert.equal((await readStats(hooks, SESSION_ID)).pageStoreSchemaError, undefined)
+
+    const bundle = await runPageStoreEviction(hooks, SESSION_ID_B, PAGE_STORE_EVICTED_SUBJECT)
+    assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+    assert.equal(pageLinesIn(storePath).length, 2)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("an older-stamped line of an unknown kind is skipped unreadable without flagging the store while the older page serves", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    seedPageStore(storePath, [
+      pageLineOf(PAGE_STORE_SCHEMA_OLDER_SUBJECT, outputOfBytes(MIN_EVICTABLE_BYTES), { schemaVersion: PAGE_STORE_SCHEMA_VERSION - 1 }),
+      {
+        ts: PAGE_STORE_SEED_TS,
+        schemaVersion: PAGE_STORE_SCHEMA_VERSION - 1,
+        session: SESSION_ID,
+        kind: PAGE_STORE_FUTURE_KIND,
+        tool: READ_TOOL,
+        subject: PAGE_STORE_FUTURE_KIND_SUBJECT,
+        msgIndex: 0,
+        partIndex: 0,
+        output: PAGE_STORE_FUTURE_KIND_OUTPUT,
+      },
+    ])
+    const hooks = await loadPluginHooksWithPageStore(storePath)
+
+    assert.equal(
+      await recallTool(hooks, PAGE_STORE_FUTURE_KIND_SUBJECT, SESSION_ID),
+      stashMissFor(PAGE_STORE_FUTURE_KIND_SUBJECT, STASH_EMPTY_OCCUPANCY),
+    )
+    assert.equal(
+      await recallTool(hooks, PAGE_STORE_SCHEMA_OLDER_SUBJECT, SESSION_ID),
+      `${outputOfBytes(MIN_EVICTABLE_BYTES)}\n${PAGE_STORE_RESTORED_LINE}`,
+    )
+    assert.equal((await readStats(hooks, SESSION_ID)).pageStoreSchemaError, undefined)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a newer-schema summary line is skipped for serving and halts this build's appends like any newer-schema line", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    seedPageStore(storePath, [
+      pageLineOf(PAGE_STORE_SUMMARY_SUBJECT, outputOfBytes(MIN_EVICTABLE_BYTES)),
+      summaryLineOf(PAGE_STORE_SUMMARY_SUBJECT, { schemaVersion: PAGE_STORE_SCHEMA_VERSION + 1, summary: PAGE_STORE_SUMMARY_NEWER_TEXT }),
+    ])
+    const hooks = await loadPluginHooksWithPageStore(storePath)
+
+    assert.equal(
+      await recallTool(hooks, PAGE_STORE_SUMMARY_SUBJECT, SESSION_ID),
+      `${outputOfBytes(MIN_EVICTABLE_BYTES)}\n${PAGE_STORE_RESTORED_LINE}`,
+    )
+    const stats = await readStats(hooks, SESSION_ID)
+    assert.equal(typeof stats.pageStoreSchemaError, "string")
+    assert.ok((stats.pageStoreSchemaError as string).includes(String(PAGE_STORE_SCHEMA_VERSION + 1)))
+
+    const storeBefore = readFileSync(storePath, "utf8")
+    const bundle = await runPageStoreEviction(hooks, SESSION_ID_B, PAGE_STORE_EVICTED_SUBJECT)
+    assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+    assert.equal(readFileSync(storePath, "utf8"), storeBefore)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("the summary writer lands the binding v2 summary line shape with and without a stash slot", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    await writeSummaryLinesDirect(storePath, [
+      summaryRecordOf(PAGE_STORE_SUMMARY_SUBJECT),
+      summaryRecordOf(PAGE_STORE_SUMMARY_SIBLING_SUBJECT, { stashSlot: PAGE_STORE_SUMMARY_STASH_SLOT }),
+    ])
+
+    const lines = pageLinesIn(storePath)
+    assert.equal(lines.length, 2)
+    assertValidTimestamp(lines[0].ts)
+    assert.equal(lines[0].schemaVersion, PAGE_STORE_SCHEMA_VERSION)
+    assert.equal(lines[0].session, SESSION_ID)
+    assert.equal(lines[0].kind, PAGE_STORE_SUMMARY_LINE_KIND)
+    assert.equal(lines[0].kind, "summary")
+    assert.equal(lines[0].tool, READ_TOOL)
+    assert.equal(lines[0].subject, PAGE_STORE_SUMMARY_SUBJECT)
+    assert.equal(lines[0].msgIndex, 0)
+    assert.equal(lines[0].partIndex, 0)
+    assert.equal(lines[0].stashSlot, undefined)
+    assert.equal(lines[0].summary, PAGE_STORE_SUMMARY_TEXT)
+    assert.equal(lines[0].summaryModel, PAGE_STORE_SUMMARY_MODEL)
+    assert.equal(lines[0].summaryTokens, PAGE_STORE_SUMMARY_TOKENS)
+    assert.equal(lines[1].subject, PAGE_STORE_SUMMARY_SIBLING_SUBJECT)
+    assert.equal(lines[1].stashSlot, PAGE_STORE_SUMMARY_STASH_SLOT)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("the summary writer rotates the store at the cap exactly like the page writer", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const seedLine = pageLineOf(PAGE_STORE_ROTATION_A_SUBJECT, outputOfBytes(MIN_EVICTABLE_BYTES))
+    const seedContent = `${JSON.stringify(seedLine)}\n`
+    writeFileSync(storePath, seedContent)
+
+    await writeSummaryLinesDirect(storePath, [summaryRecordOf(PAGE_STORE_SUMMARY_SUBJECT)], {
+      pageStoreRotationMaxBytes: Buffer.byteLength(seedContent),
+    })
+
+    assert.equal(readFileSync(rotatedPageStorePathIn(pagesDir), "utf8"), seedContent)
+    const freshLines = pageLinesIn(storePath)
+    assert.equal(freshLines.length, 1)
+    assert.equal(freshLines[0].kind, PAGE_STORE_SUMMARY_LINE_KIND)
+    assert.equal(freshLines[0].subject, PAGE_STORE_SUMMARY_SUBJECT)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("the summary writer refuses under the downgrade guard and stays silent under the disabled gates", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const haltedMetrics = await writeSummaryLinesDirect(storePath, [summaryRecordOf(PAGE_STORE_SUMMARY_SUBJECT)], {}, {
+      newerSchemaObserved: true,
+    })
+    assert.equal(existsSync(storePath), false)
+    assert.equal(typeof haltedMetrics.get(SESSION_ID)?.pageStoreSchemaError, "string")
+
+    const switchedOffMetrics = await writeSummaryLinesDirect(storePath, [summaryRecordOf(PAGE_STORE_SUMMARY_SUBJECT)], { pageStore: false })
+    assert.equal(existsSync(storePath), false)
+    assert.equal(switchedOffMetrics.get(SESSION_ID)?.pageStoreSchemaError, undefined)
+
+    await writeSummaryLinesDirect(storePath, [summaryRecordOf(PAGE_STORE_SUMMARY_SUBJECT)], {
+      pageStoreRotationMaxBytes: METRICS_ROTATION_DISABLED_MAX_BYTES,
+    })
+    assert.equal(existsSync(storePath), false)
+
+    const enabledMetrics = await writeSummaryLinesDirect(storePath, [summaryRecordOf(PAGE_STORE_SUMMARY_SUBJECT)])
+    assert.equal(pageLinesIn(storePath).length, 1)
+    assert.equal(enabledMetrics.get(SESSION_ID)?.pageStoreWriteError, undefined)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a malformed summary line is skipped and the page still serves without a diagnostic", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    seedPageStore(storePath, [
+      pageLineOf(PAGE_STORE_SUMMARY_SUBJECT, outputOfBytes(MIN_EVICTABLE_BYTES)),
+      summaryLineOf(PAGE_STORE_SUMMARY_SUBJECT, { summaryModel: PAGE_STORE_MALFORMED_FIELD_VALUE }),
+    ])
+    const hooks = await loadPluginHooksWithPageStore(storePath)
+
+    assert.equal(
+      await recallTool(hooks, PAGE_STORE_SUMMARY_SUBJECT, SESSION_ID),
+      `${outputOfBytes(MIN_EVICTABLE_BYTES)}\n${PAGE_STORE_RESTORED_LINE}`,
+    )
+    assert.equal((await readStats(hooks, SESSION_ID)).pageStoreSchemaError, undefined)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("pageStoreMatchesFor merges the newest summary per page key and no summary across keys", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    seedPageStore(storePath, [
+      pageLineOf(PAGE_STORE_SUMMARY_SUBJECT, "page one for the summarized key"),
+      pageLineOf(PAGE_STORE_SUMMARY_SUBJECT, "page two for the summarized key", { msgIndex: 4 }),
+      pageLineOf(PAGE_STORE_SUMMARY_SIBLING_SUBJECT, outputOfBytes(MIN_EVICTABLE_BYTES)),
+      summaryLineOf(PAGE_STORE_SUMMARY_SUBJECT, { summary: PAGE_STORE_SUMMARY_OLDER_TEXT }),
+      summaryLineOf(PAGE_STORE_SUMMARY_SUBJECT, { msgIndex: 4, summary: PAGE_STORE_SUMMARY_OLDER_TEXT }),
+      summaryLineOf(PAGE_STORE_SUMMARY_SUBJECT, { msgIndex: 4, summary: PAGE_STORE_SUMMARY_NEWER_TEXT }),
+    ])
+
+    const summarized = await mergedPagesFor(storePath, PAGE_STORE_SUMMARY_SUBJECT)
+    assert.equal(summarized.length, 2)
+    assert.equal(summarized[0].output, "page one for the summarized key")
+    assert.equal(summarized[0].summary?.summary, PAGE_STORE_SUMMARY_OLDER_TEXT)
+    assert.equal(summarized[1].output, "page two for the summarized key")
+    assert.equal(summarized[1].summary?.summary, PAGE_STORE_SUMMARY_NEWER_TEXT)
+
+    const unsummarized = await mergedPagesFor(storePath, PAGE_STORE_SUMMARY_SIBLING_SUBJECT)
+    assert.equal(unsummarized.length, 1)
+    assert.equal(unsummarized[0].summary, undefined)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
 })
