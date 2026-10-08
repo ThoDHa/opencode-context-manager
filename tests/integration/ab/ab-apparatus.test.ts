@@ -2132,6 +2132,10 @@ test("configMatchesArm separates the lever5 series from the earlier profiles in 
   assert.equal(configMatchesArm(null, "LEVER", LEVER5_PROFILE), false)
 })
 
+test("the F6 byte-equality deliberately lets a stale lever4 pointer pass the lever4 LEVER assertion against a lever5 ON-FULL config", () => {
+  assert.equal(configMatchesArm({ plugin: LEVER5_PROFILE.pluginSeedByArm["ON-FULL"]! }, "LEVER", LEVER4_PROFILE), true, "deliberate acceptance: F6 makes the lever5 ON-FULL seed byte-identical to the lever4 LEVER seed, the one cross-series pair the seed-assertion layer cannot flag; pinned so the acceptance stays a named decision, not a silent gap")
+})
+
 test("applyArmToConfig applies the lever5 profile's seeds and refuses arms outside the profile", () => {
   const flipped = applyArmToConfig({ model: "test-model", theme: "dark", plugin: [] as unknown[] }, "LEVER", LEVER5_PROFILE) as { model: string; theme: string; plugin: unknown }
   assert.equal(flipped.model, "test-model")
