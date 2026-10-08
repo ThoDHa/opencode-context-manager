@@ -12,7 +12,6 @@ import {
   buildSummaryUserPrompt,
   createSummaryCompressor,
   lastAssistantTextOf,
-  summaryPageKeyOf,
   truncateToBudget,
   type SummaryClient,
   type SummaryPromptOutcome,
@@ -22,6 +21,7 @@ import {
 
 const ELLIPSIS = "\u2026"
 const TEST_SESSION_KEY = "ses_fixture_1"
+const TEST_SESSION_KEY_B = "ses_fixture_2"
 
 const pageOf = (overrides: Partial<PageEntry> = {}): PageEntry => ({
   output: "the verbatim evicted tool output",
@@ -155,11 +155,6 @@ test("truncateToBudget treats the default chars per token as four", () => {
   assert.equal(truncateToBudget(overLimit, 256).length, 256 * 4)
 })
 
-test("summaryPageKeyOf mirrors the page-store key over the pageKeyOf fields, with the stashSlot suffix only when defined", () => {
-  assert.equal(summaryPageKeyOf("bash", "src/app.ts", 12, 3), "bash:src/app.ts:12:3")
-  assert.equal(summaryPageKeyOf("bash", "src/app.ts", 12, 3, 5), "bash:src/app.ts:12:3:5")
-})
-
 test("lastAssistantTextOf returns the last assistant row's text and empty when no assistant row exists", () => {
   const rows = [userRow(), assistantRow("first"), userRow(), assistantRow("second reply")]
   assert.equal(lastAssistantTextOf(rows), "second reply")
@@ -188,7 +183,7 @@ test("a settled side call persists one v2 summary line, records the in-memory su
   assert.equal(line.summary, "1. one fact from the output")
   assert.equal(line.summaryModel, "test-provider/test-model")
   assert.equal(line.summaryTokens, Math.ceil(line.summary.length / 4))
-  const record = compressor.summaryFor("bash", "src/app.ts", 12, 3)
+  const record = compressor.summaryFor(TEST_SESSION_KEY, "bash", "src/app.ts", 12, 3)
   assert.ok(record !== undefined)
   assert.equal(record.summary, line.summary)
   assert.equal(record.summaryModel, line.summaryModel)
@@ -234,10 +229,25 @@ test("the summary map serves the exact pageKeyOf fields and misses other pages",
   const compressor = createSummaryCompressor({ client: fake.client, sink })
   compressor.enqueue({ sessionKey: TEST_SESSION_KEY, page: pageOf({ stashSlot: 5 }) })
   await compressor.settled()
-  assert.ok(compressor.summaryFor("bash", "src/app.ts", 12, 3, 5) !== undefined)
-  assert.equal(compressor.summaryFor("bash", "src/app.ts", 12, 3), undefined)
-  assert.equal(compressor.summaryFor("bash", "src/app.ts", 12, 4, 5), undefined)
-  assert.equal(compressor.summaryFor("read", "src/app.ts", 12, 3, 5), undefined)
+  assert.ok(compressor.summaryFor(TEST_SESSION_KEY, "bash", "src/app.ts", 12, 3, 5) !== undefined)
+  assert.equal(compressor.summaryFor(TEST_SESSION_KEY, "bash", "src/app.ts", 12, 3), undefined)
+  assert.equal(compressor.summaryFor(TEST_SESSION_KEY, "bash", "src/app.ts", 12, 4, 5), undefined)
+  assert.equal(compressor.summaryFor(TEST_SESSION_KEY, "read", "src/app.ts", 12, 3, 5), undefined)
+})
+
+test("the summary map scopes by session: the same page key in two sessions serves each session its own summary", async () => {
+  const fake = createFakeClient({
+    readScript: async (index) => [userRow(), assistantRow(index === 0 ? "summary for the first session" : "summary for the second session")],
+  })
+  const { sink } = collectLines()
+  const compressor = createSummaryCompressor({ client: fake.client, sink })
+  compressor.enqueue({ sessionKey: TEST_SESSION_KEY, page: pageOf() })
+  compressor.enqueue({ sessionKey: TEST_SESSION_KEY_B, page: pageOf() })
+  await compressor.settled()
+  const first = compressor.summaryFor(TEST_SESSION_KEY, "bash", "src/app.ts", 12, 3)
+  const second = compressor.summaryFor(TEST_SESSION_KEY_B, "bash", "src/app.ts", 12, 3)
+  assert.equal(first?.summary, "summary for the first session")
+  assert.equal(second?.summary, "summary for the second session")
 })
 
 test("a session-error prompt outcome fails the page once, deletes the side session, and never lands a store line", async () => {
@@ -247,7 +257,7 @@ test("a session-error prompt outcome fails the page once, deletes the side sessi
   compressor.enqueue({ sessionKey: TEST_SESSION_KEY, page: pageOf() })
   await compressor.settled()
   assert.equal(lines.length, 0)
-  assert.equal(compressor.summaryFor("bash", "src/app.ts", 12, 3), undefined)
+  assert.equal(compressor.summaryFor(TEST_SESSION_KEY, "bash", "src/app.ts", 12, 3), undefined)
   assert.deepEqual(fake.deleted, fake.created)
   assert.equal(fake.deleted.length, 1)
   const counters = compressor.counters()
@@ -300,7 +310,7 @@ test("an empty readback retries once and a second empty readback fails without e
   await compressor.settled()
   assert.equal(fake.prompted.length, 2)
   assert.equal(lines.length, 0)
-  assert.equal(compressor.summaryFor("bash", "src/app.ts", 12, 3), undefined)
+  assert.equal(compressor.summaryFor(TEST_SESSION_KEY, "bash", "src/app.ts", 12, 3), undefined)
   assert.deepEqual(fake.deleted, fake.created)
   const counters = compressor.counters()
   assert.equal(counters.written, 0)
@@ -319,7 +329,7 @@ test("a malformed first readback that passes on the retry lands exactly one summ
   assert.equal(fake.prompted.length, 2)
   assert.equal(lines.length, 1)
   assert.equal(lines[0].summary, "retried summary")
-  assert.ok(compressor.summaryFor("bash", "src/app.ts", 12, 3) !== undefined)
+  assert.ok(compressor.summaryFor(TEST_SESSION_KEY, "bash", "src/app.ts", 12, 3) !== undefined)
   const counters = compressor.counters()
   assert.equal(counters.written, 1)
   assert.equal(counters.failures, 1)
@@ -428,7 +438,7 @@ test("a failing sink write counts an exception and records no in-memory summary"
   compressor.enqueue({ sessionKey: TEST_SESSION_KEY, page: pageOf() })
   await compressor.settled()
   assert.deepEqual(fake.deleted, fake.created)
-  assert.equal(compressor.summaryFor("bash", "src/app.ts", 12, 3), undefined)
+  assert.equal(compressor.summaryFor(TEST_SESSION_KEY, "bash", "src/app.ts", 12, 3), undefined)
   const counters = compressor.counters()
   assert.equal(counters.written, 0)
   assert.equal(counters.failures, 1)
@@ -444,9 +454,22 @@ test("the in-memory summary map trims to its bound oldest-first", async () => {
   await compressor.settled()
   compressor.enqueue({ sessionKey: TEST_SESSION_KEY, page: pageOf({ msgIndex: 3 }) })
   await compressor.settled()
-  assert.equal(compressor.summaryFor("bash", "src/app.ts", 1, 3), undefined)
-  assert.ok(compressor.summaryFor("bash", "src/app.ts", 2, 3) !== undefined)
-  assert.ok(compressor.summaryFor("bash", "src/app.ts", 3, 3) !== undefined)
+  assert.equal(compressor.summaryFor(TEST_SESSION_KEY, "bash", "src/app.ts", 1, 3), undefined)
+  assert.ok(compressor.summaryFor(TEST_SESSION_KEY, "bash", "src/app.ts", 2, 3) !== undefined)
+  assert.ok(compressor.summaryFor(TEST_SESSION_KEY, "bash", "src/app.ts", 3, 3) !== undefined)
+})
+
+test("the summary map trims whole sessions past the session bound, oldest session first, making room before the insert", async () => {
+  const fake = createFakeClient()
+  const { sink } = collectLines()
+  const compressor = createSummaryCompressor({ client: fake.client, sink, sessionLimit: 2 })
+  for (const sessionKey of [TEST_SESSION_KEY, TEST_SESSION_KEY_B, "ses_fixture_3"]) {
+    compressor.enqueue({ sessionKey, page: pageOf() })
+    await compressor.settled()
+  }
+  assert.equal(compressor.summaryFor(TEST_SESSION_KEY, "bash", "src/app.ts", 12, 3), undefined)
+  assert.ok(compressor.summaryFor(TEST_SESSION_KEY_B, "bash", "src/app.ts", 12, 3) !== undefined)
+  assert.ok(compressor.summaryFor("ses_fixture_3", "bash", "src/app.ts", 12, 3) !== undefined)
 })
 
 test("settled resolves immediately when nothing was ever queued", async () => {

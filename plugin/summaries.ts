@@ -1,14 +1,17 @@
-import type { PageEntry } from "./page-store.ts"
-import { rememberSessionValue } from "./session-maps.ts"
+import { pageKeyOf } from "./page-store.ts"
+import type { PageEntry, PageSummaryRecord } from "./page-store.ts"
+import { rememberSessionValue, touchMapEntry, trimMapToBound } from "./session-maps.ts"
 
 // The compressor module: one side-session model call per evicted page,
 // mock-bounded behind the SummaryClient interface so the unit suite fakes
 // the host. This module owns the side-call lifecycle only: prompt build,
 // budget truncation, readback validation with the malformed-success guard,
 // failure classification, the serial queue with its depth cap, and the
-// per-instance in-memory summary map. It never touches the transform, the
-// page store, or any host type; persistence and recall serving ride the
-// sink callback and the page-store v2 line kind in their own slices.
+// per-instance session-scoped in-memory summary map (keyed by the page
+// store's own pageKeyOf, so the map and the store cannot disagree on what
+// one page is). It performs no store I/O and never touches the transform
+// or any host type; persistence and recall serving ride the sink callback
+// and the page-store v2 line kind in their own slices.
 
 export const DEFAULT_SUMMARY_TOKEN_BUDGET = 256
 
@@ -33,7 +36,8 @@ export const SUMMARY_QUEUE_DEPTH_CAP = 32
 
 export const DEFAULT_SUMMARY_CHARS_PER_TOKEN = 4
 
-// The in-memory summary map's default insertion-order bound.
+// The in-memory summary map's bounds: the per-session record bound and,
+// absent a configured session bound, the session count bound.
 export const DEFAULT_SUMMARY_MAP_LIMIT = 256
 
 // One initial prompt plus the malformed guard's single bounded retry.
@@ -83,12 +87,6 @@ export type SummaryStoreLine = {
   summaryTokens: number
 }
 
-export type SummaryRecord = {
-  summary: string
-  summaryModel: string
-  summaryTokens: number
-}
-
 export type SummaryFailureKind = "session-error" | "exception" | "readback-timeout" | "malformed" | "queue-depth"
 
 export type SummaryCounters = {
@@ -109,18 +107,20 @@ export type SummaryCompressorOptions = {
   readbackTimeoutMs?: number
   queueDepthCap?: number
   mapLimit?: number
+  sessionLimit?: number
 }
 
 export type SummaryCompressor = {
   enqueue: (item: SummaryQueueItem) => void
   settled: () => Promise<void>
   summaryFor: (
+    sessionKey: string,
     tool: string,
     subject: string,
     msgIndex: number,
     partIndex: number,
     stashSlot?: number,
-  ) => SummaryRecord | undefined
+  ) => PageSummaryRecord | undefined
   counters: () => SummaryCounters
 }
 
@@ -154,12 +154,6 @@ export const truncateToBudget = (text: string, budgetTokens: number, charsPerTok
   if (text.length <= limit) return text
   return `${text.slice(0, limit - 1)}${ELLIPSIS}`
 }
-
-// page-store's pageKeyOf is module-private, so the summary map carries this
-// deliberate twin; the two must stay field-for-field identical or the map
-// and the store disagree on what one page is.
-export const summaryPageKeyOf = (tool: string, subject: string, msgIndex: number, partIndex: number, stashSlot?: number): string =>
-  `${tool}:${subject}:${msgIndex}:${partIndex}${stashSlot === undefined ? "" : `:${stashSlot}`}`
 
 const lastAssistantRowOf = (rows: SummaryReadbackRow[]): SummaryReadbackRow | undefined => {
   for (let index = rows.length - 1; index >= 0; index -= 1) {
@@ -231,8 +225,13 @@ export const createSummaryCompressor = (options: SummaryCompressorOptions): Summ
   const readbackTimeoutMs = options.readbackTimeoutMs ?? SUMMARY_READBACK_TIMEOUT_MS
   const queueDepthCap = options.queueDepthCap ?? SUMMARY_QUEUE_DEPTH_CAP
   const mapLimit = options.mapLimit ?? DEFAULT_SUMMARY_MAP_LIMIT
+  const sessionLimit = options.sessionLimit ?? DEFAULT_SUMMARY_MAP_LIMIT
 
-  const summaries = new Map<string, SummaryRecord>()
+  // The one summary map: session-then-pageKey, fed by the drain and read
+  // by both serving seats through summaryFor. The outer bound trims before
+  // insert (the pagesForSession idiom), so a fresh session never pushes
+  // the map past its bound.
+  const summaries = new Map<string, Map<string, PageSummaryRecord>>()
   const queue: SummaryQueueItem[] = []
   let queued = 0
   let written = 0
@@ -240,6 +239,21 @@ export const createSummaryCompressor = (options: SummaryCompressorOptions): Summ
   let lastFailureKind: SummaryFailureKind | undefined
   let lastError: string | undefined
   let drainPromise: Promise<void> | undefined
+
+  const rememberSummary = (sessionKey: string, record: PageSummaryRecord): void => {
+    let byPageKey = touchMapEntry(summaries, sessionKey)
+    if (byPageKey === undefined) {
+      trimMapToBound(summaries, sessionLimit)
+      byPageKey = new Map()
+      summaries.set(sessionKey, byPageKey)
+    }
+    rememberSessionValue(
+      byPageKey,
+      pageKeyOf(record.tool, record.subject, record.msgIndex, record.partIndex, record.stashSlot),
+      record,
+      mapLimit,
+    )
+  }
 
   const recordFailure = (kind: SummaryFailureKind, detail: string): void => {
     failures += 1
@@ -306,12 +320,16 @@ export const createSummaryCompressor = (options: SummaryCompressorOptions): Summ
       const summaryModel = summaryModelOf(lastAssistantRowOf(readOutcome.value))
       const line = buildStoreLine(item, summary, summaryModel)
       await sink(line)
-      rememberSessionValue(
-        summaries,
-        summaryPageKeyOf(item.page.tool, item.page.subject, item.page.msgIndex, item.page.partIndex, item.page.stashSlot),
-        { summary, summaryModel, summaryTokens: line.summaryTokens },
-        mapLimit,
-      )
+      rememberSummary(item.sessionKey, {
+        tool: line.tool,
+        subject: line.subject,
+        msgIndex: line.msgIndex,
+        partIndex: line.partIndex,
+        ...(line.stashSlot === undefined ? {} : { stashSlot: line.stashSlot }),
+        summary,
+        summaryModel,
+        summaryTokens: line.summaryTokens,
+      })
       written += 1
       return "written"
     } catch (error) {
@@ -396,12 +414,13 @@ export const createSummaryCompressor = (options: SummaryCompressorOptions): Summ
   const settled = (): Promise<void> => drainPromise ?? Promise.resolve()
 
   const summaryFor = (
+    sessionKey: string,
     tool: string,
     subject: string,
     msgIndex: number,
     partIndex: number,
     stashSlot?: number,
-  ): SummaryRecord | undefined => summaries.get(summaryPageKeyOf(tool, subject, msgIndex, partIndex, stashSlot))
+  ): PageSummaryRecord | undefined => summaries.get(sessionKey)?.get(pageKeyOf(tool, subject, msgIndex, partIndex, stashSlot))
 
   const counters = (): SummaryCounters => ({ queued, written, failures, lastFailureKind, lastError })
 

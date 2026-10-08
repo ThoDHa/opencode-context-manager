@@ -5,15 +5,15 @@ import { PLUGIN_ID } from "./schema.ts"
 import { chatParamsHookBody, type ChatParamsModel, type ContextLimitEntry } from "./context-limits.ts"
 import type { MessageBundle } from "./messages.ts"
 import { resolveOptions, type ContextManagerOptions } from "./options.ts"
-import { FALLBACK_SESSION_KEY, rememberSessionValue, sessionKeyFromContext, touchMapEntry, trimMapToBound } from "./session-maps.ts"
+import { FALLBACK_SESSION_KEY, sessionKeyFromContext, touchMapEntry } from "./session-maps.ts"
 import { HINT_LINE_PREFIX, orderedRenderedSubjectsOf, RECALL_TOOL_NAME, SUBJECT_SEPARATOR } from "./vocabulary.ts"
 import { rememberError, type MetricsHydration, type MetricsStore, type PersistedTotals, type SessionMetrics } from "./state.ts"
 import { appendHygieneCopy, migrateLegacyDefaultPaths, newestPersistedTotalsOf, PRUNE_SCAN_NEVER, type PruneThrottle } from "./persistence.ts"
-import { pageKeyOf, recordPageStoreSummaryLines } from "./page-store.ts"
+import { recordPageStoreSummaryLines } from "./page-store.ts"
 import type { PageStoreBySession, PageStoreGuard, PageSummaryLookup, PageSummaryRecord, SessionPageStore } from "./page-store.ts"
 import { stripTerminalNoiseFrom, type HygieneCadenceBySession } from "./hygiene.ts"
 import { deliverHint, type HintMembershipBySession } from "./hints.ts"
-import { DEFAULT_SUMMARY_MAP_LIMIT, createSummaryCompressor } from "./summaries.ts"
+import { createSummaryCompressor } from "./summaries.ts"
 import type { SummaryClient, SummaryStoreLine } from "./summaries.ts"
 import { DESCRIBE_TOOL_DESCRIPTION, DESCRIBE_TOOL_NAME, executeReadEvicted, executeStatsTool, guardTool, RECALL_TOOL_ARGS, RECALL_TOOL_DESCRIPTION } from "./tools.ts"
 import { transformHookBody, type TransformHookDeps } from "./pipeline.ts"
@@ -67,9 +67,15 @@ const compactionContextFor = (metricsEntry: SessionMetrics | undefined, pageStor
 }
 
 // The side session's tools-off map: sent on every side prompt so the
-// summarizing model never holds the host's tool surface. The LRU-60
-// spike's Q7 probe measured the map both accepted and effective; the
-// names are the host's standard tool set.
+// summarizing model never holds the host's standard tool surface. The
+// LRU-60 spike's Q7 probe measured the map both accepted and effective.
+// ASSUMPTION, not fact: the host tool surface is exactly the eleven names
+// below. A custom or MCP tool the host exposes is not enumerated, so it
+// stays enabled inside side sessions; that exposure is opt-in (the
+// compression gate ships default-off) and bounded (every side session is
+// deleted when its summary settles or fails). Deriving the map from a
+// host tool inventory instead of hardcoding it is the designated
+// follow-up the moment the SDK exposes a session-level tools policy.
 const SIDE_SESSION_TOOLS_OFF: Record<string, boolean> = {
   bash: false,
   edit: false,
@@ -165,9 +171,10 @@ const server = (async (pluginInput, rawOptions) => {
   // The compression-on-evict side path: built only when the gate is on
   // AND the host provided a client. Every other start leaves the plugin
   // byte-identical to the pre-compression build: no sink reaches the
-  // walk, no side session is created, and recall consults an empty map.
+  // walk, no side session is created, and no summary serves ahead of the
+  // store merge. The summary map itself lives inside the compressor; the
+  // sink below only persists the line.
   const sideSessionIds = new Set<string>()
-  const summariesBySessionAndKey = new Map<string, Map<string, PageSummaryRecord>>()
   const summarySink = async (line: SummaryStoreLine): Promise<void> => {
     const record: PageSummaryRecord = {
       tool: line.tool,
@@ -179,18 +186,6 @@ const server = (async (pluginInput, rawOptions) => {
       summaryModel: line.summaryModel,
       summaryTokens: line.summaryTokens,
     }
-    // The consult map's write side, session-then-key exactly like the
-    // store merge: the line's own session scopes it, so a summary never
-    // serves another session's page at the same key.
-    const byPageKey = touchMapEntry(summariesBySessionAndKey, line.session) ?? new Map<string, PageSummaryRecord>()
-    rememberSessionValue(
-      byPageKey,
-      pageKeyOf(record.tool, record.subject, record.msgIndex, record.partIndex, record.stashSlot),
-      record,
-      DEFAULT_SUMMARY_MAP_LIMIT,
-    )
-    summariesBySessionAndKey.set(line.session, byPageKey)
-    trimMapToBound(summariesBySessionAndKey, options.stashSessions)
     // The store line rides the page writer's rotation, downgrade-refusal,
     // and diagnostic machinery; a failed write is a session diagnostic,
     // never a thrown error, so the compressor's drain never wedges here.
@@ -204,13 +199,16 @@ const server = (async (pluginInput, rawOptions) => {
           budgetTokens: options.summaryTokenBudget,
         })
       : undefined
-  // The recall-side consult seam: scoped by the writing session exactly
-  // as the store merge is, so a summary serves only a page its own
-  // session wrote and an unscopable session never consults.
-  const summaryLookup: PageSummaryLookup = (session, tool, subject, msgIndex, partIndex, stashSlot) => {
-    if (session === undefined) return undefined
-    return summariesBySessionAndKey.get(session)?.get(pageKeyOf(tool, subject, msgIndex, partIndex, stashSlot))
-  }
+  // The recall-side consult seam: the compressor's session-scoped map is
+  // the one summary map, so a summary serves only a page its own session
+  // wrote and an unscopable session never consults.
+  const summaryLookup: PageSummaryLookup =
+    summaryCompressor === undefined
+      ? () => undefined
+      : (session, tool, subject, msgIndex, partIndex, stashSlot) => {
+          if (session === undefined) return undefined
+          return summaryCompressor.summaryFor(session, tool, subject, msgIndex, partIndex, stashSlot)
+        }
   // Hoisted per plugin instance: every run passes the same deps object to
   // the extracted transform body instead of rebuilding the literal per run.
   const transformHookDeps: TransformHookDeps = {
