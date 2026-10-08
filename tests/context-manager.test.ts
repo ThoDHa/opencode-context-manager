@@ -818,6 +818,8 @@ const buildThreeEntryDeficitBundle = (): StrictBundle =>
     ...fillerMessages(),
   ])
 
+const EVICTION_BATCH_MULTIPLIER_INVALID_VALUES = [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "2"]
+
 test("the eviction batch multiplier default clears exactly one deficit and reports the true deficit", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, contextForDeficit(THREE_ENTRY_BUNDLE_CHARS, PARTIAL_DEFICIT_TOKENS))
@@ -849,7 +851,7 @@ test("the eviction batch multiplier at two clears twice the deficit per walk wit
 })
 
 test("invalid evictionBatchMultiplier values fall back to the identity multiplier", async () => {
-  for (const invalid of [0, -1, 1.5, "2"]) {
+  for (const invalid of EVICTION_BATCH_MULTIPLIER_INVALID_VALUES) {
     const hooks = await loadPluginHooksWith({ evictionBatchMultiplier: invalid })
     await setContextLimit(hooks, SESSION_ID, contextForDeficit(THREE_ENTRY_BUNDLE_CHARS, PARTIAL_DEFICIT_TOKENS))
 
