@@ -1,4 +1,4 @@
-PLUGIN_FILES := context-manager.ts context-manager.tui.tsx panel-data.ts schema.ts
+PLUGIN_FILES := context-manager.ts context-manager.tui.tsx panel-data.ts schema.ts context-limits.ts messages.ts options.ts session-maps.ts vocabulary.ts state.ts persistence.ts page-store.ts dedup.ts hygiene.ts fences.ts eviction.ts hints.ts tools.ts pipeline.ts
 PLUGIN_SRC := $(addprefix plugin/,$(PLUGIN_FILES))
 PLUGIN_TARGET_DIR := $(HOME)/.config/opencode/context-manager
 TUI_HOOK := $(CURDIR)/tests/tui/hooks.mjs

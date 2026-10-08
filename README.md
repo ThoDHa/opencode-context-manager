@@ -38,7 +38,7 @@ The primary install is a clone of this repository registered through two config 
 
 - [opencode](https://opencode.ai) 1.18.29 or later, the host application: its sessions run the plugin, its TUI serves the `/context` panel and the session sidebar, and the version floor comes from the plugin entry's shape (the module-object entrypoint it registers through exists from 1.18.29 on), so an older build rejects the plugin at load. The TUI views additionally need a build carrying the slots API: on one without it the views are absent while the core transform and both tools work unchanged.
 - git, to clone this repository and to pull later updates into it
-- make and node 24 or later, to run the test suite when you want to verify a checkout: `make test` runs all nine suites under `tests/` via `node --test`, and `npm ci` first installs the dev-only test dependencies from the committed lockfile
+- make and node 24 or later, to run the test suite when you want to verify a checkout: `make test` runs all ten suites under `tests/` via `node --test`, and `npm ci` first installs the dev-only test dependencies from the committed lockfile
 
 ### Install
 
@@ -57,7 +57,7 @@ The clone plus the two config entries are the whole deployment: the `opencode.js
 
 ### Staying updated
 
-The registered entries resolve into the clone, so an update is `git pull` in `~/.config/opencode/opencode-context-manager`: the code the plugin runs is whatever the pull leaves in the working tree. `npm ci` refreshes the test dependencies when the lockfile moved, and `make test` re-runs the nine suites against the pulled tree.
+The registered entries resolve into the clone, so an update is `git pull` in `~/.config/opencode/opencode-context-manager`: the code the plugin runs is whatever the pull leaves in the working tree. `npm ci` refreshes the test dependencies when the lockfile moved, and `make test` re-runs the ten suites against the pulled tree.
 
 ### Upgrading from the plugin directory
 
@@ -65,11 +65,11 @@ An install made under a previous layout may have left the four files in `~/.conf
 
 ### Developer install (make install)
 
-Contributing to the plugin is easier with `make install`: it symlinks the four plugin files into `~/.config/opencode/context-manager/` (deliberately not named `plugin` or `plugins`, so the scan cannot find them), and `make uninstall` reverses it. On this layout the two config entries point at the symlink directory, so the sample entries' path prefixes become `./context-manager/` where the clone-based [sample configuration](#full-sample-configuration) shows `./opencode-context-manager/plugin/`; every other part of the entries, including the options objects, is identical.
+Contributing to the plugin is easier with `make install`: it symlinks every plugin file on the Makefile's `PLUGIN_FILES` list (the two entry files plus every module they load) into `~/.config/opencode/context-manager/` (deliberately not named `plugin` or `plugins`, so the scan cannot find them), and `make uninstall` reverses it. On this layout the two config entries point at the symlink directory, so the sample entries' path prefixes become `./context-manager/` where the clone-based [sample configuration](#full-sample-configuration) shows `./opencode-context-manager/plugin/`; every other part of the entries, including the options objects, is identical.
 
 ### Uninstall
 
-Remove the two config entries (the `opencode.json` tuple and the `tui.json` entry); the plugin stops loading in the next session. Then delete the clone (`rm -rf ~/.config/opencode/opencode-context-manager`) or, on a `make install` layout, run `make uninstall`, which removes the four symlinks and leaves any regular file at a target path untouched. The stored data under `~/.local/share/opencode/` (the metrics, checkpoint, hygiene, and page-store files) is session history, not plugin code; delete it only when you want the counters and reloadable pages gone.
+Remove the two config entries (the `opencode.json` tuple and the `tui.json` entry); the plugin stops loading in the next session. Then delete the clone (`rm -rf ~/.config/opencode/opencode-context-manager`) or, on a `make install` layout, run `make uninstall`, which removes the symlinks it created (one per `PLUGIN_FILES` entry) and leaves any regular file at a target path untouched. The stored data under `~/.local/share/opencode/` (the metrics, checkpoint, hygiene, and page-store files) is session history, not plugin code; delete it only when you want the counters and reloadable pages gone.
 
 ## Configuration
 
