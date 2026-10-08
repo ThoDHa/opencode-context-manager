@@ -262,34 +262,35 @@ export const createSummaryCompressor = (options: SummaryCompressorOptions): Summ
     summaryTokens: Math.ceil(summary.length / charsPerToken),
   })
 
+  // One side-session call raced against the readback deadline, classified:
+  // undefined records the readback-timeout or exception failure, the
+  // settled outcome carries the value the caller validates further.
+  const settleInTime = async <T>(call: Promise<T>, phase: string): Promise<SettledOutcome<T> | undefined> => {
+    const timed = await withReadbackTimeout(call, readbackTimeoutMs)
+    if (timed.kind === "expired") {
+      recordFailure("readback-timeout", `the side-session ${phase} did not settle within ${readbackTimeoutMs}ms`)
+      return undefined
+    }
+    if (!timed.outcome.ok) {
+      recordFailure("exception", messageOf(timed.outcome.error))
+      return undefined
+    }
+    return timed.outcome
+  }
+
   // One prompt, one classified readback: session-error on the outcome's
-  // error verdict, exception on a thrown call, readback-timeout on the
-  // deadline, malformed on an empty or overlong readback text.
+  // error verdict, malformed on an empty or overlong readback text.
   const attemptOnce = async (sessionId: string, userPrompt: string, item: SummaryQueueItem): Promise<"written" | "failed" | "malformed"> => {
     try {
-      const promptOutcome = await withReadbackTimeout(client.sendPrompt(sessionId, userPrompt), readbackTimeoutMs)
-      if (promptOutcome.kind === "expired") {
-        recordFailure("readback-timeout", `the side-session prompt did not settle within ${readbackTimeoutMs}ms`)
+      const promptOutcome = await settleInTime(client.sendPrompt(sessionId, userPrompt), "prompt")
+      if (promptOutcome === undefined) return "failed"
+      if (!promptOutcome.value.ok) {
+        recordFailure("session-error", promptOutcome.value.error)
         return "failed"
       }
-      if (!promptOutcome.outcome.ok) {
-        recordFailure("exception", messageOf(promptOutcome.outcome.error))
-        return "failed"
-      }
-      if (!promptOutcome.outcome.value.ok) {
-        recordFailure("session-error", promptOutcome.outcome.value.error)
-        return "failed"
-      }
-      const readOutcome = await withReadbackTimeout(client.readMessages(sessionId), readbackTimeoutMs)
-      if (readOutcome.kind === "expired") {
-        recordFailure("readback-timeout", `the side-session readback did not settle within ${readbackTimeoutMs}ms`)
-        return "failed"
-      }
-      if (!readOutcome.outcome.ok) {
-        recordFailure("exception", messageOf(readOutcome.outcome.error))
-        return "failed"
-      }
-      const text = lastAssistantTextOf(readOutcome.outcome.value)
+      const readOutcome = await settleInTime(client.readMessages(sessionId), "readback")
+      if (readOutcome === undefined) return "failed"
+      const text = lastAssistantTextOf(readOutcome.value)
       if (text.length === 0) {
         recordFailure("malformed", "the side-session readback carried no assistant text")
         return "malformed"
@@ -300,7 +301,7 @@ export const createSummaryCompressor = (options: SummaryCompressorOptions): Summ
         return "malformed"
       }
       const summary = truncateToBudget(text, budgetTokens, charsPerToken)
-      const summaryModel = summaryModelOf(lastAssistantRowOf(readOutcome.outcome.value))
+      const summaryModel = summaryModelOf(lastAssistantRowOf(readOutcome.value))
       const line = buildStoreLine(item, summary, summaryModel)
       await sink(line)
       rememberSessionValue(
