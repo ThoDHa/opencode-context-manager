@@ -3,7 +3,7 @@ PLUGIN_SRC := $(addprefix plugin/,$(PLUGIN_FILES))
 PLUGIN_TARGET_DIR := $(HOME)/.config/opencode/context-manager
 TUI_HOOK := $(CURDIR)/tests/tui/hooks.mjs
 NODE_TEST_ENV := NODE_OPTIONS="--import $(TUI_HOOK)"
-TEST_FILES := tests/context-manager.test.ts tests/panel-data.test.ts tests/panel-rows.test.ts tests/sidebar-rows.test.ts tests/sidebar-subagents.test.ts tests/tui-harness.test.ts tests/tui-registration.test.ts tests/tui-panel.test.ts tests/tui-sidebar.test.ts tests/integration/ab/ab-apparatus.test.ts
+TEST_FILES := tests/context-manager.test.ts tests/panel-data.test.ts tests/panel-rows.test.ts tests/sidebar-rows.test.ts tests/sidebar-subagents.test.ts tests/tui-harness.test.ts tests/tui-registration.test.ts tests/tui-panel.test.ts tests/tui-sidebar.test.ts tests/summaries.test.ts tests/integration/ab/ab-apparatus.test.ts
 
 ABX_BIN_DIR := $(HOME)/.local/bin
 ABX_SHARE_DIR := $(HOME)/.local/share/opencode
