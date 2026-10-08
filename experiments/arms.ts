@@ -50,6 +50,8 @@ export type PluginEntryOption = {
   mutationBatchCadence?: number
   evictionBatchMultiplier?: number
   metricsMinLineIntervalMs?: number
+  summarizeEvictedOutputs?: boolean
+  summaryTokenBudget?: number
 }
 export type PluginEntry = [string, PluginEntryOption]
 
@@ -108,6 +110,26 @@ export const LEVER4_ARM_PLUGIN_ENTRY: readonly PluginEntry[] = [
     { manualMode: false, watermarkTokens: 12000, agedReadEvictionMessages: 30, reasoningRetentionMessages: 16, cacheAwareHints: true, mutationBatchCadence: 3, evictionBatchMultiplier: 2, metricsMinLineIntervalMs: 0 },
   ],
 ]
+// The lever-5 seeds: both ON arms pin the full lever4-adopted cumulative
+// stack (hint stability, the hygiene batch cadence, the eviction batch
+// multiplier, and the metrics-visibility rider) as the shared baseline, so
+// the ON-FULL seed is byte-equal to the lever4 LEVER stack and the LEVER
+// seed's only delta is the compression pair (summarizeEvictedOutputs plus
+// summaryTokenBudget), the arm-delta rule the flagship's measurement is
+// judged under. Each seed is its own record: the byte-equality with the
+// lever4 stack is a pin, not an alias.
+export const LEVER5_ON_FULL_PLUGIN_ENTRY: readonly PluginEntry[] = [
+  [
+    "./opencode-context-manager/plugin/context-manager.ts",
+    { manualMode: false, watermarkTokens: 12000, agedReadEvictionMessages: 30, reasoningRetentionMessages: 16, cacheAwareHints: true, mutationBatchCadence: 3, evictionBatchMultiplier: 2, metricsMinLineIntervalMs: 0 },
+  ],
+]
+export const LEVER5_ARM_PLUGIN_ENTRY: readonly PluginEntry[] = [
+  [
+    "./opencode-context-manager/plugin/context-manager.ts",
+    { manualMode: false, watermarkTokens: 12000, agedReadEvictionMessages: 30, reasoningRetentionMessages: 16, cacheAwareHints: true, mutationBatchCadence: 3, evictionBatchMultiplier: 2, metricsMinLineIntervalMs: 0, summarizeEvictedOutputs: true, summaryTokenBudget: 256 },
+  ],
+]
 
 export const FLIP_ARG_BY_ARM = {
   OFF: "off",
@@ -141,7 +163,7 @@ export const ARM_BY_FLIP_ARG: ArmByFlipArg = {
 // deep profile is the frozen LRU-82 shape and stays the default everywhere;
 // a profile parameter omitted means deep.
 export type ExperimentProfile = {
-  name: "deep" | "lever1" | "lever3" | "lever4"
+  name: "deep" | "lever1" | "lever3" | "lever4" | "lever5"
   dataArms: readonly Arm[]
   pluginSeedByArm: Readonly<Partial<Record<FlipArm, readonly PluginEntry[]>>>
   corroboratesFullModeMetrics: boolean
@@ -231,11 +253,39 @@ export const LEVER4_PROFILE: ExperimentProfile = {
   ],
 }
 
+// The lever-5 series: the shared lever shape carrying the flagship
+// compression lever. Unlike series 1-4, both ON arms run the full
+// lever4-adopted cumulative stack as the baseline, so the data arms differ
+// only by the compression pair (summarizeEvictedOutputs true plus
+// summaryTokenBudget 256) and the readout attributes the whole delta to
+// compression; the multiplier stays baseline, observed for its interaction
+// with side-call batching, never varied. Judged on cost AND turns-to-green
+// over the mirrored 18-block schedule, with the summariesWritten
+// corroboration gate and the session model id recorded beside it. The deep
+// lever2 era name stays retired.
+export const LEVER5_PROFILE: ExperimentProfile = {
+  name: "lever5",
+  dataArms: LEVER_DATA_ARMS,
+  pluginSeedByArm: {
+    "ON-FULL": LEVER5_ON_FULL_PLUGIN_ENTRY,
+    LEVER: LEVER5_ARM_PLUGIN_ENTRY,
+    "CAL-ON-FULL": LEVER5_ON_FULL_PLUGIN_ENTRY,
+  },
+  corroboratesFullModeMetrics: true,
+  defaultsToSelfFlip: true,
+  contrasts: [
+    ["LEVER", "OFF"],
+    ["LEVER", "ON-FULL"],
+    ["ON-FULL", "OFF"],
+  ],
+}
+
 export const EXPERIMENT_PROFILES: Readonly<Record<ExperimentProfile["name"], ExperimentProfile>> = {
   deep: DEEP_PROFILE,
   lever1: LEVER1_PROFILE,
   lever3: LEVER3_PROFILE,
   lever4: LEVER4_PROFILE,
+  lever5: LEVER5_PROFILE,
 }
 
 /**
