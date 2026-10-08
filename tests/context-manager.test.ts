@@ -2849,6 +2849,46 @@ test("a summary keyed to an older page never serves over the newest page", async
   }
 })
 
+test("a summary scoped to another session's page at the same key never serves over the newer page", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    seedPageStore(storePath, [
+      pageLineOf(PAGE_STORE_SUMMARY_SUBJECT, PAGE_STORE_COLLIDED_OLD_OUTPUT),
+      summaryLineOf(PAGE_STORE_SUMMARY_SUBJECT, { summary: PAGE_STORE_SUMMARY_STALE_TEXT }),
+      pageLineOf(PAGE_STORE_SUMMARY_SUBJECT, PAGE_STORE_COLLIDED_NEW_OUTPUT, { session: SESSION_ID_B }),
+    ])
+    const hooks = await loadPluginHooksWithPageStore(storePath)
+
+    assert.equal(
+      await recallTool(hooks, PAGE_STORE_SUMMARY_SUBJECT, SESSION_ID_B),
+      `${PAGE_STORE_COLLIDED_NEW_OUTPUT}\n${PAGE_STORE_RESTORED_LINE}\n${pageStoreOlderLineFor(PAGE_STORE_SUMMARY_SUBJECT, 1)}`,
+    )
+    assert.equal(countersOf(await readStats(hooks, SESSION_ID_B)).recallHits, 1)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a page and its own summary serve their summary even when recalled from another session", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    seedPageStore(storePath, [
+      pageLineOf(PAGE_STORE_SUMMARY_SUBJECT, outputOfBytes(MIN_EVICTABLE_BYTES)),
+      summaryLineOf(PAGE_STORE_SUMMARY_SUBJECT),
+    ])
+    const hooks = await loadPluginHooksWithPageStore(storePath)
+
+    assert.equal(
+      await recallTool(hooks, PAGE_STORE_SUMMARY_SUBJECT, SESSION_ID_B),
+      summaryServeTextFor(PAGE_STORE_SUMMARY_TEXT),
+    )
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
 test("the recall argument schema exports carry the verbatim boolean beside the probe and compose the registration record", () => {
   assert.equal(RECALL_VERBATIM_ARG_SCHEMA.type, "boolean")
   assert.ok(RECALL_VERBATIM_ARG_SCHEMA.description.length > 0)
@@ -10697,6 +10737,9 @@ const PAGE_STORE_SUMMARY_SIBLING_SUBJECT = "/data/page-store-summary-sibling.txt
 const PAGE_STORE_SUMMARY_TEXT = "condensed: the build listed three targets and one warning"
 const PAGE_STORE_SUMMARY_NEWER_TEXT = "newer summary that must win the per-key merge"
 const PAGE_STORE_SUMMARY_OLDER_TEXT = "older summary that must lose the per-key merge"
+const PAGE_STORE_SUMMARY_STALE_TEXT = "stale summary describing the older session's content"
+const PAGE_STORE_COLLIDED_OLD_OUTPUT = "old content at the collided key"
+const PAGE_STORE_COLLIDED_NEW_OUTPUT = "new content at the collided key"
 const PAGE_STORE_SUMMARY_MODEL = "zai/glm-5.3"
 const PAGE_STORE_SUMMARY_TOKENS = 48
 const PAGE_STORE_SUMMARY_STASH_SLOT = 3

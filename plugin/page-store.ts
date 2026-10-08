@@ -246,6 +246,15 @@ const observePageStoreSchemaVerdict = (
   recordPageStoreSchemaError(metrics, sessionKey, sessionBound, verdict.observed)
 }
 
+// The session field a store line was written under, or undefined when the
+// line carries none (legacy unstamped pages) or a corrupt one: both leave
+// the line unscopable for summary attachment.
+const lineSessionOf = (parsed: unknown): string | undefined => {
+  if (!isRecord(parsed)) return undefined
+  const session = parsed["session"]
+  return typeof session === "string" ? session : undefined
+}
+
 // Cross-session pages for one subject, read fresh per miss (misses are the
 // rare path) in file order, so the last matching line is the newest page.
 // Any read or parse failure degrades to no pages: a corrupt or unreadable
@@ -253,8 +262,9 @@ const observePageStoreSchemaVerdict = (
 // each line's schema version: newer-version lines are skipped uninterpreted
 // and flip the instance guard, so this process's writer halts before it can
 // bury them. v2 summary lines ride the same pass and merge onto the matched
-// page whose key fields they share, the last summary line per key winning;
-// a matched page without a summary serves its full original.
+// page whose key fields they share and whose session wrote them, the last
+// summary line per session-and-key winning; a matched page without a
+// summary serves its full original.
 export const pageStoreMatchesFor = async (
   options: ResolvedOptions,
   subject: string,
@@ -263,29 +273,42 @@ export const pageStoreMatchesFor = async (
   sessionKey: string,
 ): Promise<StoredPageMatch[]> => {
   if (options.pageStore === false) return []
-  const matches: StoredPageMatch[] = []
-  const summariesByPageKey = new Map<string, PageSummaryRecord>()
+  const buffered: { match: StoredPageMatch; session: string | undefined }[] = []
+  const summariesBySessionAndKey = new Map<string, Map<string, PageSummaryRecord>>()
   await pageStoreParsedLines(options, (parsed) => {
     const verdict = pageStoreSchemaVerdictOf(parsed)
     observePageStoreSchemaVerdict(verdict, guard, metrics, sessionKey, options.metricsSessions)
     if (verdict.kind !== "admissible") return
+    const lineSession = lineSessionOf(parsed)
     const lineKind = isRecord(parsed) ? parsed["kind"] : undefined
     if (typeof lineKind === "string") {
       // A kind this build does not know is skipped uninterpreted rather
       // than parsed as a page; the one known kind lands in its own parser.
       if (lineKind !== PAGE_STORE_SUMMARY_LINE_KIND) return
       const summary = pageStoreSummaryLineOf(parsed)
-      if (summary !== undefined) {
-        summariesByPageKey.set(pageKeyOf(summary.tool, summary.subject, summary.msgIndex, summary.partIndex, summary.stashSlot), summary)
-      }
+      if (summary === undefined || lineSession === undefined || summary.subject !== subject) return
+      const byPageKey = summariesBySessionAndKey.get(lineSession) ?? new Map<string, PageSummaryRecord>()
+      byPageKey.set(pageKeyOf(summary.tool, summary.subject, summary.msgIndex, summary.partIndex, summary.stashSlot), summary)
+      summariesBySessionAndKey.set(lineSession, byPageKey)
       return
     }
     const entry = pageStoreLineOf(parsed)
-    if (entry !== undefined && entry.subject === subject) matches.push(entry)
+    if (entry !== undefined && entry.subject === subject) buffered.push({ match: entry, session: lineSession })
   })
-  for (const match of matches) {
-    const summary = summariesByPageKey.get(pageKeyOf(match.tool, match.subject, match.msgIndex, match.partIndex, match.stashSlot))
+  const matches: StoredPageMatch[] = []
+  for (const { match, session } of buffered) {
+    // A summary attaches only within its own session: pageKeyOf excludes
+    // session, so the same key recurs across sessions (every session's
+    // first read of the same file), and a cross-session summary would
+    // describe a different page's content under the summary-first lead.
+    const summary =
+      session === undefined
+        ? undefined
+        : summariesBySessionAndKey
+            .get(session)
+            ?.get(pageKeyOf(match.tool, match.subject, match.msgIndex, match.partIndex, match.stashSlot))
     if (summary !== undefined) match.summary = summary
+    matches.push(match)
   }
   return matches
 }
