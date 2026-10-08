@@ -185,11 +185,8 @@ const pageStoreSchemaVerdictOf = (parsed: unknown): PageStoreSchemaVerdict => {
   // would destroy recall depth for every store a v1 build wrote. A
   // stamped-older line carrying any kind stays unreadable: no older build
   // wrote kinds, so the line is corruption rather than a page.
-  if (
-    Number.isInteger(schemaVersion) &&
-    schemaVersion >= FIRST_STAMPED_PAGE_STORE_SCHEMA_VERSION &&
-    (isRecord(parsed) ? parsed["kind"] === undefined : false)
-  ) {
+  const lineIsKindlessPageShape = isRecord(parsed) && parsed["kind"] === undefined
+  if (Number.isInteger(schemaVersion) && schemaVersion >= FIRST_STAMPED_PAGE_STORE_SCHEMA_VERSION && lineIsKindlessPageShape) {
     return { kind: "admissible" }
   }
   return { kind: "invalid" }
