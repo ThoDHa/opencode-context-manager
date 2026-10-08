@@ -262,9 +262,11 @@ export const createSummaryCompressor = (options: SummaryCompressorOptions): Summ
     summaryTokens: Math.ceil(summary.length / charsPerToken),
   })
 
-  // One side-session call raced against the readback deadline, classified:
-  // undefined records the readback-timeout or exception failure, the
-  // settled outcome carries the value the caller validates further.
+  // Every client touch raced against the readback deadline, classified:
+  // undefined records the readback-timeout or exception failure (the phase
+  // name riding the message), the settled outcome carries the value the
+  // caller validates further. A host call that never settles therefore
+  // classifies instead of wedging the serial drain.
   const settleInTime = async <T>(call: Promise<T>, phase: string): Promise<SettledOutcome<T> | undefined> => {
     const timed = await withReadbackTimeout(call, readbackTimeoutMs)
     if (timed.kind === "expired") {
@@ -272,7 +274,7 @@ export const createSummaryCompressor = (options: SummaryCompressorOptions): Summ
       return undefined
     }
     if (!timed.outcome.ok) {
-      recordFailure("exception", messageOf(timed.outcome.error))
+      recordFailure("exception", `the side-session ${phase} failed: ${messageOf(timed.outcome.error)}`)
       return undefined
     }
     return timed.outcome
@@ -328,24 +330,23 @@ export const createSummaryCompressor = (options: SummaryCompressorOptions): Summ
     }
   }
 
-  // The delete path runs on both settle and failure; a delete error counts
-  // as an exception failure rather than escaping the fire-and-forget chain.
+  // The delete path runs on both settle and failure: settleInTime records
+  // a thrown or hung delete (exception or phase-named timeout), so the
+  // fire-and-forget chain never escapes and the drain never wedges here.
   const deleteQuietly = async (sessionId: string): Promise<void> => {
-    try {
-      await client.deleteSession(sessionId)
-    } catch (error) {
-      recordFailure("exception", `the side-session delete failed: ${messageOf(error)}`)
-    }
+    await settleInTime(client.deleteSession(sessionId), "delete")
   }
 
+  // Create and tools-off ride the same deadline as every other touch: a
+  // hung or thrown call classifies and ends the item (a session that was
+  // created is still deleted), so the serial drain always advances.
   const processItem = async (item: SummaryQueueItem): Promise<void> => {
-    let sessionId: string | undefined
-    try {
-      sessionId = await client.createSession(SUMMARY_SESSION_TITLE)
-      await client.disableTools(sessionId)
-    } catch (error) {
-      recordFailure("exception", messageOf(error))
-      if (sessionId !== undefined) await deleteQuietly(sessionId)
+    const created = await settleInTime(client.createSession(SUMMARY_SESSION_TITLE), "create")
+    if (created === undefined) return
+    const sessionId = created.value
+    const disabled = await settleInTime(client.disableTools(sessionId), "tools-off")
+    if (disabled === undefined) {
+      await deleteQuietly(sessionId)
       return
     }
     try {

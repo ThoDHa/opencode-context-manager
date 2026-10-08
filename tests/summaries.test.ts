@@ -393,6 +393,32 @@ test("a create failure counts one exception and never deletes a session", async 
   assert.equal(counters.lastFailureKind, "exception")
 })
 
+test("a createSession that never settles classifies a timeout against the create phase and the drain proceeds to the next page", async () => {
+  const fake = createFakeClient()
+  const originalCreate = fake.client.createSession
+  let createAttempts = 0
+  fake.client.createSession = async (title: string) => {
+    createAttempts += 1
+    if (createAttempts === 1) return new Promise<string>(() => {})
+    return originalCreate(title)
+  }
+  const { sink, lines } = collectLines()
+  const compressor = createSummaryCompressor({ client: fake.client, sink, readbackTimeoutMs: 20 })
+  compressor.enqueue({ sessionKey: TEST_SESSION_KEY, page: pageOf({ msgIndex: 1 }) })
+  compressor.enqueue({ sessionKey: TEST_SESSION_KEY, page: pageOf({ msgIndex: 2 }) })
+  await compressor.settled()
+  assert.equal(lines.length, 1)
+  assert.equal(lines[0].msgIndex, 2)
+  assert.equal(fake.created.length, 1)
+  assert.deepEqual(fake.deleted, fake.created)
+  const counters = compressor.counters()
+  assert.equal(counters.queued, 2)
+  assert.equal(counters.written, 1)
+  assert.equal(counters.failures, 1)
+  assert.equal(counters.lastFailureKind, "readback-timeout")
+  assert.match(counters.lastError ?? "", /create/)
+})
+
 test("a failing sink write counts an exception and records no in-memory summary", async () => {
   const fake = createFakeClient()
   const compressor = createSummaryCompressor({
