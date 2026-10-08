@@ -2598,7 +2598,7 @@ test("recall with countsOnly true returns the standard miss and invalid-subject 
   assert.equal(counters.recallHits, 0)
 })
 
-test("recall without countsOnly or with false returns today's byte-identical responses and the registration carries both argument schemas", async () => {
+test("recall without countsOnly or with false returns today's byte-identical responses and the registration carries all three argument schemas", async () => {
   const hooks = await loadPluginHooks()
   await setContextLimit(hooks, SESSION_ID, WATERMARK_PROBE_CONTEXT_LIMIT)
 
@@ -2622,9 +2622,10 @@ test("recall without countsOnly or with false returns today's byte-identical res
   const recallDefinition = (
     hooks as Record<string, Record<string, { args: Record<string, { type: string }> }>>
   )[TOOL_MAP_KEY][RECALL_TOOL_NAME]
-  assert.deepEqual(Object.keys(recallDefinition.args), [RECALL_ARG_NAME, RECALL_PROBE_ARG_NAME])
+  assert.deepEqual(Object.keys(recallDefinition.args), [RECALL_ARG_NAME, RECALL_PROBE_ARG_NAME, RECALL_VERBATIM_ARG_NAME])
   assert.equal(recallDefinition.args[RECALL_ARG_NAME].type, "string")
   assert.equal(recallDefinition.args[RECALL_PROBE_ARG_NAME].type, "boolean")
+  assert.equal(recallDefinition.args[RECALL_VERBATIM_ARG_NAME].type, "boolean")
 })
 
 const directRecallOptions = (): ResolvedOptions =>
@@ -4719,6 +4720,8 @@ test("describe reports zeroed counters unknown context limit and empty page stor
     minEvictableBytes: MIN_EVICTABLE_BYTES,
     defaultContextTokens: null,
     agedReadEvictionMessages: null,
+    summarizeEvictedOutputs: false,
+    summaryTokenBudget: SCHEMA_DEFAULT_SUMMARY_TOKEN_BUDGET,
     modelContextTokens: {},
     metricsLog: false,
     metricsPath: DEFAULT_METRICS_PATH,
