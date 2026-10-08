@@ -5,7 +5,7 @@ import { PLUGIN_ID } from "./schema.ts"
 import { chatParamsHookBody, type ChatParamsModel, type ContextLimitEntry } from "./context-limits.ts"
 import type { MessageBundle } from "./messages.ts"
 import { resolveOptions, type ContextManagerOptions } from "./options.ts"
-import { FALLBACK_SESSION_KEY, rememberSessionValue, sessionIDFromContext, sessionKeyFromContext, touchMapEntry, trimMapToBound } from "./session-maps.ts"
+import { FALLBACK_SESSION_KEY, rememberSessionValue, sessionKeyFromContext, touchMapEntry, trimMapToBound } from "./session-maps.ts"
 import { HINT_LINE_PREFIX, orderedRenderedSubjectsOf, RECALL_TOOL_NAME, SUBJECT_SEPARATOR } from "./vocabulary.ts"
 import { rememberError, type MetricsHydration, type MetricsStore, type PersistedTotals, type SessionMetrics } from "./state.ts"
 import { appendHygieneCopy, migrateLegacyDefaultPaths, newestPersistedTotalsOf, PRUNE_SCAN_NEVER, type PruneThrottle } from "./persistence.ts"
@@ -182,8 +182,7 @@ const server = (async (pluginInput, rawOptions) => {
     // The consult map's write side, session-then-key exactly like the
     // store merge: the line's own session scopes it, so a summary never
     // serves another session's page at the same key.
-    const touch = touchMapEntry(summariesBySessionAndKey, line.session)
-    const byPageKey = touch ?? new Map<string, PageSummaryRecord>()
+    const byPageKey = touchMapEntry(summariesBySessionAndKey, line.session) ?? new Map<string, PageSummaryRecord>()
     rememberSessionValue(
       byPageKey,
       pageKeyOf(record.tool, record.subject, record.msgIndex, record.partIndex, record.stashSlot),
@@ -261,12 +260,6 @@ const server = (async (pluginInput, rawOptions) => {
     "experimental.chat.messages.transform": async (_input: unknown, output: { messages: MessageBundle[] }) => {
       const messages = output.messages
       if (!Array.isArray(messages) || messages.length === 0) return
-      // Side-session stand-down: a side session's own model call re-enters
-      // this hook, and returning identity output is the recursion guard
-      // the LRU-60 spike validated. Ids leave the registry only on a
-      // settled delete, so a session whose delete failed stays guarded.
-      const hookSessionID = sessionIDFromContext(messages[0]?.info)
-      if (hookSessionID !== undefined && sideSessionIds.has(hookSessionID)) return
       // Resolved inside the try: a hostile messages[0].info accessor is
       // itself a fault on the highest-likelihood path and must hit the
       // boundary, not escape ahead of it. The fallback key names the
@@ -274,6 +267,13 @@ const server = (async (pluginInput, rawOptions) => {
       let sessionKey = FALLBACK_SESSION_KEY
       try {
         sessionKey = sessionKeyFromContext(messages[0]?.info)
+        // Side-session stand-down: a side session's own model call
+        // re-enters this hook, and returning identity output is the
+        // recursion guard the LRU-60 spike validated. The session key is
+        // the session id whenever one resolved; ids leave the registry
+        // only on a settled delete, so a session whose delete failed
+        // stays guarded.
+        if (sessionKey !== FALLBACK_SESSION_KEY && sideSessionIds.has(sessionKey)) return
         const injectedError = options.errorTransform?.()
         if (typeof injectedError === "string") throw new Error(injectedError)
         await transformHookBody(messages, transformHookDeps)

@@ -284,11 +284,8 @@ export const executeReadEvicted = async (
     const withOlder = olderCount === 0 ? restored : `${restored}\n${pageStoreOlderLineFor(subject, olderCount)}`
     return newest.attachments === undefined ? withOlder : `${withOlder}\n${pageAttachmentsLineFor(newest.attachments)}`
   }
-  if (countsOnly) {
-    const probeNewest = matches[matches.length - 1]
-    return probeCountsLineFor(subject, matches.length, 0, matches, probeSummaryBytesFor(probeNewest, sessionKey, summaryLookup, verbatim))
-  }
   const newest = matches[matches.length - 1]
+  if (countsOnly) return probeCountsLineFor(subject, matches.length, 0, matches, probeSummaryBytesFor(newest, sessionKey, summaryLookup, verbatim))
   // The in-session stash path consults the same summary map so an
   // in-session reload and a cross-session recall return the same shape;
   // the consult scopes to this session, the stash page's writing session.

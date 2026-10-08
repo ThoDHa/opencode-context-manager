@@ -43,7 +43,6 @@ import {
   TOTALS_KEYS,
 } from "../plugin/schema.ts"
 import { DEFAULT_SUMMARY_TOKEN_BUDGET as SUMMARIES_DEFAULT_SUMMARY_TOKEN_BUDGET } from "../plugin/summaries.ts"
-import type { SummaryClient } from "../plugin/summaries.ts"
 import type { MetricsStore } from "../plugin/state.ts"
 
 const contextManagerFactory = contextManagerEntry.server
@@ -11607,13 +11606,16 @@ const createWiringFakeClient = (config: { readTexts?: string[]; holdPrompt?: boo
   }
 }
 
-const loadPluginHooksWithClient = async (client: SummaryClient, extra: Record<string, unknown> = {}): Promise<HookMap> =>
+// The loader takes the fake host client structurally: the entry's seam
+// input is the host client envelope, not the SummaryClient contract the
+// adapter produces.
+const loadPluginHooksWithClient = async (client: unknown, extra: Record<string, unknown> = {}): Promise<HookMap> =>
   (await contextManagerFactory(
     { client },
     { metricsLog: false, liveStateLog: false, ingestionHygieneCopy: false, pageStore: false, ...extra },
   )) as HookMap
 
-const loadPluginHooksWithClientAndStore = async (client: SummaryClient, storePath: string, extra: Record<string, unknown> = {}): Promise<HookMap> =>
+const loadPluginHooksWithClientAndStore = async (client: unknown, storePath: string, extra: Record<string, unknown> = {}): Promise<HookMap> =>
   (await contextManagerFactory(
     { client },
     {
