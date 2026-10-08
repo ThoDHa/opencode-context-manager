@@ -10,21 +10,12 @@ import {
 } from "./context-limits.ts"
 import type { MessageBundle } from "./messages.ts"
 import type { ContextManagerOptions, ResolvedOptions } from "./options.ts"
-import type { HotSubject, Subject } from "./vocabulary.ts"
-import { ATTACHMENT_MIME_KEY, ATTACHMENT_URL_KEY, runCompositionOf } from "./messages.ts"
+import { runCompositionOf } from "./messages.ts"
 import { resolveOptions } from "./options.ts"
-import {
-  FALLBACK_SESSION_KEY,
-  rememberFaultForSubject,
-  rememberSessionValue,
-  sessionIDFromContext,
-  sessionKeyFromContext,
-  touchMapEntry,
-  trimMapToBound,
-} from "./session-maps.ts"
-import { boundedSingleLineOf, HINT_LINE_PREFIX, JSON_INDENT_SPACES, LEGACY_HINT_LINE_PREFIX, orderedRenderedSubjectsOf, RECALL_TOOL_NAME, startsWithEitherGeneration, SUBJECT_SEPARATOR } from "./vocabulary.ts"
+import { FALLBACK_SESSION_KEY, sessionKeyFromContext, touchMapEntry } from "./session-maps.ts"
+import { HINT_LINE_PREFIX, orderedRenderedSubjectsOf, RECALL_TOOL_NAME, SUBJECT_SEPARATOR } from "./vocabulary.ts"
 import type { MetricsHydration, MetricsStore, PersistedTotals, ReasoningExpiry, RunOutcome, SessionMetrics } from "./state.ts"
-import { countFaults, countUniqueDedupedPairs, createSessionMetrics, DEFAULT_REMEMBERED_FAULT_SUBJECTS, metricsForSession, recordRunOutcome, rememberError, totalsOf } from "./state.ts"
+import { countFaults, countUniqueDedupedPairs, metricsForSession, recordRunOutcome, rememberError } from "./state.ts"
 import type { PruneThrottle } from "./persistence.ts"
 import {
   appendHygieneCopy,
@@ -35,7 +26,7 @@ import {
   recordSessionCheckpoint,
 } from "./persistence.ts"
 import type { PageEntry, PageStoreBySession, PageStoreGuard, SessionPageStore } from "./page-store.ts"
-import { pagesForSession, pageStoreMatchesFor, recordPageStoreLines } from "./page-store.ts"
+import { pagesForSession, recordPageStoreLines } from "./page-store.ts"
 import { deduplicateFileAttachments, deduplicateToolOutputs } from "./dedup.ts"
 import type { HygieneCadenceBySession } from "./hygiene.ts"
 import { expireAgedReasoning, fireCollapsePass, purgeErroredToolInputs, REASONING_EXPIRY_NONE, resolveHygieneBatch, stripLegacyHintParts, stripTerminalNoiseFrom } from "./hygiene.ts"
