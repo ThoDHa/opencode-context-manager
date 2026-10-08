@@ -8,9 +8,13 @@ import {
   DEFAULT_METRICS_DIR_SEGMENTS,
   DEFAULT_METRICS_FILE_BASENAME,
   DEFAULT_MUTATION_BATCH_CADENCE,
+  DEFAULT_SUMMARIZE_EVICTED_OUTPUTS,
+  DEFAULT_SUMMARY_TOKEN_BUDGET,
   OPTION_CACHE_AWARE_HINTS,
   OPTION_EVICTION_BATCH_MULTIPLIER,
   OPTION_MUTATION_BATCH_CADENCE,
+  OPTION_SUMMARIZE_EVICTED_OUTPUTS,
+  OPTION_SUMMARY_TOKEN_BUDGET,
 } from "./schema.ts"
 
 const DEFAULT_CHARS_PER_TOKEN = 4
@@ -106,6 +110,8 @@ export type ContextManagerOptions = {
   cacheAwareHints?: boolean
   mutationBatchCadence?: number
   evictionBatchMultiplier?: number
+  summarizeEvictedOutputs?: boolean
+  summaryTokenBudget?: number
   protectedTools?: string[]
   protectedPatterns?: string[]
   stashLimit?: number
@@ -250,6 +256,19 @@ export const resolveOptions = (raw: ContextManagerOptions = {}): ResolvedOptions
     // byte-identical deficit-exact walk. The cache reasoning lives at
     // isEvictedByWalkPolicy, the one disposition the multiplier widens.
     [OPTION_EVICTION_BATCH_MULTIPLIER]: boundedIntegerOr(raw.evictionBatchMultiplier, DEFAULT_EVICTION_BATCH_MULTIPLIER, 1),
+    // The compression-on-evict gate: when true and the host provided a
+    // client, each eviction-walk page queues one side-session model call
+    // whose summary persists beside the page and serves recall by default.
+    // Ships default-off pending the lever5 readout (the schema.ts
+    // convention); false leaves every path byte-identical to the
+    // pre-compression plugin.
+    [OPTION_SUMMARIZE_EVICTED_OUTPUTS]:
+      typeof raw.summarizeEvictedOutputs === "boolean" ? raw.summarizeEvictedOutputs : DEFAULT_SUMMARIZE_EVICTED_OUTPUTS,
+    // The per-summary token budget: enforced by the prompt clause plus the
+    // compressor's hard truncation, so the value bounds a summary's size
+    // regardless of model compliance. Same bounded-integer discipline as
+    // the other count options: integral and at least 1, else dropped.
+    [OPTION_SUMMARY_TOKEN_BUDGET]: boundedIntegerOr(raw.summaryTokenBudget, DEFAULT_SUMMARY_TOKEN_BUDGET, 1),
     protectedTools: Array.isArray(raw.protectedTools) && raw.protectedTools.every(isNonEmptyString) ? raw.protectedTools : DEFAULT_PROTECTED_TOOLS,
     protectedPatterns: protectedPatterns.flatMap((pattern) => {
       const compiled = compiledGlobOf(pattern)

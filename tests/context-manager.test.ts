@@ -32,7 +32,18 @@ import type {
 } from "../plugin/page-store.ts"
 import { executeReadEvicted, RECALL_TOOL_ARGS, RECALL_VERBATIM_ARG_SCHEMA } from "../plugin/tools.ts"
 import { loadPanelData, PANEL_COMMAND_CATEGORY, PANEL_COMMAND_NAME, PANEL_COMMAND_NAMESPACE, PANEL_COMMAND_SLASH_NAME } from "../plugin/panel-data.ts"
-import { PLUGIN_ID, PLUGIN_VERSION, OPTION_CACHE_AWARE_HINTS, OPTION_MUTATION_BATCH_CADENCE, TOTALS_KEYS } from "../plugin/schema.ts"
+import {
+  DEFAULT_SUMMARY_TOKEN_BUDGET as SCHEMA_DEFAULT_SUMMARY_TOKEN_BUDGET,
+  OPTION_SUMMARIZE_EVICTED_OUTPUTS,
+  OPTION_SUMMARY_TOKEN_BUDGET,
+  PLUGIN_ID,
+  PLUGIN_VERSION,
+  OPTION_CACHE_AWARE_HINTS,
+  OPTION_MUTATION_BATCH_CADENCE,
+  TOTALS_KEYS,
+} from "../plugin/schema.ts"
+import { DEFAULT_SUMMARY_TOKEN_BUDGET as SUMMARIES_DEFAULT_SUMMARY_TOKEN_BUDGET } from "../plugin/summaries.ts"
+import type { SummaryClient } from "../plugin/summaries.ts"
 import type { MetricsStore } from "../plugin/state.ts"
 
 const contextManagerFactory = contextManagerEntry.server
@@ -2636,8 +2647,8 @@ const summaryLookupOf = (records: PageSummaryRecord[]): PageSummaryLookup => {
       record,
     ]),
   )
-  return (tool, subject, msgIndex, partIndex, stashSlot) =>
-    byPageKey.get(pageKeyOf(tool, subject, msgIndex, partIndex, stashSlot))
+  return (session, tool, subject, msgIndex, partIndex, stashSlot) =>
+    session === undefined ? undefined : byPageKey.get(pageKeyOf(tool, subject, msgIndex, partIndex, stashSlot))
 }
 
 type DirectRecallDeps = {
@@ -11493,4 +11504,382 @@ test("pageStoreMatchesFor merges the newest summary per page key and no summary 
   } finally {
     cleanupMetricsDir(pagesDir)
   }
+})
+
+const COMPRESSION_FAKE_SUMMARY = "1. the build passed\n2. one warning on line 9"
+const COMPRESSION_PARITY_SUBJECT = "/data/compression-parity.txt"
+const COMPRESSION_COLLISION_SUBJECT = "/data/compression-collision.txt"
+const COMPRESSION_SIDE_MODEL = "zai/glm-5.3"
+const COMPRESSION_LIFECYCLE_CALLS = 4
+const COMPRESSION_MALFORMED_PROMPTS = 2
+const COMPRESSION_INVALID_BUDGETS = [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]
+
+// The wiring fake mirrors the HOST client envelope the entry's adapter
+// consumes: client.session.create/prompt/messages/delete, each resolving
+// the SDK result shape ({ data } on success). create yields side-N ids in
+// order; readback returns one user row and one assistant row carrying the
+// configured text (readTexts scripts per read, falling back to the
+// default summary); holdPrompt parks each prompt until releasePrompts so
+// the fire-and-forget ordering is observable; settledAfter resolves once
+// that many side sessions were deleted. promptBodies captures each
+// prompt's body so the tools-off map is pinnable.
+const createWiringFakeClient = (config: { readTexts?: string[]; holdPrompt?: boolean } = {}) => {
+  const calls: string[] = []
+  const created: string[] = []
+  const deleted: string[] = []
+  const promptBodies: unknown[] = []
+  let createCount = 0
+  let readCount = 0
+  let parkedPrompts = 0
+  let promptReleases: ((value: void) => void)[] = []
+  const promptWaiters: { count: number; resolve: (value: void) => void }[] = []
+  const deleteWaiters: { count: number; resolve: (value: void) => void }[] = []
+  const resolveWaiters = (waiters: { count: number; resolve: (value: void) => void }[], count: number): void => {
+    for (let index = waiters.length - 1; index >= 0; index -= 1) {
+      const waiter = waiters[index]
+      if (waiter !== undefined && count >= waiter.count) {
+        waiters.splice(index, 1)
+        waiter.resolve()
+      }
+    }
+  }
+  const client = {
+    session: {
+      create: async ({ body }: { body?: { title?: string } }) => {
+        calls.push("create")
+        createCount += 1
+        const id = `side-${createCount}`
+        created.push(id)
+        return { data: { id, title: body?.title, parentID: null } }
+      },
+      prompt: async ({ path, body }: { path: { id: string }; body?: unknown }) => {
+        calls.push(`prompt:${path.id}`)
+        promptBodies.push(body)
+        if (config.holdPrompt === true) {
+          parkedPrompts += 1
+          resolveWaiters(promptWaiters, parkedPrompts)
+          await new Promise<void>((resolve) => { promptReleases.push(resolve) })
+        }
+        return { data: { info: { id: `msg-${path.id}`, role: "assistant", providerID: "zai", modelID: "glm-5.3" }, parts: [] } }
+      },
+      messages: async ({ path }: { path: { id: string } }) => {
+        calls.push(`read:${path.id}`)
+        const index = readCount
+        readCount += 1
+        return {
+          data: [
+            { info: { role: "user" }, parts: [{ type: "text", text: "summarize" }] },
+            {
+              info: { role: "assistant", modelID: "glm-5.3", providerID: "zai" },
+              parts: [{ type: "text", text: config.readTexts?.[index] ?? COMPRESSION_FAKE_SUMMARY }],
+            },
+          ],
+        }
+      },
+      delete: async ({ path }: { path: { id: string } }) => {
+        calls.push(`delete:${path.id}`)
+        deleted.push(path.id)
+        resolveWaiters(deleteWaiters, deleted.length)
+        return { data: true }
+      },
+    },
+  }
+  return {
+    client,
+    calls,
+    created,
+    deleted,
+    promptBodies,
+    releasePrompts: (): void => {
+      for (const release of promptReleases) release()
+      promptReleases = []
+    },
+    // Resolves once that many prompts are parked: the drain parks one
+    // tick after the transform returns, so a release issued before this
+    // resolves would be swallowed by the parking.
+    whenPrompted: (count: number): Promise<void> =>
+      parkedPrompts >= count ? Promise.resolve() : new Promise<void>((resolve) => { promptWaiters.push({ count, resolve }) }),
+    settledAfter: (count: number): Promise<void> =>
+      deleted.length >= count ? Promise.resolve() : new Promise<void>((resolve) => { deleteWaiters.push({ count, resolve }) }),
+  }
+}
+
+const loadPluginHooksWithClient = async (client: SummaryClient, extra: Record<string, unknown> = {}): Promise<HookMap> =>
+  (await contextManagerFactory(
+    { client },
+    { metricsLog: false, liveStateLog: false, ingestionHygieneCopy: false, pageStore: false, ...extra },
+  )) as HookMap
+
+const loadPluginHooksWithClientAndStore = async (client: SummaryClient, storePath: string, extra: Record<string, unknown> = {}): Promise<HookMap> =>
+  (await contextManagerFactory(
+    { client },
+    {
+      metricsLog: false,
+      liveStateLog: false,
+      ingestionHygieneCopy: false,
+      pageStore: true,
+      pageStorePath: storePath,
+      ...extra,
+    },
+  )) as HookMap
+
+test("a gate-on watermark eviction runs one side-call lifecycle and lands a v2 summary line beside the page", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient()
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, { [OPTION_SUMMARIZE_EVICTED_OUTPUTS]: true })
+
+    const bundle = await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+    assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+    await fake.settledAfter(1)
+
+    assert.equal(fake.created.length, 1)
+    assert.deepEqual(fake.calls, [
+      "create",
+      `prompt:${fake.created[0]}`,
+      `read:${fake.created[0]}`,
+      `delete:${fake.created[0]}`,
+    ])
+    assert.equal(fake.calls.length, COMPRESSION_LIFECYCLE_CALLS)
+    // The side prompt carries the verbatim evicted output and the full
+    // tools-off map, so the summarizing model holds no tool surface.
+    const promptBody = fake.promptBodies[0] as { parts?: Array<{ text?: string }>; tools?: Record<string, boolean> } | undefined
+    assert.ok(promptBody?.parts?.[0]?.text?.includes(outputOfBytes(MIN_EVICTABLE_BYTES)))
+    const tools = promptBody?.tools ?? {}
+    assert.ok(Object.keys(tools).length > 0)
+    assert.equal(Object.values(tools).every((off) => off === false), true)
+    const lines = pageLinesIn(storePath)
+    assert.equal(lines.length, 2)
+    const summaryLine = lines.find((line) => line.kind === PAGE_STORE_SUMMARY_LINE_KIND)
+    assert.equal(summaryLine?.schemaVersion, PAGE_STORE_SCHEMA_VERSION)
+    assert.equal(summaryLine?.session, SESSION_ID)
+    assert.equal(summaryLine?.tool, READ_TOOL)
+    assert.equal(summaryLine?.subject, PAGE_STORE_EVICTED_SUBJECT)
+    assert.equal(summaryLine?.msgIndex, 0)
+    assert.equal(summaryLine?.partIndex, 0)
+    assert.equal(summaryLine?.summary, COMPRESSION_FAKE_SUMMARY)
+    assert.equal(summaryLine?.summaryModel, COMPRESSION_SIDE_MODEL)
+    assert.equal(typeof summaryLine?.summaryTokens, "number")
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("recall after a wired compression serves the summary by default and verbatim true recovers the original", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient()
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, { [OPTION_SUMMARIZE_EVICTED_OUTPUTS]: true })
+    await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+    await fake.settledAfter(1)
+
+    assert.equal(await recallTool(hooks, PAGE_STORE_EVICTED_SUBJECT, SESSION_ID), summaryServeTextFor(COMPRESSION_FAKE_SUMMARY))
+    assert.equal(countersOf(await readStats(hooks, SESSION_ID)).recallHits, 0)
+
+    const verbatim = await recallToolArgs(hooks, { [RECALL_ARG_NAME]: PAGE_STORE_EVICTED_SUBJECT, [RECALL_VERBATIM_ARG_NAME]: true }, SESSION_ID)
+    assert.equal(verbatim, outputOfBytes(MIN_EVICTABLE_BYTES))
+    assert.equal(countersOf(await readStats(hooks, SESSION_ID)).recallHits, 1)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a gate-on aged read eviction fires the side call like the watermark tier", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient()
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, {
+      [OPTION_SUMMARIZE_EVICTED_OUTPUTS]: true,
+      agedReadEvictionMessages: AGED_EVICTION_MESSAGES,
+    })
+
+    const bundle = buildBundle([
+      [pathToolPart(AGED_READ_PATH, MIN_EVICTABLE_BYTES)],
+      ...fillerMessages(AGED_FILLER_COUNT),
+    ])
+    await runTransform(hooks, bundle)
+    assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+    await fake.settledAfter(1)
+
+    assert.equal(fake.created.length, 1)
+    const lines = pageLinesIn(storePath)
+    assert.equal(lines.filter((line) => line.kind === PAGE_STORE_SUMMARY_LINE_KIND).length, 1)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a fence eviction never fires the side call even when the compression gate is on", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient()
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, {
+      [OPTION_SUMMARIZE_EVICTED_OUTPUTS]: true,
+      userFenceEviction: { enabled: true },
+    })
+
+    const block = fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_OVER_LINES, FENCE_LINE_TAG))
+    await runTransform(hooks, userFenceBundle(`${FENCE_PROSE_BEFORE}\n${block}\n${FENCE_PROSE_AFTER}`))
+
+    assert.deepEqual(fake.calls, [])
+    assert.equal(fake.created.length, 0)
+    const lines = pageLinesIn(storePath)
+    assert.equal(lines.length, 1)
+    assert.equal(lines[0].tool, FENCE_STASH_TOOL_LABEL)
+    assert.equal(lines[0].kind, undefined)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("the transform lands the tombstone the page line and the run outcome before the side call settles", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient({ holdPrompt: true })
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, { [OPTION_SUMMARIZE_EVICTED_OUTPUTS]: true })
+
+    const bundle = await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+
+    assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+    assert.equal(pageLinesIn(storePath).length, 1)
+    const stats = await readStats(hooks, SESSION_ID)
+    assert.equal(countersOf(stats).evictions, 1)
+    assert.notEqual(stats.lastRun, null)
+
+    await fake.whenPrompted(1)
+    fake.releasePrompts()
+    await fake.settledAfter(1)
+    assert.equal(pageLinesIn(storePath).length, 2)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("gate off with a client present and gate on without a client stay byte-identical to today and fire nothing", async () => {
+  const evictionLimit = contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS)
+
+  const plainHooks = await loadPluginHooks()
+  const plainBundle = buildStandardBundle(SESSION_ID, COMPRESSION_PARITY_SUBJECT)
+  await setContextLimit(plainHooks, SESSION_ID, evictionLimit)
+  await runTransform(plainHooks, plainBundle)
+
+  const gatedOffFake = createWiringFakeClient()
+  const gatedOffHooks = await loadPluginHooksWithClient(gatedOffFake.client, { [OPTION_SUMMARIZE_EVICTED_OUTPUTS]: false })
+  const gatedOffBundle = buildStandardBundle(SESSION_ID, COMPRESSION_PARITY_SUBJECT)
+  await setContextLimit(gatedOffHooks, SESSION_ID, evictionLimit)
+  await runTransform(gatedOffHooks, gatedOffBundle)
+
+  const noClientHooks = await loadPluginHooksWith({ [OPTION_SUMMARIZE_EVICTED_OUTPUTS]: true })
+  const noClientBundle = buildStandardBundle(SESSION_ID, COMPRESSION_PARITY_SUBJECT)
+  await setContextLimit(noClientHooks, SESSION_ID, evictionLimit)
+  await runTransform(noClientHooks, noClientBundle)
+
+  const plainOutput = toolPartAt(plainBundle.messages[0], 0).state.output
+  assert.ok(plainOutput.startsWith(TOMBSTONE_MARKER))
+  assert.equal(toolPartAt(gatedOffBundle.messages[0], 0).state.output, plainOutput)
+  assert.equal(toolPartAt(noClientBundle.messages[0], 0).state.output, plainOutput)
+  assert.equal(gatedOffFake.calls.length, 0)
+  assert.equal(gatedOffFake.created.length, 0)
+})
+
+test("a wired side-call failure keeps today's tombstone store line and full-serve recall", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient({ readTexts: ["", ""] })
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, { [OPTION_SUMMARIZE_EVICTED_OUTPUTS]: true })
+
+    const bundle = await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+    assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+    await fake.settledAfter(1)
+
+    assert.equal(fake.calls.filter((call) => call.startsWith("prompt:")).length, COMPRESSION_MALFORMED_PROMPTS)
+    assert.equal(fake.deleted.length, 1)
+    const lines = pageLinesIn(storePath)
+    assert.equal(lines.length, 1)
+    assert.equal(lines[0].kind, undefined)
+    assert.equal(await recallTool(hooks, PAGE_STORE_EVICTED_SUBJECT, SESSION_ID), outputOfBytes(MIN_EVICTABLE_BYTES))
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a summary written by session A serves a cross-session recall of A's page", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient()
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, { [OPTION_SUMMARIZE_EVICTED_OUTPUTS]: true })
+
+    await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+    await fake.settledAfter(1)
+
+    assert.equal(await recallTool(hooks, PAGE_STORE_EVICTED_SUBJECT, SESSION_ID_B), summaryServeTextFor(COMPRESSION_FAKE_SUMMARY))
+    assert.equal(countersOf(await readStats(hooks, SESSION_ID_B)).recallHits, 0)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("session B's stash page at the same key never serves session A's wired summary", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient({ readTexts: [COMPRESSION_FAKE_SUMMARY, "", ""] })
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, { [OPTION_SUMMARIZE_EVICTED_OUTPUTS]: true })
+
+    await runPageStoreEviction(hooks, SESSION_ID, COMPRESSION_COLLISION_SUBJECT)
+    await fake.settledAfter(1)
+    await runPageStoreEviction(hooks, SESSION_ID_B, COMPRESSION_COLLISION_SUBJECT)
+    await fake.settledAfter(2)
+
+    assert.equal(fake.deleted.length, 2)
+    assert.equal(await recallTool(hooks, COMPRESSION_COLLISION_SUBJECT, SESSION_ID_B), outputOfBytes(MIN_EVICTABLE_BYTES))
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("the transform hook stands down for a side session with identity output", async () => {
+  const fake = createWiringFakeClient({ holdPrompt: true })
+  const hooks = await loadPluginHooksWithClient(fake.client, { [OPTION_SUMMARIZE_EVICTED_OUTPUTS]: true })
+  const hostBundle = await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+  const sideSessionID = fake.created[0]
+  assert.ok(sideSessionID !== undefined)
+
+  await setContextLimit(hooks, sideSessionID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+  const sideBundle = buildStandardBundle(sideSessionID, PAGE_STORE_EVICTED_SUBJECT)
+  await runTransform(hooks, sideBundle)
+
+  assert.equal(toolPartAt(sideBundle.messages[0], 0).state.output, outputOfBytes(MIN_EVICTABLE_BYTES))
+  assert.ok(toolPartAt(hostBundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  assert.equal(fake.created.length, 1)
+
+  await fake.whenPrompted(1)
+  fake.releasePrompts()
+  await fake.settledAfter(1)
+})
+
+test("describe echoes the compression pair defaulting to off and the compressor's 256-token budget", async () => {
+  assert.equal(SCHEMA_DEFAULT_SUMMARY_TOKEN_BUDGET, SUMMARIES_DEFAULT_SUMMARY_TOKEN_BUDGET)
+  const hooks = await loadPluginHooks()
+
+  const options = (await readStats(hooks, SESSION_ID)).options as Record<string, unknown>
+
+  assert.equal(options[OPTION_SUMMARIZE_EVICTED_OUTPUTS], false)
+  assert.equal(options[OPTION_SUMMARY_TOKEN_BUDGET], SCHEMA_DEFAULT_SUMMARY_TOKEN_BUDGET)
+})
+
+test("an invalid summaryTokenBudget drops to the default and a valid pair passes through", () => {
+  for (const invalidBudget of COMPRESSION_INVALID_BUDGETS) {
+    assert.equal(resolveOptions({ [OPTION_SUMMARY_TOKEN_BUDGET]: invalidBudget })[OPTION_SUMMARY_TOKEN_BUDGET], SCHEMA_DEFAULT_SUMMARY_TOKEN_BUDGET)
+  }
+  assert.equal(resolveOptions({ [OPTION_SUMMARY_TOKEN_BUDGET]: 512 })[OPTION_SUMMARY_TOKEN_BUDGET], 512)
+  assert.equal(resolveOptions({ [OPTION_SUMMARIZE_EVICTED_OUTPUTS]: true })[OPTION_SUMMARIZE_EVICTED_OUTPUTS], true)
+  assert.equal(resolveOptions({})[OPTION_SUMMARIZE_EVICTED_OUTPUTS], false)
 })

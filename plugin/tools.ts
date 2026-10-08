@@ -199,19 +199,25 @@ const summaryServeTextFor = (summary: PageSummaryRecord): string =>
 // The summary that would serve for a matched page: the instance's in-memory
 // summary map is consulted first (a summary written this session may not be
 // re-read from the store yet), then the store line merged onto the match.
+// The consult is scoped to the page's writing session exactly as the store
+// merge is: the store seat passes the match's own session, the in-session
+// stash seat passes the caller's session key (the stash page's writing
+// session), and an undefined session never consults.
 const servingSummaryForMatch = (
   match: StoredPageMatch,
+  session: string | undefined,
   summaryLookup: PageSummaryLookup | undefined,
 ): PageSummaryRecord | undefined =>
-  summaryLookup?.(match.tool, match.subject, match.msgIndex, match.partIndex, match.stashSlot) ?? match.summary
+  summaryLookup?.(session, match.tool, match.subject, match.msgIndex, match.partIndex, match.stashSlot) ?? match.summary
 
 const probeSummaryBytesFor = (
-  matches: StoredPageMatch[],
+  newest: StoredPageMatch,
+  session: string | undefined,
   summaryLookup: PageSummaryLookup | undefined,
   verbatim: boolean,
 ): number | undefined => {
-  if (verbatim || matches.length === 0) return undefined
-  return servingSummaryForMatch(matches[matches.length - 1], summaryLookup)?.summary.length
+  if (verbatim) return undefined
+  return servingSummaryForMatch(newest, session, summaryLookup)?.summary.length
 }
 
 export const executeReadEvicted = async (
@@ -259,13 +265,13 @@ export const executeReadEvicted = async (
     // record: fault counts feed the eviction sort key through
     // faultAdjustedLastTouchOf, so probe side effects would leak into
     // eviction ordering.
-    if (countsOnly) return probeCountsLineFor(subject, 0, pages.length, pages, probeSummaryBytesFor(pages, summaryLookup, verbatim))
     const newest = pages[pages.length - 1]
+    if (countsOnly) return probeCountsLineFor(subject, 0, pages.length, pages, probeSummaryBytesFor(newest, newest.session, summaryLookup, verbatim))
     // The summary-first serve stays read-only by contract: no hit count,
     // no fault record, no hydration await; only a verbatim recall is the
     // full reload event today's serve is.
     if (!verbatim) {
-      const summary = servingSummaryForMatch(newest, summaryLookup)
+      const summary = servingSummaryForMatch(newest, newest.session, summaryLookup)
       if (summary !== undefined) return summaryServeTextFor(summary)
     }
     // A page-store hit counts and fault-protects exactly like an in-session
@@ -278,13 +284,17 @@ export const executeReadEvicted = async (
     const withOlder = olderCount === 0 ? restored : `${restored}\n${pageStoreOlderLineFor(subject, olderCount)}`
     return newest.attachments === undefined ? withOlder : `${withOlder}\n${pageAttachmentsLineFor(newest.attachments)}`
   }
-  if (countsOnly) return probeCountsLineFor(subject, matches.length, 0, matches, probeSummaryBytesFor(matches, summaryLookup, verbatim))
+  if (countsOnly) {
+    const probeNewest = matches[matches.length - 1]
+    return probeCountsLineFor(subject, matches.length, 0, matches, probeSummaryBytesFor(probeNewest, sessionKey, summaryLookup, verbatim))
+  }
   const newest = matches[matches.length - 1]
   // The in-session stash path consults the same summary map so an
   // in-session reload and a cross-session recall return the same shape;
-  // absent a summary this is exactly today's serve.
+  // the consult scopes to this session, the stash page's writing session.
+  // Absent a summary this is exactly today's serve.
   if (!verbatim) {
-    const summary = servingSummaryForMatch(newest, summaryLookup)
+    const summary = servingSummaryForMatch(newest, sessionKey, summaryLookup)
     if (summary !== undefined) return summaryServeTextFor(summary)
   }
   // Refreshed before the await so the hit counts even if stash churn during
@@ -315,6 +325,8 @@ export const executeStatsTool = (source: StatsSource, toolContext: unknown): str
       minEvictableBytes: source.options.minEvictableBytes,
       defaultContextTokens: source.options.defaultContextTokens ?? null,
       agedReadEvictionMessages: source.options.agedReadEvictionMessages ?? null,
+      summarizeEvictedOutputs: source.options.summarizeEvictedOutputs,
+      summaryTokenBudget: source.options.summaryTokenBudget,
       modelContextTokens: source.options.modelContextTokens,
       metricsLog: source.options.metricsLog,
       metricsPath: source.options.metricsPath,

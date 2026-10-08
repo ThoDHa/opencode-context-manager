@@ -10,6 +10,7 @@ import { expireAgedReasoning, fireCollapsePass, type HygieneCadenceBySession, pu
 import { evictLargeUserFences } from "./fences.ts"
 import { effectiveWatermarkTokensOf, evictLeastRecentlyUsed, evictionCandidatesOf, measureAdvisory, measureDryRun, measureWithoutEvicting, retentionBreakdownOf } from "./eviction.ts"
 import { type HintMembershipBySession, storeHint, storeStableHint } from "./hints.ts"
+import type { SummaryCompressor } from "./summaries.ts"
 
 // The transform hook's body, extracted so the registration-site boundary
 // can wrap it in fault isolation. Everything it needs rides the deps
@@ -29,6 +30,11 @@ export type TransformHookDeps = {
   pluginSession: string
   pageStoreGuard: PageStoreGuard
   options: ResolvedOptions
+  // The compressor behind the compression-on-evict gate, built by the
+  // entry only when the gate is on and the host provided a client; absent
+  // on every other start, which leaves the walk byte-identical to the
+  // pre-compression plugin.
+  summaryCompressor?: SummaryCompressor
 }
 
 export const transformHookBody = async (messages: MessageBundle[], deps: TransformHookDeps): Promise<void> => {
@@ -74,6 +80,13 @@ export const transformHookBody = async (messages: MessageBundle[], deps: Transfo
     reasoningExpiredThisRun = expireAgedReasoning(sessionMetrics, messages, options)
   }
   const fenceEvictedThisRun = evictLargeUserFences(messages, options, sessionPageStore, pageStoreEntries)
+  // The compression sink closes over this run's session key so the
+  // compressor stamps each summary line with the evicting session; the
+  // enqueue is fire-and-forget, so handing the sink to the walk below
+  // never delays the transform.
+  const { summaryCompressor } = deps
+  const summarizeEvicted =
+    summaryCompressor === undefined ? undefined : (page: PageEntry): void => { summaryCompressor.enqueue({ sessionKey, page }) }
   const effectiveWatermarkTokens = effectiveWatermarkTokensOf(contextLimit.tokens, options)
   // One scan and one candidate walk feed whichever path runs: the
   // stand-downs (manual mode, or no watermark with the aged read tier
@@ -85,7 +98,7 @@ export const transformHookBody = async (messages: MessageBundle[], deps: Transfo
   const standDown = options.manualMode || (effectiveWatermarkTokens === null && options.agedReadEvictionMessages === undefined)
   const eviction = standDown
     ? measureWithoutEvicting(candidates, effectiveWatermarkTokens)
-    : evictLeastRecentlyUsed(messages, candidates, options, effectiveWatermarkTokens, sessionPageStore, pageStoreEntries)
+    : evictLeastRecentlyUsed(messages, candidates, options, effectiveWatermarkTokens, sessionPageStore, pageStoreEntries, summarizeEvicted)
   // The manual-mode dry run: with an effective watermark set, report
   // what the evictor would reclaim (the combined watermark and aged
   // read policy) so a staged watermark or staged age threshold can be

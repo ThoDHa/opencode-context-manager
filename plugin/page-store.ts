@@ -48,10 +48,14 @@ export type PageSummaryRecord = {
 }
 
 // The reader-side consult seam for the in-memory summary map: the recall
-// tool resolves a page's summary from the map first (a summary written this
-// session may not be re-read from the store yet), then from the store line
-// merged onto the match.
+// tool resolves a page's summary from the map first (a summary written
+// this session may not be re-read from the store yet), then from the
+// store line merged onto the match. The session scopes the consult to
+// the writing session, mirroring the store merge's session-then-key
+// attachment: an undefined (legacy, unscopable) session never consults,
+// and a summary serves only for a page whose own session wrote it.
 export type PageSummaryLookup = (
+  session: string | undefined,
   tool: string,
   subject: string,
   msgIndex: number,
@@ -61,8 +65,10 @@ export type PageSummaryLookup = (
 
 // A matched page joined with the newest summary line sharing its key
 // fields; the summary is absent until a summary line for that exact key
-// exists.
-export type StoredPageMatch = PageEntry & { summary?: PageSummaryRecord }
+// exists. The session rides beside them when the page line carried one,
+// so the in-memory map consult can scope by the writing session exactly
+// as the merge above does; a legacy unscopable page leaves it undefined.
+export type StoredPageMatch = PageEntry & { summary?: PageSummaryRecord; session?: string }
 
 export type SessionPageStore = Map<string, PageEntry>
 
@@ -308,6 +314,7 @@ export const pageStoreMatchesFor = async (
             .get(session)
             ?.get(pageKeyOf(match.tool, match.subject, match.msgIndex, match.partIndex, match.stashSlot))
     if (summary !== undefined) match.summary = summary
+    if (session !== undefined) match.session = session
     matches.push(match)
   }
   return matches

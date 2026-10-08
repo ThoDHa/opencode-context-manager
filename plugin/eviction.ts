@@ -270,6 +270,12 @@ export const measureDryRun = (
   return { deficitTokens, wouldEvictCount: subjects.length, wouldEvictBytes, wouldEvictSubjects: subjects }
 }
 
+// The narrow compression sink the pipeline hands in when the feature is
+// gated on and a client exists: invoked once per evicted entry at the one
+// store-and-push block, so both walk dispositions (watermark and aged
+// read) enqueue and fence entries, evicted by their own pass before the
+// walk, are unreachable by construction. The sink is fire-and-forget and
+// caller-owned; the walk never sees the compressor or the client.
 export const evictLeastRecentlyUsed = (
   messages: MessageBundle[],
   candidates: EvictionCandidates,
@@ -277,6 +283,7 @@ export const evictLeastRecentlyUsed = (
   watermarkTokens: number | null,
   pageStore: SessionPageStore,
   pageStoreEntries: PageEntry[],
+  summarizeEvicted?: (page: PageEntry) => void,
 ): EvictionResult => {
   const { evictable } = candidates
 
@@ -305,6 +312,7 @@ export const evictLeastRecentlyUsed = (
     if (droppedAttachments !== undefined) stored.attachments = droppedAttachments
     pagesDropped += storeEvictedPage(pageStore, stored, options.stashLimit)
     pageStoreEntries.push(stored)
+    summarizeEvicted?.(stored)
     stripStateAttachments(entry.stateRef)
     entry.stateRef.output = `${tombstone}${buildReloadPointer(subject)}`
     reclaimedTokens += entry.bytes / options.charsPerToken

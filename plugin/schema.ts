@@ -15,15 +15,22 @@ export const DEFAULT_LIVE_STATE_DIR_BASENAME = "context-state"
 // producer resolves its option surface through these, so a consumer
 // spelling an option differently cannot silently no-op. cacheAwareHints
 // and mutationBatchCadence ship default-off pending the measurement
-// program's conclusion; evictionBatchMultiplier ships at its identity
-// default 1, which reproduces the deficit-exact walk byte for byte. The
-// README cache-model passage is the frame of record.
+// program's conclusion; summarizeEvictedOutputs ships default-off for the
+// same reason (the compression-on-evict flagship is judged by the lever5
+// readout before it earns its default); evictionBatchMultiplier ships at
+// its identity default 1, which reproduces the deficit-exact walk byte for
+// byte; summaryTokenBudget ships at the compressor module's default 256.
+// The README cache-model passage is the frame of record.
 export const OPTION_CACHE_AWARE_HINTS = "cacheAwareHints"
 export const DEFAULT_CACHE_AWARE_HINTS = false
 export const OPTION_MUTATION_BATCH_CADENCE = "mutationBatchCadence"
 export const DEFAULT_MUTATION_BATCH_CADENCE = 0
 export const OPTION_EVICTION_BATCH_MULTIPLIER = "evictionBatchMultiplier"
 export const DEFAULT_EVICTION_BATCH_MULTIPLIER = 1
+export const OPTION_SUMMARIZE_EVICTED_OUTPUTS = "summarizeEvictedOutputs"
+export const DEFAULT_SUMMARIZE_EVICTED_OUTPUTS = false
+export const OPTION_SUMMARY_TOKEN_BUDGET = "summaryTokenBudget"
+export const DEFAULT_SUMMARY_TOKEN_BUDGET = 256
 
 // Shared by both entry modules so their registrations never drift.
 export const PLUGIN_ID = "context-manager"

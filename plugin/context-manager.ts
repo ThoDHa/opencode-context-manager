@@ -1,18 +1,21 @@
 import { randomUUID } from "node:crypto"
-import type { Plugin, PluginModule } from "@opencode-ai/plugin"
+import type { Plugin, PluginInput, PluginModule } from "@opencode-ai/plugin"
 import { PLUGIN_ID } from "./schema.ts"
 
 import { chatParamsHookBody, type ChatParamsModel, type ContextLimitEntry } from "./context-limits.ts"
 import type { MessageBundle } from "./messages.ts"
 import { resolveOptions, type ContextManagerOptions } from "./options.ts"
-import { FALLBACK_SESSION_KEY, sessionKeyFromContext, touchMapEntry } from "./session-maps.ts"
+import { FALLBACK_SESSION_KEY, rememberSessionValue, sessionIDFromContext, sessionKeyFromContext, touchMapEntry, trimMapToBound } from "./session-maps.ts"
 import { HINT_LINE_PREFIX, orderedRenderedSubjectsOf, RECALL_TOOL_NAME, SUBJECT_SEPARATOR } from "./vocabulary.ts"
 import { rememberError, type MetricsHydration, type MetricsStore, type PersistedTotals, type SessionMetrics } from "./state.ts"
 import { appendHygieneCopy, migrateLegacyDefaultPaths, newestPersistedTotalsOf, PRUNE_SCAN_NEVER, type PruneThrottle } from "./persistence.ts"
-import type { PageStoreBySession, PageStoreGuard, SessionPageStore } from "./page-store.ts"
+import { pageKeyOf, recordPageStoreSummaryLines } from "./page-store.ts"
+import type { PageStoreBySession, PageStoreGuard, PageSummaryLookup, PageSummaryRecord, SessionPageStore } from "./page-store.ts"
 import { stripTerminalNoiseFrom, type HygieneCadenceBySession } from "./hygiene.ts"
 import { deliverHint, type HintMembershipBySession } from "./hints.ts"
-import { DESCRIBE_TOOL_DESCRIPTION, DESCRIBE_TOOL_NAME, executeReadEvicted, executeStatsTool, guardTool, RECALL_ARG_NAME, RECALL_ARG_SCHEMA, RECALL_PROBE_ARG_NAME, RECALL_PROBE_ARG_SCHEMA, RECALL_TOOL_DESCRIPTION } from "./tools.ts"
+import { DEFAULT_SUMMARY_MAP_LIMIT, createSummaryCompressor } from "./summaries.ts"
+import type { SummaryClient, SummaryStoreLine } from "./summaries.ts"
+import { DESCRIBE_TOOL_DESCRIPTION, DESCRIBE_TOOL_NAME, executeReadEvicted, executeStatsTool, guardTool, RECALL_TOOL_ARGS, RECALL_TOOL_DESCRIPTION } from "./tools.ts"
 import { transformHookBody, type TransformHookDeps } from "./pipeline.ts"
 
 export { ADVISORY_BAND_RATIO_DEFAULT, DEFAULT_INGESTION_HYGIENE_ROTATION_MAX_BYTES, DEFAULT_METRICS_ROTATION_MAX_BYTES, DEFAULT_PAGE_STORE_ROTATION_MAX_BYTES } from "./options.ts"
@@ -63,7 +66,86 @@ const compactionContextFor = (metricsEntry: SessionMetrics | undefined, pageStor
   return context
 }
 
-const server = (async (_input, rawOptions) => {
+// The side session's tools-off map: sent on every side prompt so the
+// summarizing model never holds the host's tool surface. The LRU-60
+// spike's Q7 probe measured the map both accepted and effective; the
+// names are the host's standard tool set.
+const SIDE_SESSION_TOOLS_OFF: Record<string, boolean> = {
+  bash: false,
+  edit: false,
+  write: false,
+  read: false,
+  grep: false,
+  glob: false,
+  list: false,
+  patch: false,
+  todowrite: false,
+  task: false,
+  webfetch: false,
+}
+
+// A loosely typed host error payload: the SDK's failure result carries a
+// generic error object whose specific reason, when present, sits at
+// .data.message (the LRU-60 spike's Q5 shape).
+const summaryErrorTextOf = (error: unknown): string => {
+  if (error instanceof Error) return error.message
+  const fields = typeof error === "object" && error !== null ? (error as Record<string, unknown>) : {}
+  const data = fields["data"]
+  const message = typeof data === "object" && data !== null ? (data as Record<string, unknown>)["message"] : undefined
+  return typeof message === "string" ? message : String(error)
+}
+
+// The entry's host seam: adapts the host client's session namespace onto
+// the SummaryClient contract (create, tools-off, prompt, readback,
+// delete). Tools-off rides the prompt body (the SDK session surface has
+// no tools switch of its own), so disableTools is a no-op and every side
+// prompt carries the full off map. Every created id joins the registry so
+// the transform hook can stand down for the side sessions, and leaves it
+// only on a settled delete, so a session whose delete failed stays
+// guarded. A fault in any touch throws into the compressor's failure
+// taxonomy; nothing here blocks or escapes on its own.
+const hostSummaryClientOf = (client: PluginInput["client"], sideSessionIds: Set<string>): SummaryClient => ({
+  createSession: async (title) => {
+    const result = await client.session.create({ body: { title } })
+    const id = result.data?.id
+    if (typeof id !== "string" || id.length === 0) throw new Error("the side-session create returned no session id")
+    sideSessionIds.add(id)
+    return id
+  },
+  disableTools: async () => {},
+  sendPrompt: async (sessionId, prompt) => {
+    const result = await client.session.prompt({
+      path: { id: sessionId },
+      body: { parts: [{ type: "text", text: prompt }], tools: SIDE_SESSION_TOOLS_OFF },
+    })
+    if (result.data === undefined) return { ok: false, error: summaryErrorTextOf(result.error) }
+    return { ok: true }
+  },
+  readMessages: async (sessionId) => {
+    const result = await client.session.messages({ path: { id: sessionId } })
+    const rows = result.data
+    if (rows === undefined) throw new Error("the side-session readback returned no rows")
+    return rows.map((row) => {
+      const { info } = row
+      // Model ids ride assistant messages; the compressor's model reader
+      // only ever looks at the last assistant row, so other rows carry
+      // neither.
+      const modelID = info.role === "assistant" ? info.modelID : undefined
+      const providerID = info.role === "assistant" ? info.providerID : undefined
+      return {
+        info: { role: info.role, modelID, providerID },
+        parts: row.parts.map((part) => ({ type: part.type, text: part.type === "text" ? part.text : undefined })),
+      }
+    })
+  },
+  deleteSession: async (sessionId) => {
+    const result = await client.session.delete({ path: { id: sessionId } })
+    if (result.data === undefined) throw new Error("the side-session delete failed")
+    sideSessionIds.delete(sessionId)
+  },
+})
+
+const server = (async (pluginInput, rawOptions) => {
   const raw = (rawOptions ?? {}) as ContextManagerOptions
   await migrateLegacyDefaultPaths(raw)
   const options = resolveOptions(raw)
@@ -80,6 +162,56 @@ const server = (async (_input, rawOptions) => {
   const pageStoreGuard: PageStoreGuard = { newerSchemaObserved: false }
   const persistedTotalsForSession = (sessionKey: string): Promise<PersistedTotals | undefined> =>
     newestPersistedTotalsOf(options, sessionKey)
+  // The compression-on-evict side path: built only when the gate is on
+  // AND the host provided a client. Every other start leaves the plugin
+  // byte-identical to the pre-compression build: no sink reaches the
+  // walk, no side session is created, and recall consults an empty map.
+  const sideSessionIds = new Set<string>()
+  const summariesBySessionAndKey = new Map<string, Map<string, PageSummaryRecord>>()
+  const summarySink = async (line: SummaryStoreLine): Promise<void> => {
+    const record: PageSummaryRecord = {
+      tool: line.tool,
+      subject: line.subject,
+      msgIndex: line.msgIndex,
+      partIndex: line.partIndex,
+      ...(line.stashSlot === undefined ? {} : { stashSlot: line.stashSlot }),
+      summary: line.summary,
+      summaryModel: line.summaryModel,
+      summaryTokens: line.summaryTokens,
+    }
+    // The consult map's write side, session-then-key exactly like the
+    // store merge: the line's own session scopes it, so a summary never
+    // serves another session's page at the same key.
+    const touch = touchMapEntry(summariesBySessionAndKey, line.session)
+    const byPageKey = touch ?? new Map<string, PageSummaryRecord>()
+    rememberSessionValue(
+      byPageKey,
+      pageKeyOf(record.tool, record.subject, record.msgIndex, record.partIndex, record.stashSlot),
+      record,
+      DEFAULT_SUMMARY_MAP_LIMIT,
+    )
+    summariesBySessionAndKey.set(line.session, byPageKey)
+    trimMapToBound(summariesBySessionAndKey, options.stashSessions)
+    // The store line rides the page writer's rotation, downgrade-refusal,
+    // and diagnostic machinery; a failed write is a session diagnostic,
+    // never a thrown error, so the compressor's drain never wedges here.
+    await recordPageStoreSummaryLines(options, metricsBySession, line.session, [record], pageStoreGuard)
+  }
+  const summaryCompressor =
+    options.summarizeEvictedOutputs && pluginInput?.client !== undefined
+      ? createSummaryCompressor({
+          client: hostSummaryClientOf(pluginInput.client, sideSessionIds),
+          sink: summarySink,
+          budgetTokens: options.summaryTokenBudget,
+        })
+      : undefined
+  // The recall-side consult seam: scoped by the writing session exactly
+  // as the store merge is, so a summary serves only a page its own
+  // session wrote and an unscopable session never consults.
+  const summaryLookup: PageSummaryLookup = (session, tool, subject, msgIndex, partIndex, stashSlot) => {
+    if (session === undefined) return undefined
+    return summariesBySessionAndKey.get(session)?.get(pageKeyOf(tool, subject, msgIndex, partIndex, stashSlot))
+  }
   // Hoisted per plugin instance: every run passes the same deps object to
   // the extracted transform body instead of rebuilding the literal per run.
   const transformHookDeps: TransformHookDeps = {
@@ -96,6 +228,7 @@ const server = (async (_input, rawOptions) => {
     pluginSession,
     pageStoreGuard,
     options,
+    summaryCompressor,
   }
 
   // Workaround: recall and describe are registered as plain
@@ -111,7 +244,7 @@ const server = (async (_input, rawOptions) => {
   // { type: "string" } schema below is sufficient. If this file ever ships
   // somewhere @opencode-ai/plugin resolves, switch back to tool().
   const recallTool = async (args: unknown, toolContext: unknown): Promise<string> =>
-    executeReadEvicted(pageStoreBySession, metricsBySession, metricsHydrationBySession, persistedTotalsForSession, options.metricsSessions, options, args, toolContext, pageStoreGuard)
+    executeReadEvicted(pageStoreBySession, metricsBySession, metricsHydrationBySession, persistedTotalsForSession, options.metricsSessions, options, args, toolContext, pageStoreGuard, summaryLookup)
 
   const describeTool = async (_args: unknown, toolContext: unknown): Promise<string> =>
     executeStatsTool({ options, limits: contextLimits, modelKeys: modelKeyBySession, pageStores: pageStoreBySession, metrics: metricsBySession }, toolContext)
@@ -128,6 +261,12 @@ const server = (async (_input, rawOptions) => {
     "experimental.chat.messages.transform": async (_input: unknown, output: { messages: MessageBundle[] }) => {
       const messages = output.messages
       if (!Array.isArray(messages) || messages.length === 0) return
+      // Side-session stand-down: a side session's own model call re-enters
+      // this hook, and returning identity output is the recursion guard
+      // the LRU-60 spike validated. Ids leave the registry only on a
+      // settled delete, so a session whose delete failed stays guarded.
+      const hookSessionID = sessionIDFromContext(messages[0]?.info)
+      if (hookSessionID !== undefined && sideSessionIds.has(hookSessionID)) return
       // Resolved inside the try: a hostile messages[0].info accessor is
       // itself a fault on the highest-likelihood path and must hit the
       // boundary, not escape ahead of it. The fallback key names the
@@ -212,7 +351,7 @@ const server = (async (_input, rawOptions) => {
     tool: {
       [RECALL_TOOL_NAME]: {
         description: RECALL_TOOL_DESCRIPTION,
-        args: { [RECALL_ARG_NAME]: RECALL_ARG_SCHEMA, [RECALL_PROBE_ARG_NAME]: RECALL_PROBE_ARG_SCHEMA },
+        args: RECALL_TOOL_ARGS,
         execute: guardTool(recallTool),
       },
       [DESCRIBE_TOOL_NAME]: {
