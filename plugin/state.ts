@@ -15,7 +15,6 @@ const DEFAULT_REMEMBERED_DEDUP_PAIRS = 4096
 // fault-tracked for the entry's lifetime.
 export const DEFAULT_REMEMBERED_FAULT_SUBJECTS = 256
 
-
 export type EvictionResult = {
   hotSubjects: HotSubject[]
   appearances: ToolAppearance[]

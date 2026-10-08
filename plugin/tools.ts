@@ -11,13 +11,13 @@ import { JSON_INDENT_SPACES, RECALL_TOOL_NAME, SUBJECT_SEPARATOR } from "./vocab
 
 export const RECALL_ARG_NAME = "subject"
 export const RECALL_PROBE_ARG_NAME = "countsOnly"
-export const RECALL_PROBE_ARG_SCHEMA_TYPE = "boolean"
+const RECALL_PROBE_ARG_SCHEMA_TYPE = "boolean"
 const RECALL_PROBE_ARG_DESCRIPTION =
   "Set true to price the reload before paying for it: match counts return instead of any content and nothing is counted"
 export const RECALL_TOOL_DESCRIPTION =
   "Return the full original content of anything the Context Manager evicted and stored in the page store: a tool call output or a fenced code block from an old user message. Pass the subject exactly as it appears in the eviction notice. Pass countsOnly true to price the reload first: a counts-only summary (match counts, newest-match bytes, attachments-present flag) returns instead of any content, with no counter or fault side effects."
 const RECALL_ARG_DESCRIPTION = "The subject exactly as named in the eviction notice"
-export const RECALL_ARG_SCHEMA_TYPE = "string"
+const RECALL_ARG_SCHEMA_TYPE = "string"
 export const RECALL_ARG_SCHEMA: Record<string, string> = {
   type: RECALL_ARG_SCHEMA_TYPE,
   description: RECALL_ARG_DESCRIPTION,
@@ -65,15 +65,10 @@ const OMISSIONS_TOOL_EVICTIONS_FIELD = "toolEvictions"
 const OMISSIONS_REASONING_PARTS_FIELD = "reasoningParts"
 const OMISSIONS_FENCE_BLOCKS_FIELD = "fenceBlocks"
 const OMISSIONS_RELOAD_TOOL_FIELD = "reloadTool"
-export const OMISSIONS_LINE_LEAD = "standing omissions: "
 const RETENTION_REPORT_KEY = "retention"
 const RETENTION_POOL_FIELD = "pool"
 const RETENTION_REASONS_FIELD = "reasons"
 const RETENTION_FAULT_SHIFT_FIELD = "faultShieldedShiftMessages"
-export const OMISSIONS_TOOL_OUTPUTS_LABEL = "tool outputs"
-export const OMISSIONS_REASONING_BLOCKS_LABEL = "reasoning blocks"
-export const OMISSIONS_FENCED_BLOCKS_LABEL = "fenced blocks"
-export const OMISSIONS_RELOAD_LEAD = "; reload via "
 const STASH_ATTACHMENTS_LEAD = "attachments evicted with this output"
 const STASH_ATTACHMENT_DROPPED_TAIL = "payloads were dropped during eviction; re-run the tool to regenerate them"
 const UNKNOWN_ATTACHMENT_MIME_LABEL = "unknown mime"
