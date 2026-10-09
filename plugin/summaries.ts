@@ -97,6 +97,20 @@ export type SummaryCounters = {
   lastError: string | undefined
 }
 
+// One per-session counter event, reported by the drain as it happens:
+// exactly one of the three counts is non-zero, and the failure fields
+// ride only the failed event (the message is the taxonomy's formatted
+// `${kind}: ${detail}` string).
+export type SummaryCounterDelta = {
+  queued: number
+  written: number
+  failed: number
+  failureKind?: SummaryFailureKind
+  failureMessage?: string
+}
+
+export type SummaryCounterSink = (sessionKey: string, delta: SummaryCounterDelta) => void
+
 export type SummaryQueueItem = { sessionKey: string; page: PageEntry }
 
 export type SummaryCompressorOptions = {
@@ -108,6 +122,7 @@ export type SummaryCompressorOptions = {
   queueDepthCap?: number
   mapLimit?: number
   sessionLimit?: number
+  recordCounters?: SummaryCounterSink
 }
 
 export type SummaryCompressor = {
@@ -255,10 +270,23 @@ export const createSummaryCompressor = (options: SummaryCompressorOptions): Summ
     )
   }
 
-  const recordFailure = (kind: SummaryFailureKind, detail: string): void => {
+  const counterSink = options.recordCounters
+
+  // Outside the failure taxonomy on purpose: a throwing sink would
+  // otherwise double-count through the exception path, so its faults are
+  // absorbed here and the drain never learns of them.
+  const recordCounters = (sessionKey: string, delta: SummaryCounterDelta): void => {
+    if (counterSink === undefined) return
+    try {
+      counterSink(sessionKey, delta)
+    } catch {}
+  }
+
+  const recordFailure = (sessionKey: string, kind: SummaryFailureKind, detail: string): void => {
     failures += 1
     lastFailureKind = kind
     lastError = `${kind}: ${detail}`
+    recordCounters(sessionKey, { queued: 0, written: 0, failed: 1, failureKind: kind, failureMessage: lastError })
   }
 
   const buildStoreLine = (item: SummaryQueueItem, summary: string, summaryModel: string): SummaryStoreLine => ({
@@ -281,14 +309,14 @@ export const createSummaryCompressor = (options: SummaryCompressorOptions): Summ
   // name riding the message), the settled outcome carries the value the
   // caller validates further. A host call that never settles therefore
   // classifies instead of wedging the serial drain.
-  const settleInTime = async <T>(call: Promise<T>, phase: string): Promise<SettledOutcome<T> | undefined> => {
+  const settleInTime = async <T>(sessionKey: string, call: Promise<T>, phase: string): Promise<SettledOutcome<T> | undefined> => {
     const timed = await withReadbackTimeout(call, readbackTimeoutMs)
     if (timed.kind === "expired") {
-      recordFailure("readback-timeout", `the side-session ${phase} did not settle within ${readbackTimeoutMs}ms`)
+      recordFailure(sessionKey, "readback-timeout", `the side-session ${phase} did not settle within ${readbackTimeoutMs}ms`)
       return undefined
     }
     if (!timed.outcome.ok) {
-      recordFailure("exception", `the side-session ${phase} failed: ${messageOf(timed.outcome.error)}`)
+      recordFailure(sessionKey, "exception", `the side-session ${phase} failed: ${messageOf(timed.outcome.error)}`)
       return undefined
     }
     return timed.outcome
@@ -298,22 +326,22 @@ export const createSummaryCompressor = (options: SummaryCompressorOptions): Summ
   // error verdict, malformed on an empty or overlong readback text.
   const attemptOnce = async (sessionId: string, userPrompt: string, item: SummaryQueueItem): Promise<"written" | "failed" | "malformed"> => {
     try {
-      const promptOutcome = await settleInTime(client.sendPrompt(sessionId, userPrompt), "prompt")
+      const promptOutcome = await settleInTime(item.sessionKey, client.sendPrompt(sessionId, userPrompt), "prompt")
       if (promptOutcome === undefined) return "failed"
       if (!promptOutcome.value.ok) {
-        recordFailure("session-error", promptOutcome.value.error)
+        recordFailure(item.sessionKey, "session-error", promptOutcome.value.error)
         return "failed"
       }
-      const readOutcome = await settleInTime(client.readMessages(sessionId), "readback")
+      const readOutcome = await settleInTime(item.sessionKey, client.readMessages(sessionId), "readback")
       if (readOutcome === undefined) return "failed"
       const text = lastAssistantTextOf(readOutcome.value)
       if (text.length === 0) {
-        recordFailure("malformed", "the side-session readback carried no assistant text")
+        recordFailure(item.sessionKey, "malformed", "the side-session readback carried no assistant text")
         return "malformed"
       }
       const toleranceLimit = budgetTokens * charsPerToken * SUMMARY_OVERLONG_TOLERANCE
       if (text.length > toleranceLimit) {
-        recordFailure("malformed", `the side-session readback of ${text.length} characters exceeds the tolerance bound of ${toleranceLimit}`)
+        recordFailure(item.sessionKey, "malformed", `the side-session readback of ${text.length} characters exceeds the tolerance bound of ${toleranceLimit}`)
         return "malformed"
       }
       const summary = truncateToBudget(text, budgetTokens, charsPerToken)
@@ -331,9 +359,10 @@ export const createSummaryCompressor = (options: SummaryCompressorOptions): Summ
         summaryTokens: line.summaryTokens,
       })
       written += 1
+      recordCounters(item.sessionKey, { queued: 0, written: 1, failed: 0 })
       return "written"
     } catch (error) {
-      recordFailure("exception", messageOf(error))
+      recordFailure(item.sessionKey, "exception", messageOf(error))
       return "failed"
     }
   }
@@ -351,26 +380,26 @@ export const createSummaryCompressor = (options: SummaryCompressorOptions): Summ
   // The delete path runs on both settle and failure: settleInTime records
   // a thrown or hung delete (exception or phase-named timeout), so the
   // fire-and-forget chain never escapes and the drain never wedges here.
-  const deleteQuietly = async (sessionId: string): Promise<void> => {
-    await settleInTime(client.deleteSession(sessionId), "delete")
+  const deleteQuietly = async (sessionId: string, sessionKey: string): Promise<void> => {
+    await settleInTime(sessionKey, client.deleteSession(sessionId), "delete")
   }
 
   // Create and tools-off ride the same deadline as every other touch: a
   // hung or thrown call classifies and ends the item (a session that was
   // created is still deleted), so the serial drain always advances.
   const processItem = async (item: SummaryQueueItem): Promise<void> => {
-    const created = await settleInTime(client.createSession(SUMMARY_SESSION_TITLE), "create")
+    const created = await settleInTime(item.sessionKey, client.createSession(SUMMARY_SESSION_TITLE), "create")
     if (created === undefined) return
     const sessionId = created.value
-    const disabled = await settleInTime(client.disableTools(sessionId), "tools-off")
+    const disabled = await settleInTime(item.sessionKey, client.disableTools(sessionId), "tools-off")
     if (disabled === undefined) {
-      await deleteQuietly(sessionId)
+      await deleteQuietly(sessionId, item.sessionKey)
       return
     }
     try {
       await runAttempts(sessionId, item)
     } finally {
-      await deleteQuietly(sessionId)
+      await deleteQuietly(sessionId, item.sessionKey)
     }
   }
 
@@ -393,7 +422,7 @@ export const createSummaryCompressor = (options: SummaryCompressorOptions): Summ
     while (outstandingCount() > queueDepthCap) {
       const dropped = queue.shift()
       if (dropped === undefined) break
-      recordFailure("queue-depth", `the queue depth cap of ${queueDepthCap} is exceeded; the oldest queued page is dropped`)
+      recordFailure(dropped.sessionKey, "queue-depth", `the queue depth cap of ${queueDepthCap} is exceeded; the oldest queued page is dropped`)
     }
   }
 
@@ -402,6 +431,7 @@ export const createSummaryCompressor = (options: SummaryCompressorOptions): Summ
   // enqueue racing the drain's tail cannot lose its wakeup.
   const enqueue = (item: SummaryQueueItem): void => {
     queued += 1
+    recordCounters(item.sessionKey, { queued: 1, written: 0, failed: 0 })
     queue.push(item)
     dropOverflow()
     if (drainPromise !== undefined) return

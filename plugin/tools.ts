@@ -407,6 +407,7 @@ export const executeStatsTool = (source: StatsSource, toolContext: unknown): str
     ...(metrics.hygieneWriteError === undefined ? {} : { hygieneWriteError: metrics.hygieneWriteError }),
     ...(metrics.pageStoreWriteError === undefined ? {} : { pageStoreWriteError: metrics.pageStoreWriteError }),
     ...(metrics.pageStoreSchemaError === undefined ? {} : { pageStoreSchemaError: metrics.pageStoreSchemaError }),
+    ...(metrics.summaryLastError === undefined ? {} : { summaryLastError: metrics.summaryLastError }),
   }
   return JSON.stringify(report, null, JSON_INDENT_SPACES)
 }

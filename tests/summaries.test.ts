@@ -14,6 +14,7 @@ import {
   lastAssistantTextOf,
   truncateToBudget,
   type SummaryClient,
+  type SummaryCounterDelta,
   type SummaryPromptOutcome,
   type SummaryReadbackRow,
   type SummaryStoreLine,
@@ -478,4 +479,66 @@ test("settled resolves immediately when nothing was ever queued", async () => {
   const compressor = createSummaryCompressor({ client: fake.client, sink })
   await compressor.settled()
   assert.equal(compressor.counters().queued, 0)
+})
+
+test("the counter sink receives the queued and written deltas for the page's session as the drain progresses", async () => {
+  const fake = createFakeClient()
+  const { sink } = collectLines()
+  const deltas: { sessionKey: string; delta: SummaryCounterDelta }[] = []
+  const compressor = createSummaryCompressor({
+    client: fake.client,
+    sink,
+    recordCounters: (sessionKey, delta) => deltas.push({ sessionKey, delta }),
+  })
+  compressor.enqueue({ sessionKey: TEST_SESSION_KEY, page: pageOf() })
+  await compressor.settled()
+  assert.deepEqual(deltas, [
+    { sessionKey: TEST_SESSION_KEY, delta: { queued: 1, written: 0, failed: 0 } },
+    { sessionKey: TEST_SESSION_KEY, delta: { queued: 0, written: 1, failed: 0 } },
+  ])
+})
+
+test("the counter sink receives the failure delta with the taxonomy kind and the formatted message", async () => {
+  const fake = createFakeClient({ promptScript: async () => ({ ok: false, error: "prompt quota exhausted" }) })
+  const { sink } = collectLines()
+  const deltas: { sessionKey: string; delta: SummaryCounterDelta }[] = []
+  const compressor = createSummaryCompressor({
+    client: fake.client,
+    sink,
+    recordCounters: (sessionKey, delta) => deltas.push({ sessionKey, delta }),
+  })
+  compressor.enqueue({ sessionKey: TEST_SESSION_KEY, page: pageOf() })
+  await compressor.settled()
+  assert.deepEqual(deltas, [
+    { sessionKey: TEST_SESSION_KEY, delta: { queued: 1, written: 0, failed: 0 } },
+    {
+      sessionKey: TEST_SESSION_KEY,
+      delta: { queued: 0, written: 0, failed: 1, failureKind: "session-error", failureMessage: "session-error: prompt quota exhausted" },
+    },
+  ])
+})
+
+test("a queue-depth drop reports the dropped page's session as a failure delta", async () => {
+  const firstPrompt = deferred<SummaryPromptOutcome>()
+  const fake = createFakeClient({ promptScript: (index) => (index === 0 ? firstPrompt.promise : Promise.resolve({ ok: true })) })
+  const { sink } = collectLines()
+  const failedSessions: string[] = []
+  const compressor = createSummaryCompressor({
+    client: fake.client,
+    sink,
+    queueDepthCap: 2,
+    recordCounters: (sessionKey, delta) => {
+      if (delta.failed > 0) failedSessions.push(sessionKey)
+    },
+  })
+  compressor.enqueue({ sessionKey: TEST_SESSION_KEY, page: pageOf({ msgIndex: 1 }) })
+  compressor.enqueue({ sessionKey: TEST_SESSION_KEY_B, page: pageOf({ msgIndex: 2 }) })
+  compressor.enqueue({ sessionKey: "ses_fixture_3", page: pageOf({ msgIndex: 3 }) })
+  // Resolved before the assert so a failing assertion cannot leave the
+  // parked prompt wedging the runner's exit. The first page sits in
+  // flight (dequeued synchronously by the kick), so the oldest QUEUED
+  // page, the second session's, is the drop.
+  firstPrompt.resolve({ ok: true })
+  await compressor.settled()
+  assert.deepEqual(failedSessions, [TEST_SESSION_KEY_B])
 })

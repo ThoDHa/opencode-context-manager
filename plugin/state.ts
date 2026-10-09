@@ -70,6 +70,9 @@ export type SessionMetrics = {
   faults: number
   fenceEvicted: number
   processedContextBytes: number
+  summariesQueued: number
+  summariesWritten: number
+  summaryFailures: number
   evictedSubjects: Subject[]
   faultScanThrough: number
   // Per-entry memory for the unique-event counters: content identities of
@@ -130,6 +133,11 @@ export type SessionMetrics = {
   stateWriteError?: string
   hygieneWriteError?: string
   pageStoreWriteError?: string
+  // Set when this session's summary side path recorded a failure: the
+  // failure taxonomy's kind and detail, surfaced through describe and
+  // cleared by the next successful write like the write-error peers;
+  // the counters themselves persist in the totals.
+  summaryLastError?: string
   // Set when this session observed a page-store line from a newer schema
   // version, or when an eviction ran while the instance guard held: the
   // store's writes and rotation are halted and describe explains why.

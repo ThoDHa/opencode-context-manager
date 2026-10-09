@@ -7,7 +7,7 @@ import type { MessageBundle } from "./messages.ts"
 import { resolveOptions, type ContextManagerOptions } from "./options.ts"
 import { FALLBACK_SESSION_KEY, sessionKeyFromContext, touchMapEntry } from "./session-maps.ts"
 import { HINT_LINE_PREFIX, orderedRenderedSubjectsOf, RECALL_TOOL_NAME, SUBJECT_SEPARATOR } from "./vocabulary.ts"
-import { rememberError, type MetricsHydration, type MetricsStore, type PersistedTotals, type SessionMetrics } from "./state.ts"
+import { rememberError, withSessionMetricsEntry, type MetricsHydration, type MetricsStore, type PersistedTotals, type SessionMetrics } from "./state.ts"
 import { appendHygieneCopy, migrateLegacyDefaultPaths, newestPersistedTotalsOf, PRUNE_SCAN_NEVER, type PruneThrottle } from "./persistence.ts"
 import { recordPageStoreSummaryLines } from "./page-store.ts"
 import type { PageStoreBySession, PageStoreGuard, PageSummaryLookup, PageSummaryRecord, SessionPageStore } from "./page-store.ts"
@@ -197,6 +197,23 @@ const server = (async (pluginInput, rawOptions) => {
           client: hostSummaryClientOf(pluginInput.client, sideSessionIds),
           sink: summarySink,
           budgetTokens: options.summaryTokenBudget,
+          // The map's session bound is the stash map's own bound, so the
+          // summary seats and the stash they serve age out together.
+          sessionLimit: options.stashSessions,
+          // The side path's counters accrue straight onto the session's
+          // metrics entry, so the totals block, describe, and the panel
+          // surface them through the shared schema with no second edit;
+          // a written delta clears the newest-failure diagnostic exactly
+          // like the write-error peers clear theirs on success.
+          recordCounters: (sessionKey, delta) => {
+            withSessionMetricsEntry(metricsBySession, sessionKey, options.metricsSessions, (entry) => {
+              entry.summariesQueued += delta.queued
+              entry.summariesWritten += delta.written
+              entry.summaryFailures += delta.failed
+              if (delta.failureMessage !== undefined) entry.summaryLastError = delta.failureMessage
+              else if (delta.written > 0) delete entry.summaryLastError
+            })
+          },
         })
       : undefined
   // The recall-side consult seam: the compressor's session-scoped map is

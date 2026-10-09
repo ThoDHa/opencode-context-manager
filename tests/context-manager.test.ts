@@ -11814,6 +11814,58 @@ test("a wired side-call failure keeps today's tombstone store line and full-serv
   }
 })
 
+test("a wired compression accrues the session summary counters into describe and the metrics log totals", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(metricsDir)
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const fake = createWiringFakeClient()
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, {
+      [OPTION_SUMMARIZE_EVICTED_OUTPUTS]: true,
+      metricsLog: true,
+      metricsPath,
+    })
+
+    await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+    await fake.settledAfter(1)
+    await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_REPLACEMENT_SUBJECT)
+    const lines = metricsLinesIn(metricsPath)
+    assert.ok(lines.length >= 2)
+    const newestTotals = lines[lines.length - 1].totals as Record<string, number>
+    assert.equal(newestTotals.summariesQueued, 2)
+    assert.equal(newestTotals.summariesWritten, 1)
+    assert.equal(newestTotals.summaryFailures, 0)
+    await fake.settledAfter(2)
+    const counters = countersOf(await readStats(hooks, SESSION_ID))
+    assert.equal(counters.summariesQueued, 2)
+    assert.equal(counters.summariesWritten, 2)
+    assert.equal(counters.summaryFailures, 0)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("a wired side-call failure accrues the failure counter and surfaces summaryLastError through describe", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient({ readTexts: ["", ""] })
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, { [OPTION_SUMMARIZE_EVICTED_OUTPUTS]: true })
+
+    await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+    await fake.settledAfter(1)
+
+    const stats = await readStats(hooks, SESSION_ID)
+    const counters = countersOf(stats)
+    assert.equal(counters.summariesQueued, 1)
+    assert.equal(counters.summariesWritten, 0)
+    assert.equal(counters.summaryFailures, COMPRESSION_MALFORMED_PROMPTS)
+    assert.match(String(stats.summaryLastError), /^malformed: /)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
 test("a summary written by session A serves a cross-session recall of A's page", async () => {
   const pagesDir = makeMetricsDir()
   try {

@@ -61,6 +61,9 @@ export const RAW_COUNTER_KEYS = Object.freeze([
   "faults",
   "fenceEvicted",
   "processedContextBytes",
+  "summariesQueued",
+  "summariesWritten",
+  "summaryFailures",
 ] as const)
 
 export type RawCounterKey = (typeof RAW_COUNTER_KEYS)[number]
