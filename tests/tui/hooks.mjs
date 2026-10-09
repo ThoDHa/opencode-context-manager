@@ -9,7 +9,7 @@ export const STUB_MODULE_URL = new URL("./opentui-stub.ts", import.meta.url).hre
 
 const require = createRequire(import.meta.url)
 
-// Workaround for solid-js 1.9.12 package exports: the bare "solid-js"
+// Workaround for solid-js 1.9.17 package exports: the bare "solid-js"
 // specifier resolves to dist/server.js under Node's implicit "node" export
 // condition, and the server build's createSignal/createRenderEffect are
 // no-ops, so signal-driven updates never fire. Expected behavior (browser
@@ -19,9 +19,11 @@ const require = createRequire(import.meta.url)
 // stops shadowing the client build behind the "node" condition.
 const SOLID_JS_CLIENT_URL = pathToFileURL(require.resolve("solid-js/dist/solid.js")).href
 
-// Mirrors the host transform (the @opentui/solid 0.5.14 solid-transform
-// recipe): babel-preset-solid with generate "universal" over the stub module,
-// plus the TypeScript preset for .tsx parsing.
+// Compiles with the pinned test toolchain (babel-preset-solid 1.9.16 with
+// generate "universal" over the stub module, plus the TypeScript preset for
+// .tsx parsing) against the solid-js 1.9.17 client build, following the
+// @opentui/solid 0.5.14 solid-transform recipe; this deliberately diverges
+// from the host's bundled solid-js 1.9.10 instead of mirroring it.
 export const compileTsxSource = (source, filename) => {
   // Both presets and @babel/core expose the preset/transform as their CJS
   // module.exports directly (verified against the pinned versions).
