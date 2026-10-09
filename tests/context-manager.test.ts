@@ -11768,6 +11768,40 @@ test("the transform lands the tombstone the page line and the run outcome before
   }
 })
 
+test("the metrics log line for the run lands before the side call settles", async () => {
+  const metricsDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(metricsDir)
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const fake = createWiringFakeClient({ holdPrompt: true })
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, {
+      [OPTION_SUMMARIZE_EVICTED_OUTPUTS]: true,
+      metricsLog: true,
+      metricsPath,
+    })
+
+    const bundle = await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+
+    assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+    await fake.whenPrompted(1)
+    const lines = metricsLinesIn(metricsPath)
+    assert.equal(lines.length, 1)
+    assert.equal(lines[0].session, SESSION_ID)
+    const evictedThisRun = lines[0].evictedThisRun as { subject: string }[]
+    assert.equal(evictedThisRun.length, 1)
+    assert.equal(evictedThisRun[0].subject, PAGE_STORE_EVICTED_SUBJECT)
+    const totals = lines[0].totals as Record<string, number>
+    assert.equal(totals.evictions, 1)
+
+    fake.releasePrompts()
+    await fake.settledAfter(1)
+    assert.equal(pageLinesIn(storePath).length, 2)
+    assert.equal(metricsLinesIn(metricsPath).length, 1)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
 test("gate off with a client present and gate on without a client stay byte-identical to today and fire nothing", async () => {
   const evictionLimit = contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS)
 
