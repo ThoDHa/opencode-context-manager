@@ -39,6 +39,7 @@ import {
   TOTAL_DATA_BLOCKS,
   validateDeepRotation,
   type Arm,
+  type ExperimentProfile,
 } from "../../../experiments/arms.ts"
 import {
   buildSolveArgv,
@@ -1357,7 +1358,10 @@ test("parseMetricsLog carries the summariesWritten counter and the session model
   assert.equal(events[3]!.contextLimitModelKey, null, "a null model key parses as none")
 })
 
-const corroborationCensus = (metricsEvents: readonly MetricsLineOptions[]): CensusRow[] =>
+// The shared corroboration-census geometry: OFF / ON-FULL / LEVER at
+// minutes 15 / 25 / 35 under a lever profile, fed raw metrics-log text so
+// each caller's line shapes ride the same blocks.
+const corroborationCensusFromMetrics = (metricsText: string, profile: ExperimentProfile): CensusRow[] =>
   buildCensus({
     flipLogText: flipLogText(["OFF", "ON-FULL", "LEVER"]),
     spawnLogText: spawnLogText([
@@ -1372,15 +1376,18 @@ const corroborationCensus = (metricsEvents: readonly MetricsLineOptions[]): Cens
       { label: "2", passed: 57, failed: 0, minute: 26 },
       { label: "3", passed: 57, failed: 0, minute: 36 },
     ]),
-    metricsLogText: metricsLogText(metricsEvents),
+    metricsLogText: metricsText,
     turns: turnsOf(new Map([
       ["ses_cal", [turn(6)]],
       ["ses_off", [turn(16)]],
       ["ses_full", [turn(26)]],
       ["ses_lever", [turn(36)]],
     ])),
-    profile: LEVER1_PROFILE,
+    profile,
   })
+
+const corroborationCensus = (metricsEvents: readonly MetricsLineOptions[]): CensusRow[] =>
+  corroborationCensusFromMetrics(metricsLogText(metricsEvents), LEVER1_PROFILE)
 
 test("the lever corroboration demands eviction-bearing metrics on ON arms and silence on OFF", () => {
   const healthy = corroborationCensus([
@@ -1442,33 +1449,13 @@ const summaryMetricsLine = (options: { minute: number; sessionId: string; evicti
     ...(options.modelKey === undefined ? {} : { contextLimitModelKey: options.modelKey }),
   })
 
-// The corroborationCensus geometry (OFF / ON-FULL / LEVER at minutes
-// 15 / 25 / 35) under the lever5 profile, fed raw metrics-log lines so the
-// summaries-bearing shapes above can ride it.
+// The corroboration geometry under the lever5 profile, fed the
+// summaries-bearing line shapes above.
 const lever5CensusWithLines = (lines: readonly string[]): CensusRow[] =>
-  buildCensus({
-    flipLogText: flipLogText(["OFF", "ON-FULL", "LEVER"]),
-    spawnLogText: spawnLogText([
-      { label: "cal", arm: CALIBRATION_ARM, sessionId: "ses_cal", exit: 0, minute: 5 },
-      { label: "1", arm: "OFF", sessionId: "ses_off", exit: 0, minute: 15 },
-      { label: "2", arm: "ON-FULL", sessionId: "ses_full", exit: 0, minute: 25 },
-      { label: "3", arm: "LEVER", sessionId: "ses_lever", exit: 0, minute: 35 },
-    ]),
-    workLogText: workLogText([
-      { label: "cal", passed: 57, failed: 0, minute: 6 },
-      { label: "1", passed: 57, failed: 0, minute: 16 },
-      { label: "2", passed: 57, failed: 0, minute: 26 },
-      { label: "3", passed: 57, failed: 0, minute: 36 },
-    ]),
-    metricsLogText: lines.join("\n") + "\n",
-    turns: turnsOf(new Map([
-      ["ses_cal", [turn(6)]],
-      ["ses_off", [turn(16)]],
-      ["ses_full", [turn(26)]],
-      ["ses_lever", [turn(36)]],
-    ])),
-    profile: LEVER5_PROFILE,
-  })
+  corroborationCensusFromMetrics(
+    lines.join("\n") + "\n",
+    LEVER5_PROFILE,
+  )
 
 test("the census row carries the block's summaries figure and the session model keys its lines carry", () => {
   const census = lever5CensusWithLines([

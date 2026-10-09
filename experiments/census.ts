@@ -57,9 +57,9 @@ export type MetricsEvent = {
 // as zero.
 const summariesWrittenOf = (record: Record<string, unknown>): number => {
   const totals = record["totals"]
-  if (totals === null || typeof totals !== "object" || Array.isArray(totals)) return 0
-  const written = (totals as Record<string, unknown>)["summariesWritten"]
-  return typeof written === "number" && Number.isFinite(written) ? written : 0
+  return totals !== null && typeof totals === "object" && !Array.isArray(totals)
+    ? numberOrZero((totals as Record<string, unknown>)["summariesWritten"])
+    : 0
 }
 
 // The session model key a metrics line stamps from the plugin's chat.params
