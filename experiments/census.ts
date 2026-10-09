@@ -48,6 +48,27 @@ export type MetricsEvent = {
   sessionId: string
   generation: MetricsGeneration
   evictedThisRun: boolean
+  summariesWritten: number
+  contextLimitModelKey: string | null
+}
+
+// The summaries figure a metrics line's cumulative totals block carries; a
+// line without a usable block (generation-1 shapes, a corrupt entry) parses
+// as zero.
+const summariesWrittenOf = (record: Record<string, unknown>): number => {
+  const totals = record["totals"]
+  if (totals === null || typeof totals !== "object" || Array.isArray(totals)) return 0
+  const written = (totals as Record<string, unknown>)["summariesWritten"]
+  return typeof written === "number" && Number.isFinite(written) ? written : 0
+}
+
+// The session model key a metrics line stamps from the plugin's chat.params
+// capture (null when the budget came from a source without a model
+// identity); this is the model the compression side sessions ride, per the
+// flagship's session-model decision.
+const contextLimitModelKeyOf = (record: Record<string, unknown>): string | null => {
+  const key = record["contextLimitModelKey"]
+  return typeof key === "string" && key.length > 0 ? key : null
 }
 
 /**
@@ -55,7 +76,10 @@ export type MetricsEvent = {
  * parse or do not carry a recognized generation (a truncated trailing write
  * must not poison the census). Each event records whether its line's
  * `evictedThisRun` array is nonempty (real evictions happened this run),
- * the lever profile's full-mode corroboration signal.
+ * the lever profile's full-mode corroboration signal; the line's cumulative
+ * `summariesWritten` counter, the lever5 profile's compression corroboration
+ * signal; and the line's `contextLimitModelKey`, the session model identity
+ * the readout records beside the summaries figures.
  *
  * @param metricsLogText the raw metrics-log content
  * @returns the recognized events in log order
@@ -68,7 +92,7 @@ export const parseMetricsLog = (metricsLogText: string): MetricsEvent[] => {
       const parsed: unknown = JSON.parse(line)
       const generation = classifyMetricsGeneration(parsed)
       if (generation === null) continue
-      const record = parsed as { ts: string; session: string; evictedThisRun?: unknown }
+      const record = parsed as { ts: string; session: string; evictedThisRun?: unknown; totals?: unknown; contextLimitModelKey?: unknown }
       const timestampMs = Date.parse(record.ts)
       events.push({
         timestamp: record.ts,
@@ -76,6 +100,8 @@ export const parseMetricsLog = (metricsLogText: string): MetricsEvent[] => {
         sessionId: record.session,
         generation,
         evictedThisRun: Array.isArray(record.evictedThisRun) && record.evictedThisRun.length > 0,
+        summariesWritten: summariesWrittenOf(record),
+        contextLimitModelKey: contextLimitModelKeyOf(record),
       })
     } catch {
       // Unparseable lines (including a truncated trailing write) are dropped.
@@ -210,6 +236,8 @@ export type CensusRow = {
   turnsError: string | null
   metricsEvents: MetricsEvent[]
   metricsGenerations: { 1: number; 2: number }
+  summariesWritten: number
+  contextLimitModelKeys: string[]
   windowStartMs: number | null
   windowEndMs: number | null
   exclusion: CensusExclusion | null
@@ -307,6 +335,15 @@ export const buildCensus = (inputs: CensusInputs): CensusRow[] => {
     )
     const metricsGenerations: { 1: number; 2: number } = { 1: 0, 2: 0 }
     for (const event of metricsEvents) metricsGenerations[event.generation] += 1
+    // The totals are cumulative per session, so the newest count among the
+    // block's lines is its figure; the model keys collect distinctly in log
+    // order so mid-block model drift surfaces as multiple entries.
+    const summariesWritten = metricsEvents.reduce((latest, event) => Math.max(latest, event.summariesWritten), 0)
+    const contextLimitModelKeys: string[] = []
+    for (const event of metricsEvents) {
+      const key = event.contextLimitModelKey
+      if (key !== null && !contextLimitModelKeys.includes(key)) contextLimitModelKeys.push(key)
+    }
 
     let exclusion: CensusExclusion | null = null
     if (spawn.blockLabel === CALIBRATION_BLOCK_LABEL) {
@@ -350,6 +387,8 @@ export const buildCensus = (inputs: CensusInputs): CensusRow[] => {
       turnsError,
       metricsEvents,
       metricsGenerations,
+      summariesWritten,
+      contextLimitModelKeys,
       windowStartMs,
       windowEndMs,
       exclusion,
@@ -381,6 +420,34 @@ export const uncorroboratedFullModeBlocks = (rows: readonly CensusRow[]): string
       continue
     }
     if (!row.metricsEvents.some((event) => event.evictedThisRun)) failures.push(row.blockLabel)
+  }
+  return failures
+}
+
+/**
+ * The compression-arm metrics corroboration (the lever5 profile's
+ * summariesWritten gate): every LEVER data block must carry at least one
+ * metrics event whose cumulative totals record `summariesWritten` above
+ * zero (the compression side path actually wrote summaries during the
+ * block), so a silently disengaged compression arm cannot pass for
+ * engagement. ON-FULL blocks are never judged: the compression gate is off
+ * in that arm by the profile's own seed, so a zero there is the designed
+ * behavior, and an OFF block carrying any metrics line is already the
+ * full-mode gate's leak. The calibration block is exempt (it prices the
+ * series and never counts as data); every other exclusion class still gets
+ * judged, because the corroboration is an apparatus-integrity check, not an
+ * endpoint gate. Applied by the readout only under a profile whose
+ * `corroboratesSummariesWritten` is true.
+ *
+ * @param rows the census rows of a summaries-corroborated series
+ * @returns the labels of blocks failing the corroboration
+ */
+export const uncorroboratedSummaryBlocks = (rows: readonly CensusRow[]): string[] => {
+  const failures: string[] = []
+  for (const row of rows) {
+    if (row.exclusion === "calibration") continue
+    if (row.arm !== "LEVER") continue
+    if (!row.metricsEvents.some((event) => event.summariesWritten > 0)) failures.push(row.blockLabel)
   }
   return failures
 }

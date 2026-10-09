@@ -60,7 +60,7 @@ import {
   SPAWN_TIMEOUT_MS,
   TIMEOUT_EXIT_STATUS,
 } from "./spawn.ts"
-import { buildCensus, METRICS_LOG_BASENAME, openTurnDatabase, uncorroboratedFullModeBlocks } from "./census.ts"
+import { buildCensus, METRICS_LOG_BASENAME, openTurnDatabase, uncorroboratedFullModeBlocks, uncorroboratedSummaryBlocks } from "./census.ts"
 import {
   computeCredits,
   computeDepthBucketTable,
@@ -668,9 +668,10 @@ export const acquireLockOrRefuse = (config: CliConfig, argv: readonly string[], 
  * Renders and deposits the readout: the census over the live logs and DB,
  * the per-arm endpoints under the config's experiment profile over the
  * gate-cleared population, the per-turn analysis views (the frozen-rule
- * instruments), the full-mode metrics corroboration (as caveats when it
- * fails), and the Report File Template shape, written under the experiment
- * home as `abx-readout.md`.
+ * instruments), the full-mode metrics corroboration and (under the lever5
+ * profile) the compression-arm summariesWritten corroboration (as caveats
+ * when they fail), and the Report File Template shape, written under the
+ * experiment home as `abx-readout.md`.
  *
  * @param config the resolved CLI configuration
  * @returns the deposit path
@@ -712,6 +713,12 @@ export const runReadout = (config: CliConfig): string => {
     const uncorroborated = uncorroboratedFullModeBlocks(census)
     if (uncorroborated.length > 0) {
       caveats.push(`full-mode metrics corroboration failed for blocks: ${uncorroborated.join(", ")}`)
+    }
+  }
+  if (config.profile.corroboratesSummariesWritten) {
+    const uncorroboratedSummaries = uncorroboratedSummaryBlocks(census)
+    if (uncorroboratedSummaries.length > 0) {
+      caveats.push(`summariesWritten corroboration failed for blocks: ${uncorroboratedSummaries.join(", ")}`)
     }
   }
   const inputs: ReadoutInputs = {

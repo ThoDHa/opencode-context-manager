@@ -58,6 +58,7 @@ import {
   parseMetricsLog,
   parseWorkLog,
   uncorroboratedFullModeBlocks,
+  uncorroboratedSummaryBlocks,
   type CensusRow,
   type TurnRow,
   type TurnSource,
@@ -375,6 +376,8 @@ const endpointRow = (arm: Arm, credits: number, turnCount: number, blockNumber: 
   turnsError: null,
   metricsEvents: [],
   metricsGenerations: { 1: 0, 2: 0 },
+  summariesWritten: 0,
+  contextLimitModelKeys: [],
   windowStartMs: null,
   windowEndMs: null,
   exclusion: null,
@@ -1014,6 +1017,8 @@ test("the readout renders the Report File Template shape and deposits the file",
       turnsError: null,
       metricsEvents: [],
       metricsGenerations: { 1: 3, 2: 0 },
+      summariesWritten: 0,
+      contextLimitModelKeys: [],
       windowStartMs: null,
       windowEndMs: null,
       exclusion: "calibration",
@@ -1032,6 +1037,8 @@ test("the readout renders the Report File Template shape and deposits the file",
       turnsError: null,
       metricsEvents: [],
       metricsGenerations: { 1: 0, 2: 4 },
+      summariesWritten: 0,
+      contextLimitModelKeys: [],
       windowStartMs: null,
       windowEndMs: null,
       exclusion: null,
@@ -1330,6 +1337,26 @@ test("parseMetricsLog records whether a metrics line carries real evictions", ()
   assert.equal(events[1]!.evictedThisRun, false)
 })
 
+test("parseMetricsLog carries the summariesWritten counter and the session model key a line records", () => {
+  const events = parseMetricsLog(
+    [
+      JSON.stringify({ ts: at(1), session: "s1", evictedThisRun: [], totals: { evictions: 0, summariesWritten: 3 }, contextLimitModelKey: "glm/glm-5.3" }),
+      JSON.stringify({ ts: at(2), session: "s2", evictedThisRun: [] }),
+      JSON.stringify({ ts: at(3), session: "s3", evictedThisRun: [], totals: { summariesWritten: "3" }, contextLimitModelKey: "" }),
+      JSON.stringify({ ts: at(4), session: "s4", evictedThisRun: [], totals: { summariesWritten: null }, contextLimitModelKey: null }),
+    ].join("\n") + "\n",
+  )
+  assert.equal(events.length, 4)
+  assert.equal(events[0]!.summariesWritten, 3, "a line's totals.summariesWritten is the event's summaries figure")
+  assert.equal(events[0]!.contextLimitModelKey, "glm/glm-5.3", "a line's contextLimitModelKey is the event's session model key")
+  assert.equal(events[1]!.summariesWritten, 0, "a line without totals parses as zero summaries")
+  assert.equal(events[1]!.contextLimitModelKey, null, "a line without a model key parses as none")
+  assert.equal(events[2]!.summariesWritten, 0, "a non-numeric summariesWritten parses as zero")
+  assert.equal(events[2]!.contextLimitModelKey, null, "a blank model key parses as none")
+  assert.equal(events[3]!.summariesWritten, 0, "a null summariesWritten parses as zero")
+  assert.equal(events[3]!.contextLimitModelKey, null, "a null model key parses as none")
+})
+
 const corroborationCensus = (metricsEvents: readonly MetricsLineOptions[]): CensusRow[] =>
   buildCensus({
     flipLogText: flipLogText(["OFF", "ON-FULL", "LEVER"]),
@@ -1389,6 +1416,104 @@ test("the corroboration flags every metrics-line leak class on an OFF block", ()
   assert.deepEqual(uncorroboratedFullModeBlocks(quietFullModeLeak), ["1"], "a quiet full-mode line on OFF is a leak")
 })
 
+// A metrics-log line as the producer writes it post-slice-4: generation 2,
+// an eviction-shaped entry per `evictions`, the cumulative totals block, and
+// the session model key the plugin stamps from the chat.params capture. The
+// fixture builder's MetricsLineOptions cannot carry the summaries fields and
+// sits outside this unit's territory, so the summaries-bearing lines are
+// built here.
+const summaryMetricsLine = (options: { minute: number; sessionId: string; evictions?: number; summariesWritten?: number; modelKey?: string }): string =>
+  JSON.stringify({
+    ts: at(options.minute),
+    session: options.sessionId,
+    modelContextTokens: 1000000,
+    estimatedTokens: 50000,
+    modelContextTokensSource: "model",
+    wouldEvictThisRun: 0,
+    wouldEvictBytesThisRun: 0,
+    evictedThisRun: Array.from({ length: options.evictions ?? 0 }, (_, index) => ({
+      tool: `tool-${index}`,
+      subject: `subject-${index}`,
+      bytes: 16,
+      attachmentBytes: 0,
+      messagesAgo: index + 1,
+    })),
+    totals: { evictions: 0, ...(options.summariesWritten === undefined ? {} : { summariesWritten: options.summariesWritten }) },
+    ...(options.modelKey === undefined ? {} : { contextLimitModelKey: options.modelKey }),
+  })
+
+// The corroborationCensus geometry (OFF / ON-FULL / LEVER at minutes
+// 15 / 25 / 35) under the lever5 profile, fed raw metrics-log lines so the
+// summaries-bearing shapes above can ride it.
+const lever5CensusWithLines = (lines: readonly string[]): CensusRow[] =>
+  buildCensus({
+    flipLogText: flipLogText(["OFF", "ON-FULL", "LEVER"]),
+    spawnLogText: spawnLogText([
+      { label: "cal", arm: CALIBRATION_ARM, sessionId: "ses_cal", exit: 0, minute: 5 },
+      { label: "1", arm: "OFF", sessionId: "ses_off", exit: 0, minute: 15 },
+      { label: "2", arm: "ON-FULL", sessionId: "ses_full", exit: 0, minute: 25 },
+      { label: "3", arm: "LEVER", sessionId: "ses_lever", exit: 0, minute: 35 },
+    ]),
+    workLogText: workLogText([
+      { label: "cal", passed: 57, failed: 0, minute: 6 },
+      { label: "1", passed: 57, failed: 0, minute: 16 },
+      { label: "2", passed: 57, failed: 0, minute: 26 },
+      { label: "3", passed: 57, failed: 0, minute: 36 },
+    ]),
+    metricsLogText: lines.join("\n") + "\n",
+    turns: turnsOf(new Map([
+      ["ses_cal", [turn(6)]],
+      ["ses_off", [turn(16)]],
+      ["ses_full", [turn(26)]],
+      ["ses_lever", [turn(36)]],
+    ])),
+    profile: LEVER5_PROFILE,
+  })
+
+test("the census row carries the block's summaries figure and the session model keys its lines carry", () => {
+  const census = lever5CensusWithLines([
+    summaryMetricsLine({ minute: 16, sessionId: "ses_off" }),
+    summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, summariesWritten: 2, modelKey: "glm/glm-5.3" }),
+    summaryMetricsLine({ minute: 37, sessionId: "ses_lever", summariesWritten: 5, modelKey: "glm/glm-5.3" }),
+  ])
+  const lever = census.find((row) => row.blockLabel === "3")!
+  assert.equal(lever.summariesWritten, 5, "the newest cumulative count among the block's lines is its summaries figure")
+  assert.deepEqual(lever.contextLimitModelKeys, ["glm/glm-5.3"], "the model key the block's lines carry surfaces on the row")
+  const off = census.find((row) => row.blockLabel === "1")!
+  assert.equal(off.summariesWritten, 0, "a block without summaries-bearing lines reports zero")
+  assert.deepEqual(off.contextLimitModelKeys, [], "a block without model-key-bearing lines reports none")
+  const drifted = lever5CensusWithLines([
+    summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, summariesWritten: 2, modelKey: "glm/glm-5.3" }),
+    summaryMetricsLine({ minute: 37, sessionId: "ses_lever", summariesWritten: 5, modelKey: "openai/gpt-5" }),
+  ])
+  assert.deepEqual(
+    drifted.find((row) => row.blockLabel === "3")!.contextLimitModelKeys,
+    ["glm/glm-5.3", "openai/gpt-5"],
+    "distinct model keys both surface so mid-block model drift is visible",
+  )
+})
+
+test("the summariesWritten corroboration demands summary-bearing metrics on LEVER blocks only", () => {
+  const healthy = lever5CensusWithLines([summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, summariesWritten: 1 })])
+  assert.deepEqual(uncorroboratedSummaryBlocks(healthy), [], "a corroborating series names no blocks")
+  const silentLever = lever5CensusWithLines([summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1 })])
+  assert.deepEqual(uncorroboratedSummaryBlocks(silentLever), ["3"], "a LEVER block whose lines carry no summariesWritten must be named")
+  const zeroWritten = lever5CensusWithLines([summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, summariesWritten: 0 })])
+  assert.deepEqual(uncorroboratedSummaryBlocks(zeroWritten), ["3"], "an explicit zero is not engagement")
+  const metriclessLever = lever5CensusWithLines([])
+  assert.deepEqual(uncorroboratedSummaryBlocks(metriclessLever), ["3"], "a LEVER block without metrics lines at all cannot corroborate compression")
+  const quietOnFull = lever5CensusWithLines([
+    summaryMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1 }),
+    summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, summariesWritten: 4 }),
+  ])
+  assert.deepEqual(uncorroboratedSummaryBlocks(quietOnFull), [], "ON-FULL blocks are never judged: the compression gate is off in that arm by the profile's own seed")
+  const calibrationWithSummaries = lever5CensusWithLines([
+    summaryMetricsLine({ minute: 6, sessionId: "ses_cal", evictions: 1, summariesWritten: 9 }),
+    summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, summariesWritten: 4 }),
+  ])
+  assert.deepEqual(uncorroboratedSummaryBlocks(calibrationWithSummaries), [], "the calibration block is exempt like the full-mode gate's exemption")
+})
+
 test("computeEndpoints emits the lever profile's three contrasts in the pre-registered order", () => {
   const rows = [endpointRow("OFF", 40, 1, 1), endpointRow("ON-FULL", 60, 1, 2), endpointRow("LEVER", 44, 1, 3)]
   const { summaries, contrasts } = computeEndpoints(rows, LEVER1_PROFILE)
@@ -1419,6 +1544,8 @@ const metricsEventAt = (minute: number, evictedThisRun: boolean) => ({
   sessionId: "s",
   generation: 1 as const,
   evictedThisRun,
+  summariesWritten: 0,
+  contextLimitModelKey: null,
 })
 
 test("the per-turn primary averages promoted per-turn credits at position 21+ and contrasts with delta and ratio", () => {
@@ -2103,9 +2230,18 @@ test("the lever5 profile's seeds pin the full baseline in both arms and differ o
   assert.deepEqual(LEVER5_PROFILE.dataArms, LEVER1_PROFILE.dataArms)
   assert.deepEqual(LEVER5_PROFILE.contrasts, LEVER1_PROFILE.contrasts)
   assert.equal(LEVER5_PROFILE.corroboratesFullModeMetrics, true)
+  assert.equal(LEVER5_PROFILE.corroboratesSummariesWritten, true, "the lever5 readout runs the compression-arm summaries gate")
   assert.equal(LEVER5_PROFILE.defaultsToSelfFlip, true)
   assert.equal(LEVER5_PROFILE.name, "lever5")
   assert.deepEqual(Object.keys(EXPERIMENT_PROFILES).sort(), ["deep", "lever1", "lever3", "lever4", "lever5"])
+})
+
+test("the summariesWritten corroboration flag rides the lever5 profile alone", () => {
+  assert.equal(DEEP_PROFILE.corroboratesSummariesWritten, false, "the frozen deep series has no compression arm")
+  assert.equal(LEVER1_PROFILE.corroboratesSummariesWritten, false, "series 1-4 LEVER arms run no compression, so their readouts must not demand summaries")
+  assert.equal(LEVER3_PROFILE.corroboratesSummariesWritten, false)
+  assert.equal(LEVER4_PROFILE.corroboratesSummariesWritten, false)
+  assert.equal(LEVER5_PROFILE.corroboratesSummariesWritten, true)
 })
 
 test("configMatchesArm separates the lever5 series from the earlier profiles in both directions", () => {
@@ -2217,6 +2353,65 @@ test("the lever5 census join and readout contrasts run the lever series shape en
     assert.match(content, /- contrast LEVER - ON-FULL: creditsPerTurn delta=/)
     assert.match(content, /- contrast ON-FULL - OFF: creditsPerTurn delta=/)
     assert.equal(content.includes("caveat: full-mode metrics corroboration failed"), false, "a corroborating lever5 series carries no corroboration caveat")
+  } finally {
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
+
+test("the lever5 readout gates the summariesWritten corroboration and surfaces the session model key beside the summaries figures", () => {
+  const temp = tempDir("ab-lever5-gate-")
+  try {
+    const dbPath = join(temp, "opencode.db")
+    const blocks = [
+      { label: "1", arm: "OFF", sessionId: "ses_off", minute: 15 },
+      { label: "2", arm: "ON-FULL", sessionId: "ses_full", minute: 25 },
+      { label: "3", arm: "LEVER", sessionId: "ses_lever", minute: 35 },
+    ]
+    buildOpencodeDb(
+      dbPath,
+      blocks.map((block) => ({ sessionId: block.sessionId, minute: block.minute + 1, modelId: "glm-5.3", input: 100000, output: 10000, cacheWrite: 5000 })),
+    )
+    writeFileSync(join(temp, FLIP_LOG_BASENAME), flipLogText(blocks.map((block) => block.arm)))
+    writeFileSync(
+      join(temp, SPAWN_LOG_BASENAME),
+      spawnLogText(blocks.map((block) => ({ label: block.label, arm: block.arm, sessionId: block.sessionId, exit: 0, minute: block.minute }))),
+    )
+    writeFileSync(
+      join(temp, WORK_LOG_DEEP_BASENAME),
+      workLogText(blocks.map((block) => ({ label: block.label, passed: 57, failed: 0, minute: block.minute + 1 }))),
+    )
+    const config = cliConfigFor(temp, { dbPath, profile: LEVER5_PROFILE })
+    const engagedLines = [
+      summaryMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1 }),
+      summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, summariesWritten: 7, modelKey: "glm/glm-5.3" }),
+    ]
+    writeFileSync(join(temp, METRICS_LOG_BASENAME), engagedLines.join("\n") + "\n")
+    const healthy = readFileSync(runReadout(config), "utf8")
+    assert.equal(healthy.includes("summariesWritten corroboration failed"), false, "an engaged LEVER block carries no summaries caveat")
+    assert.match(
+      healthy,
+      /\| 3 \| LEVER \|.*\| 7 \| glm\/glm-5\.3 \|/,
+      "the summaries figure and the session model key sit beside each other in the census table",
+    )
+    writeFileSync(
+      join(temp, METRICS_LOG_BASENAME),
+      [
+        summaryMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1 }),
+        summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1 }),
+      ].join("\n") + "\n",
+    )
+    runReadout(config)
+    assert.match(
+      readFileSync(join(temp, "abx-readout.md"), "utf8"),
+      /caveat: summariesWritten corroboration failed for blocks: 3/,
+      "a LEVER block whose metrics lines carry no summariesWritten is named in a caveat",
+    )
+    // The same silent-LEVER series under lever1 must stay caveat-free: the
+    // compression gate is the lever5 profile's, never the shared lever shape's.
+    runReadout(cliConfigFor(temp, { dbPath, profile: LEVER1_PROFILE }))
+    const lever1Readout = readFileSync(join(temp, "abx-readout.md"), "utf8")
+    assert.equal(lever1Readout.includes("summariesWritten corroboration failed"), false, "the lever1 readout never runs the compression-arm gate")
+    assert.equal(lever1Readout.includes("caveat: full-mode metrics corroboration failed"), false, "the lever1 full-mode gate still passes the same series")
   } finally {
     rmSync(temp, { recursive: true, force: true })
   }

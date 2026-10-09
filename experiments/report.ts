@@ -41,20 +41,27 @@ export type ReadoutInputs = {
 
 /**
  * Renders the readout's census table: one line per block with its arm,
- * turns, credits (when computable), metrics generation counts, and exclusion
- * label.
+ * turns, credits (when computable), metrics generation counts, exclusion
+ * label, the block's summariesWritten figure (the compression side path's
+ * cumulative count among the block's metrics lines), and the session model
+ * keys those lines carry (so model drift between series is visible beside
+ * the summaries figures).
  *
  * @param inputs the readout inputs
  * @returns the census table's markdown lines
  */
 export const renderCensusTable = (inputs: ReadoutInputs): string[] => {
-  const lines = ["| block | arm | turns | credits | metrics g1/g2 | exclusion |", "|---|---|---|---|---|---|"]
+  const lines = [
+    "| block | arm | turns | credits | metrics g1/g2 | exclusion | summaries | model |",
+    "|---|---|---|---|---|---|---|---|",
+  ]
   for (const row of inputs.rows) {
     const credits = inputs.creditsByBlock.get(row.blockLabel)
     const creditsCell = credits === undefined ? "n/a" : formatCredits(credits)
     const generations = `${row.metricsGenerations[1]}/${row.metricsGenerations[2]}`
+    const modelCell = row.contextLimitModelKeys.length === 0 ? "n/a" : row.contextLimitModelKeys.join(", ")
     lines.push(
-      `| ${row.blockLabel} | ${row.arm} | ${row.turns.length} | ${creditsCell} | ${generations} | ${row.exclusion ?? "included"} |`,
+      `| ${row.blockLabel} | ${row.arm} | ${row.turns.length} | ${creditsCell} | ${generations} | ${row.exclusion ?? "included"} | ${row.summariesWritten} | ${modelCell} |`,
     )
   }
   return lines

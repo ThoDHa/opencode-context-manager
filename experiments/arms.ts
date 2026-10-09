@@ -157,16 +157,18 @@ export const ARM_BY_FLIP_ARG: ArmByFlipArg = {
 
 // An experiment profile fixes the data-arm triple, the per-arm plugin seeds
 // (the OFF arm is the empty plugin list and carries no seed), whether the
-// readout runs the full-mode metrics corroboration, whether the flip command
-// defaults to this CLI's self flip (the legacy bash flip tool writes the
-// frozen deep seeds only), and the pre-registered readout contrasts. The
-// deep profile is the frozen LRU-82 shape and stays the default everywhere;
-// a profile parameter omitted means deep.
+// readout runs the full-mode metrics corroboration and the compression-arm
+// summariesWritten corroboration (the lever5 profile alone), whether the
+// flip command defaults to this CLI's self flip (the legacy bash flip tool
+// writes the frozen deep seeds only), and the pre-registered readout
+// contrasts. The deep profile is the frozen LRU-82 shape and stays the
+// default everywhere; a profile parameter omitted means deep.
 export type ExperimentProfile = {
   name: "deep" | "lever1" | "lever3" | "lever4" | "lever5"
   dataArms: readonly Arm[]
   pluginSeedByArm: Readonly<Partial<Record<FlipArm, readonly PluginEntry[]>>>
   corroboratesFullModeMetrics: boolean
+  corroboratesSummariesWritten: boolean
   defaultsToSelfFlip: boolean
   contrasts: readonly (readonly [Arm, Arm])[]
 }
@@ -180,6 +182,7 @@ export const DEEP_PROFILE: ExperimentProfile = {
     "CAL-ON-FULL": ON_PLUGIN_ENTRY,
   },
   corroboratesFullModeMetrics: false,
+  corroboratesSummariesWritten: false,
   defaultsToSelfFlip: false,
   contrasts: [
     ["ON-FULL", "OFF"],
@@ -197,6 +200,7 @@ export const LEVER1_PROFILE: ExperimentProfile = {
     "CAL-ON-FULL": LEVER_ON_FULL_PLUGIN_ENTRY,
   },
   corroboratesFullModeMetrics: true,
+  corroboratesSummariesWritten: false,
   defaultsToSelfFlip: true,
   contrasts: [
     ["LEVER", "OFF"],
@@ -217,6 +221,7 @@ export const LEVER3_PROFILE: ExperimentProfile = {
     "CAL-ON-FULL": LEVER_ON_FULL_PLUGIN_ENTRY,
   },
   corroboratesFullModeMetrics: true,
+  corroboratesSummariesWritten: false,
   defaultsToSelfFlip: true,
   contrasts: [
     ["LEVER", "OFF"],
@@ -245,6 +250,7 @@ export const LEVER4_PROFILE: ExperimentProfile = {
     "CAL-ON-FULL": LEVER4_ON_FULL_PLUGIN_ENTRY,
   },
   corroboratesFullModeMetrics: true,
+  corroboratesSummariesWritten: false,
   defaultsToSelfFlip: true,
   contrasts: [
     ["LEVER", "OFF"],
@@ -261,6 +267,7 @@ export const LEVER4_PROFILE: ExperimentProfile = {
 // compression; the multiplier stays baseline, observed for its interaction
 // with side-call batching, never varied. Judged on cost AND turns-to-green
 // over the mirrored 18-block schedule, with the summariesWritten
+// with the summariesWritten
 // corroboration gate and the session model id recorded beside it. The deep
 // lever2 era name stays retired.
 export const LEVER5_PROFILE: ExperimentProfile = {
@@ -272,6 +279,7 @@ export const LEVER5_PROFILE: ExperimentProfile = {
     "CAL-ON-FULL": LEVER5_ON_FULL_PLUGIN_ENTRY,
   },
   corroboratesFullModeMetrics: true,
+  corroboratesSummariesWritten: true,
   defaultsToSelfFlip: true,
   contrasts: [
     ["LEVER", "OFF"],
