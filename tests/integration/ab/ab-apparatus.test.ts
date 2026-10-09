@@ -1051,9 +1051,9 @@ test("the readout renders the Report File Template shape and deposits the file",
   ])
   const { summaries, contrasts } = computeEndpoints([endpointRow("OFF", 82.7, 2, 1)])
   const inputs: ReadoutInputs = {
-    taskFileBasename: "LRU-83",
+    profileName: "deep",
     slug: "readout",
-    from: "worker-lru83",
+    from: "worker-lru87",
     date: "2026-10-04 15:00",
     title: "A/B readout over 2 census rows.",
     rows,
@@ -1063,6 +1063,8 @@ test("the readout renders the Report File Template shape and deposits the file",
     caveats: ["caveat text"],
   }
   const content = renderReadout(inputs)
+  assert.match(content, /^# Report: readout \(deep\)$/m)
+  assert.match(content, /^\*\*Profile:\*\* deep$/m)
   const sectionOrder = ["## Findings", "## Decisions", "## Blocks", "## Next"].map((section) => content.indexOf(section))
   assert.equal(sectionOrder.every((position) => position >= 0), true)
   assert.deepEqual([...sectionOrder].sort((a, b) => a - b), sectionOrder)

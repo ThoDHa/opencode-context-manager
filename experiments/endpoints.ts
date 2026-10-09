@@ -360,19 +360,27 @@ export type EventAlignedArmRow = {
 // turn's own processing span (where the plugin writes its metrics lines)
 // and everything after it up to the turn under analysis, so an event that
 // recorded a mutation before the turn saw its prompt counts for it.
-const eventLandedInPriorGap = (
+const eventFlagsInPriorGap = (
   turns: readonly TurnRow[],
   events: readonly MetricsEvent[],
   index: number,
-  eventMatches: (event: MetricsEvent) => boolean,
-): boolean =>
-  events.some(
-    (event) =>
-      eventMatches(event) &&
-      event.timestampMs !== null &&
-      event.timestampMs > turns[index - 1]!.createdAtMs &&
-      event.timestampMs <= turns[index]!.createdAtMs,
-  )
+): { landedAny: boolean; landedEviction: boolean } => {
+  const gapStartMs = turns[index - 1]!.createdAtMs
+  const gapEndMs = turns[index]!.createdAtMs
+  let landedAny = false
+  let landedEviction = false
+  for (const event of events) {
+    if (event.timestampMs === null) continue
+    if (event.timestampMs > gapStartMs && event.timestampMs <= gapEndMs) {
+      landedAny = true
+      if (event.evictedThisRun) {
+        landedEviction = true
+        break
+      }
+    }
+  }
+  return { landedAny, landedEviction }
+}
 
 /**
  * The event-aligned view (the LRU-82 cost-per-cut signature, generalized
@@ -398,9 +406,10 @@ export const computeEvictionAlignedView = (rows: readonly CensusRow[], arms: rea
     for (const row of rows.filter((candidate) => candidate.arm === arm)) {
       for (let index = 1; index < row.turns.length; index++) {
         const turn = row.turns[index]!
-        if (eventLandedInPriorGap(row.turns, row.metricsEvents, index, () => true)) postEvent.push(turn)
+        const flags = eventFlagsInPriorGap(row.turns, row.metricsEvents, index)
+        if (flags.landedAny) postEvent.push(turn)
         else eventClean.push(turn)
-        if (eventLandedInPriorGap(row.turns, row.metricsEvents, index, (event) => event.evictedThisRun)) postEviction.push(turn)
+        if (flags.landedEviction) postEviction.push(turn)
         else evictionClean.push(turn)
       }
     }

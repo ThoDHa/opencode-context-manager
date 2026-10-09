@@ -722,7 +722,7 @@ export const runReadout = (config: CliConfig): string => {
     }
   }
   const inputs: ReadoutInputs = {
-    taskFileBasename: "LRU-83",
+    profileName: config.profile.name,
     slug: "readout",
     from: "opencode-abx",
     date: nowIso().slice(0, 16).replace("T", " "),

@@ -26,7 +26,7 @@ export type ReadoutAnalysis = {
 }
 
 export type ReadoutInputs = {
-  taskFileBasename: string
+  profileName: string
   slug: string
   from: string
   date: string
@@ -154,10 +154,10 @@ export const renderEndpoints = (inputs: ReadoutInputs): string[] => {
  */
 export const renderReadout = (inputs: ReadoutInputs): string => {
   const sections: string[] = []
-  sections.push(`# Report: ${inputs.taskFileBasename}: ${inputs.slug}`)
+  sections.push(`# Report: ${inputs.slug} (${inputs.profileName})`)
   sections.push(`**From:** ${inputs.from}`)
   sections.push(`**Date:** ${inputs.date}`)
-  sections.push(`**Task:** ${inputs.taskFileBasename}`)
+  sections.push(`**Profile:** ${inputs.profileName}`)
   sections.push("## Findings")
   sections.push(inputs.title)
   sections.push(...renderCensusTable(inputs))
