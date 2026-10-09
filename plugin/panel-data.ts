@@ -368,18 +368,28 @@ const parseEvictedEntries = (value: unknown): PanelEvictedEntry[] | undefined =>
 }
 
 // Every totals key is required and must be a finite number, with one
-// narrow defaulting exception: an absent `processedContextBytes` or
-// `processedContextTokens` is read as 0, mirroring the seeder's
-// absent-as-zero default for exactly that processedContext gap (the last
-// two counters to join the schema), while a present non-finite value
-// still rejects the record. This tolerance is deliberately narrower than
-// the seeder's, which defaults nine raw keys absent-as-zero: the parser
-// additionally requires every derived key, and the 2026-10-02 renamed
-// keys (recallHits, recallMisses, pagesDropped, faults, dedupedBytesUnique)
-// plus reasoningBytesExpiredUnique reject on absence on both sides, so a
-// pre-reset record darkens the panel on the same boundary where the
-// seeder refuses to seed it.
-const TRANSITIONAL_ABSENT_ZERO_KEYS: readonly TotalsKey[] = ["processedContextBytes", "processedContextTokens"]
+// narrow defaulting exception: an absent key on the transitional list is
+// read as 0, mirroring the seeder's absent-as-zero default for exactly
+// the counters that postdate a record, while a present non-finite value
+// still rejects the record. The list holds the processed-context pair
+// (the last counters to join before the compression feature) and the
+// three summary counters, whose absence in a pre-flagship record is the
+// historical truth (the feature ships default-off, so every session
+// before it wrote zero summaries) and whose zeroed rehydration the
+// plugin's own seeding already performs. This tolerance is deliberately
+// narrower than the seeder's, which defaults every raw key
+// absent-as-zero: the parser additionally requires every derived key,
+// and the 2026-10-02 renamed keys (recallHits, recallMisses,
+// pagesDropped, faults, dedupedBytesUnique) plus reasoningBytesExpiredUnique
+// reject on absence on both sides, so a pre-reset record darkens the
+// panel on the same boundary where the seeder refuses to seed it.
+const TRANSITIONAL_ABSENT_ZERO_KEYS: readonly TotalsKey[] = [
+  "processedContextBytes",
+  "processedContextTokens",
+  "summariesQueued",
+  "summariesWritten",
+  "summaryFailures",
+]
 
 const parseTotals = (value: unknown): PanelTotals | undefined => {
   if (!isRecord(value)) return undefined

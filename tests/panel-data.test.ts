@@ -74,6 +74,7 @@ import {
   makeTotals,
   makePreSchemaTotals,
   makePreTokenUsageTotals,
+  makePreSummaryTotals,
   TOTALS_COLLAPSED_WINDOWS,
   TOTALS_COLLAPSED_WINDOW_BYTES,
   TOTALS_COLLAPSED_WINDOW_TOKENS_SAVED,
@@ -362,6 +363,41 @@ test("readMetricsLog keeps a pre-token-usage line alongside current lines once i
     assert.equal(lines.length, LINE_COUNT_TWO)
     assert.equal(lines[0].totals.processedContextBytes, 0)
     assert.equal(lines[0].totals.processedContextTokens, 0)
+    assert.deepEqual(lines[1], makeLine())
+  })
+})
+
+test("parseTotals defaults the absent summary counters to zero while still rejecting other missing keys", () => {
+  const preSummaryTotals = makePreSummaryTotals()
+  const rawLine = JSON.stringify(makeLine({ totals: preSummaryTotals }))
+  const rawSnapshot = JSON.stringify(makeSnapshot({ totals: preSummaryTotals }))
+
+  const line = parseMetricsLine(rawLine)
+  const snapshot = parseCheckpoint(rawSnapshot)
+
+  assert.ok(line !== undefined)
+  assert.equal(line.totals.summariesQueued, 0)
+  assert.equal(line.totals.summariesWritten, 0)
+  assert.equal(line.totals.summaryFailures, 0)
+  assert.ok(snapshot !== undefined)
+  assert.equal(snapshot.totals.summariesQueued, 0)
+  assert.equal(snapshot.totals.summariesWritten, 0)
+  assert.equal(snapshot.totals.summaryFailures, 0)
+  const { fenceEvicted: _fenceEvicted, ...missingFenceTotals } = preSummaryTotals
+  assert.equal(parseMetricsLine(JSON.stringify(makeLine({ totals: missingFenceTotals }))), undefined)
+})
+
+test("readMetricsLog keeps a pre-summary-counter line alongside current lines once its missing keys default to zero", async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, "metrics.jsonl")
+    writeFileSync(path, serialize([makeLine({ totals: makePreSummaryTotals() }), makeLine()]))
+
+    const lines = await readMetricsLog(path)
+
+    assert.equal(lines.length, LINE_COUNT_TWO)
+    assert.equal(lines[0].totals.summariesQueued, 0)
+    assert.equal(lines[0].totals.summariesWritten, 0)
+    assert.equal(lines[0].totals.summaryFailures, 0)
     assert.deepEqual(lines[1], makeLine())
   })
 })

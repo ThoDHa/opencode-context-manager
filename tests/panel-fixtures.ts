@@ -126,6 +126,9 @@ const makePreSchemaTotals = (): Record<string, number> => {
     collapsedWindowBytes: _collapsedWindowBytes,
     processedContextBytes: _processedContextBytes,
     processedContextTokens: _processedContextTokens,
+    summariesQueued: _summariesQueued,
+    summariesWritten: _summariesWritten,
+    summaryFailures: _summaryFailures,
     ...preSchema
   } = TOTALS_VALUES
   return preSchema
@@ -137,6 +140,14 @@ const makePreSchemaTotals = (): Record<string, number> => {
 const makePreTokenUsageTotals = (): Record<string, number> => {
   const { processedContextBytes: _processedContextBytes, processedContextTokens: _processedContextTokens, ...preTokenUsage } = TOTALS_VALUES
   return preTokenUsage
+}
+
+// A totals record written before the compression feature shipped: the
+// transitional shape whose absent summary counters parse as zero on both
+// sides, every pre-flagship session's historical truth.
+const makePreSummaryTotals = (): Record<string, number> => {
+  const { summariesQueued: _summariesQueued, summariesWritten: _summariesWritten, summaryFailures: _summaryFailures, ...preSummary } = TOTALS_VALUES
+  return preSummary
 }
 
 const makeLine = (overrides: Partial<PanelMetricsLine> = {}): PanelMetricsLine => ({
@@ -243,6 +254,7 @@ export {
   makeTotals,
   makePreSchemaTotals,
   makePreTokenUsageTotals,
+  makePreSummaryTotals,
   makeLine,
   serialize,
   withTempDir,
