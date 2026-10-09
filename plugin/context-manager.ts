@@ -10,10 +10,10 @@ import { HINT_LINE_PREFIX, orderedRenderedSubjectsOf, RECALL_TOOL_NAME, SUBJECT_
 import { rememberError, withSessionMetricsEntry, type MetricsHydration, type MetricsStore, type PersistedTotals, type SessionMetrics } from "./state.ts"
 import { appendHygieneCopy, migrateLegacyDefaultPaths, newestPersistedTotalsOf, PRUNE_SCAN_NEVER, type PruneThrottle } from "./persistence.ts"
 import { recordPageStoreSummaryLines } from "./page-store.ts"
-import type { PageStoreBySession, PageStoreGuard, PageSummaryLookup, PageSummaryRecord, SessionPageStore } from "./page-store.ts"
+import type { PageStoreBySession, PageStoreGuard, PageSummaryLookup, SessionPageStore } from "./page-store.ts"
 import { stripTerminalNoiseFrom, type HygieneCadenceBySession } from "./hygiene.ts"
 import { deliverHint, type HintMembershipBySession } from "./hints.ts"
-import { createSummaryCompressor } from "./summaries.ts"
+import { createSummaryCompressor, summaryRecordOfStoreLine } from "./summaries.ts"
 import type { SummaryClient, SummaryStoreLine } from "./summaries.ts"
 import { DESCRIBE_TOOL_DESCRIPTION, DESCRIBE_TOOL_NAME, executeReadEvicted, executeStatsTool, guardTool, RECALL_TOOL_ARGS, RECALL_TOOL_DESCRIPTION } from "./tools.ts"
 import { transformHookBody, type TransformHookDeps } from "./pipeline.ts"
@@ -176,20 +176,10 @@ const server = (async (pluginInput, rawOptions) => {
   // sink below only persists the line.
   const sideSessionIds = new Set<string>()
   const summarySink = async (line: SummaryStoreLine): Promise<void> => {
-    const record: PageSummaryRecord = {
-      tool: line.tool,
-      subject: line.subject,
-      msgIndex: line.msgIndex,
-      partIndex: line.partIndex,
-      ...(line.stashSlot === undefined ? {} : { stashSlot: line.stashSlot }),
-      summary: line.summary,
-      summaryModel: line.summaryModel,
-      summaryTokens: line.summaryTokens,
-    }
     // The store line rides the page writer's rotation, downgrade-refusal,
     // and diagnostic machinery; a failed write is a session diagnostic,
     // never a thrown error, so the compressor's drain never wedges here.
-    await recordPageStoreSummaryLines(options, metricsBySession, line.session, [record], pageStoreGuard)
+    await recordPageStoreSummaryLines(options, metricsBySession, line.session, [summaryRecordOfStoreLine(line)], pageStoreGuard)
   }
   const summaryCompressor =
     options.summarizeEvictedOutputs && pluginInput?.client !== undefined

@@ -202,6 +202,20 @@ const summaryModelOf = (row: SummaryReadbackRow | undefined): string => {
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
+// The summary record a store line carries: the one mapping from line to
+// record, shared by the compressor's map write and the entry's sink, so
+// the in-memory and persisted shapes cannot drift apart.
+export const summaryRecordOfStoreLine = (line: SummaryStoreLine): PageSummaryRecord => ({
+  tool: line.tool,
+  subject: line.subject,
+  msgIndex: line.msgIndex,
+  partIndex: line.partIndex,
+  ...(line.stashSlot === undefined ? {} : { stashSlot: line.stashSlot }),
+  summary: line.summary,
+  summaryModel: line.summaryModel,
+  summaryTokens: line.summaryTokens,
+})
+
 type SettledOutcome<T> = { ok: true; value: T } | { ok: false; error: unknown }
 
 // Wrap a side-session call so neither settlement path can surface as an
@@ -348,16 +362,7 @@ export const createSummaryCompressor = (options: SummaryCompressorOptions): Summ
       const summaryModel = summaryModelOf(lastAssistantRowOf(readOutcome.value))
       const line = buildStoreLine(item, summary, summaryModel)
       await sink(line)
-      rememberSummary(item.sessionKey, {
-        tool: line.tool,
-        subject: line.subject,
-        msgIndex: line.msgIndex,
-        partIndex: line.partIndex,
-        ...(line.stashSlot === undefined ? {} : { stashSlot: line.stashSlot }),
-        summary,
-        summaryModel,
-        summaryTokens: line.summaryTokens,
-      })
+      rememberSummary(item.sessionKey, summaryRecordOfStoreLine(line))
       written += 1
       recordCounters(item.sessionKey, { queued: 0, written: 1, failed: 0 })
       return "written"
