@@ -102,6 +102,9 @@ const TOTALS_VALUES: Record<TotalsKey, number> = {
   faults: TOTALS_TOUCHES,
   processedContextBytes: TOTALS_PROCESSED_CONTEXT_BYTES,
   processedContextTokens: TOTALS_PROCESSED_CONTEXT_TOKENS,
+  summariesQueued: 0,
+  summariesWritten: 0,
+  summaryFailures: 0,
 }
 
 const makeTotals = (): PanelMetricsLine["totals"] => ({ ...TOTALS_VALUES })

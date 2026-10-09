@@ -4617,6 +4617,9 @@ const STATS_ZEROED_COUNTERS = {
   fenceEvicted: 0,
   processedContextBytes: 0,
   processedContextTokens: 0,
+  summariesQueued: 0,
+  summariesWritten: 0,
+  summaryFailures: 0,
 }
 const STATS_LOG_FILE_LINES = 1
 
