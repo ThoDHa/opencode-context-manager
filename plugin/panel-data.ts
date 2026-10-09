@@ -2,6 +2,8 @@ import { open, readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { DEFAULT_LIVE_STATE_DIR_BASENAME, DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_METRICS_FILE_BASENAME, TOTALS_KEYS, type TotalsKey } from "./schema.ts"
+import { isRecord } from "./persistence.ts"
+import { ELLIPSIS_MARKER } from "./vocabulary.ts"
 
 export const DEFAULT_METRICS_PATH = join(homedir(), ...DEFAULT_METRICS_DIR_SEGMENTS, DEFAULT_METRICS_FILE_BASENAME)
 
@@ -334,9 +336,6 @@ export type LoadPanelDataOptions = {
   // undefined reads Date.now() at row render.
   nowMs?: number
 }
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value)
 
 const isFiniteNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value)
 
@@ -1046,7 +1045,6 @@ export const panelRows = (data: PanelData, options: PanelRowsOptions = {}): Pane
 const SIDEBAR_BLANK_ROW: PanelRow = { text: " ", tone: "normal" }
 
 export const SIDEBAR_COLUMN_LIMIT = 42
-const ELLIPSIS_MARKER = "…"
 
 const truncateToWidth = (text: string, maxWidth: number): string =>
   text.length > maxWidth ? `${text.slice(0, maxWidth - ELLIPSIS_MARKER.length)}${ELLIPSIS_MARKER}` : text

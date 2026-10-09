@@ -14,7 +14,7 @@ export const startsWithEitherGeneration = (text: string, current: string, legacy
   text.startsWith(current) || text.startsWith(legacy)
 export const SUBJECT_SEPARATOR = ", "
 const MAX_RENDERED_SUBJECT_CHARS = 160
-const ELLIPSIS_MARKER = "…"
+export const ELLIPSIS_MARKER = "…"
 export const READ_TOOL_NAME = "read"
 const MAX_DIGEST_CHARS = 200
 const DIGEST_PIECE_SEPARATOR = " | "
