@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import type { PageEntry } from "../plugin/page-store.ts"
 import {
+  DEFAULT_SUMMARY_SESSIONS,
   DEFAULT_SUMMARY_TOKEN_BUDGET,
   SUMMARY_LINE_KIND,
   SUMMARY_LINE_SCHEMA_VERSION,
@@ -110,6 +111,7 @@ const collectLines = (): { sink: (line: SummaryStoreLine) => Promise<void>; line
 
 test("the module constants hold the plan's defaults", () => {
   assert.equal(DEFAULT_SUMMARY_TOKEN_BUDGET, 256)
+  assert.equal(DEFAULT_SUMMARY_SESSIONS, 256)
   assert.equal(SUMMARY_READBACK_TIMEOUT_MS, 120000)
   assert.equal(SUMMARY_LINE_SCHEMA_VERSION, 2)
   assert.equal(SUMMARY_LINE_KIND, "summary")

@@ -36,9 +36,15 @@ export const SUMMARY_QUEUE_DEPTH_CAP = 32
 
 export const DEFAULT_SUMMARY_CHARS_PER_TOKEN = 4
 
-// The in-memory summary map's bounds: the per-session record bound and,
-// absent a configured session bound, the session count bound.
+// The in-memory summary map's default per-session record bound: how many
+// summaries one session's inner map keeps.
 export const DEFAULT_SUMMARY_MAP_LIMIT = 256
+
+// The map's default session-count bound, distinct from the record bound
+// on purpose: the two bounds retune independently (the entry seeds this
+// one from its stashSessions option), so shrinking the record bound can
+// never silently move how many sessions keep summaries.
+export const DEFAULT_SUMMARY_SESSIONS = 256
 
 // One initial prompt plus the malformed guard's single bounded retry.
 export const SUMMARY_READBACK_ATTEMPTS = 2
@@ -254,7 +260,7 @@ export const createSummaryCompressor = (options: SummaryCompressorOptions): Summ
   const readbackTimeoutMs = options.readbackTimeoutMs ?? SUMMARY_READBACK_TIMEOUT_MS
   const queueDepthCap = options.queueDepthCap ?? SUMMARY_QUEUE_DEPTH_CAP
   const mapLimit = options.mapLimit ?? DEFAULT_SUMMARY_MAP_LIMIT
-  const sessionLimit = options.sessionLimit ?? DEFAULT_SUMMARY_MAP_LIMIT
+  const sessionLimit = options.sessionLimit ?? DEFAULT_SUMMARY_SESSIONS
 
   // The one summary map: session-then-pageKey, fed by the drain and read
   // by both serving seats through summaryFor. The outer bound trims before
