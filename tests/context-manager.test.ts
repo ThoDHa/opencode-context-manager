@@ -747,10 +747,6 @@ const tailEntriesIn = (bundle: StrictBundle): TailEntryRef[] => {
   return found
 }
 
-// A transform with no evictable content: the shape of a later turn in a
-// session whose history already carries the eviction and its tail entries.
-const textOnlyBundle = (): StrictBundle => buildBundle(fillerMessages())
-
 const runTransformShaped = async (hooks: HookMap, sessionID: string): Promise<StrictBundle> => {
   const bundle: StrictBundle = buildBundle(fillerMessages(), sessionID)
   await runTransform(hooks, bundle)
