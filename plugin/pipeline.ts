@@ -88,7 +88,8 @@ export const transformHookBody = async (messages: MessageBundle[], deps: Transfo
   const { summaryCompressor } = deps
   const summarizeEvicted =
     summaryCompressor === undefined ? undefined : (page: PageEntry): void => { summaryCompressor.enqueue({ sessionKey, page }) }
-  const effectiveWatermarkTokens = effectiveWatermarkTokensOf(contextLimit.tokens, options)  // One scan and one candidate walk feed whichever path runs: the
+  const effectiveWatermarkTokens = effectiveWatermarkTokensOf(contextLimit.tokens, options)
+  // One scan and one candidate walk feed whichever path runs: the
   // stand-downs (manual mode, or no watermark with the aged read tier
   // disarmed) share this candidates computation with the real evictor.
   // The aged read tier arms the evictor even without a budget, since its
@@ -194,7 +195,7 @@ const applyTailSummaries = (messages: MessageBundle[], sessionKey: string, deps:
       const text = part["text"]
       if (part["type"] === TEXT_PART_TYPE && typeof text === "string" && text.startsWith(TAIL_SUMMARY_TEXT_PREFIX)) {
         liveEntries += 1
-        liveChars += text.length + 1
+        liveChars += text.length
       }
     }
   }
@@ -202,13 +203,12 @@ const applyTailSummaries = (messages: MessageBundle[], sessionKey: string, deps:
   let dropped = 0
   for (const record of summaryCompressor.takeTailPending(sessionKey)) {
     const entryText = buildTailSummaryEntry(record.tool, record.subject, record.summary)
-    const entryChars = entryText.length + 1
-    if (Math.ceil((liveChars + entryChars) / options.charsPerToken) > options.tailSummaryMaxTokens) {
+    if (Math.ceil((liveChars + entryText.length) / options.charsPerToken) > options.tailSummaryMaxTokens) {
       dropped += 1
       continue
     }
     appendedTexts.push(entryText)
-    liveChars += entryChars
+    liveChars += entryText.length
     liveEntries += 1
   }
   for (const entryText of appendedTexts) {
