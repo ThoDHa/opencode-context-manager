@@ -732,7 +732,7 @@ const summaryServeTextFor = (summary: string): string =>
 // The tail-side durable summary block: a text part carrying the tail lead
 // prefix. One entry per settled summary, user role, appended at the
 // transform-time end of the message list.
-type TailEntryRef = { messageIndex: number; role: string | undefined; text: string }
+type TailEntryRef = { messageIndex: number; role: string | undefined; sessionID: string | undefined; text: string }
 
 const tailEntriesIn = (bundle: StrictBundle): TailEntryRef[] => {
   const found: TailEntryRef[] = []
@@ -740,7 +740,7 @@ const tailEntriesIn = (bundle: StrictBundle): TailEntryRef[] => {
     for (const part of message.parts) {
       const text = part["text"]
       if (part["type"] === "text" && typeof text === "string" && text.startsWith(TAIL_SUMMARY_LEAD)) {
-        found.push({ messageIndex, role: message.info.role, text })
+        found.push({ messageIndex, role: message.info.role, sessionID: message.info.sessionID, text })
       }
     }
   })
@@ -12084,6 +12084,10 @@ test("the tail gate appends one user-role summary entry at the transform-time en
     assert.ok(entry !== undefined)
     assert.equal(entry.role, "user")
     assert.equal(entry.messageIndex, after.messages.length - 1)
+    // The appended message self-attributes to its session exactly like
+    // every sibling message the host persisted, so session-scoped host
+    // code cannot misattribute the tail region.
+    assert.equal(entry.sessionID, SESSION_ID)
     assert.ok(entry.text.includes(COMPRESSION_FAKE_SUMMARY))
   } finally {
     cleanupMetricsDir(pagesDir)

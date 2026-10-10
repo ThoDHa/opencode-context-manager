@@ -120,7 +120,7 @@ export const transformHookBody = async (messages: MessageBundle[], deps: Transfo
   // and the prefix in front of them is byte-stable this run. The append
   // carries each pending summary once; later turns freeze it behind newer
   // history forever.
-  const tailSummaries = applyTailSummaries(messages, sessionKey, deps)
+  const tailSummaries = applyTailSummaries(messages, sessionKey, sessionID, deps)
   // Composition reads the final post-transform list: every pass above has
   // applied its edits, so the sums are what this request carries.
   const composition = runCompositionOf(messages, options)
@@ -181,7 +181,7 @@ export const transformHookBody = async (messages: MessageBundle[], deps: Transfo
 // TAIL_SUMMARY_TEXT_PREFIX, matching only entries the tail pass itself
 // built, and reports the live-list truth (this run's appends included),
 // not a counter.
-const applyTailSummaries = (messages: MessageBundle[], sessionKey: string, deps: TransformHookDeps): TailSummariesResult | undefined => {
+const applyTailSummaries = (messages: MessageBundle[], sessionKey: string, sessionID: string | undefined, deps: TransformHookDeps): TailSummariesResult | undefined => {
   const { summaryCompressor, options } = deps
   if (!options.tailSummaryBlocks || summaryCompressor === undefined) return undefined
   // The live scan precedes the cap decisions: an entry fits only against
@@ -212,8 +212,12 @@ const applyTailSummaries = (messages: MessageBundle[], sessionKey: string, deps:
     liveEntries += 1
   }
   for (const entryText of appendedTexts) {
+    // The appended message self-attributes like every sibling message the
+    // host persisted: an undefined session id stays undefined, but a known
+    // one rides the entry so session-scoped host code reads the tail
+    // region as this session's own.
     messages.push({
-      info: { role: "user" },
+      info: sessionID === undefined ? { role: "user" } : { role: "user", sessionID },
       parts: [{ type: TEXT_PART_TYPE, text: entryText }],
     })
   }
