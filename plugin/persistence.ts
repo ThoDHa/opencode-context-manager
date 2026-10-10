@@ -263,7 +263,11 @@ export const recordMetricsLine = async (
     purgedThisRun > 0 ||
     faultsThisRun > 0 ||
     fenceEvictedThisRun.blocks > 0 ||
-    recallsSinceLastLine > 0
+    recallsSinceLastLine > 0 ||
+    // The tail pass's appends and cap drops are declared losses the readout
+    // must see per run; a pure-occupancy run (nothing appended, nothing
+    // dropped) stays quiet exactly like today's uneventful runs.
+    (run.tailSummaries !== undefined && (run.tailSummaries.appended > 0 || run.tailSummaries.dropped > 0))
   const isEventful = hasRecordedEvent || reasoningExpiredThisRun.parts > 0
   if (options.metricsLog === false || isEventful === false) return
   const hasSignificantEvent = hasRecordedEvent || contextLimit.source !== metrics.lastLineContextLimitSource
@@ -305,6 +309,19 @@ export const recordMetricsLine = async (
     fenceEvictedThisRun: fenceEvictedThisRun.blocks,
     faultsThisRun,
     recallsSinceLastLine,
+    // The tail pass's run result, present only on a tail-gate-on run: the
+    // spread keeps the JSON byte-shape identical on every gate-off run,
+    // pre-tail readers included.
+    ...(run.tailSummaries === undefined
+      ? {}
+      : {
+          tailSummaries: {
+            appended: run.tailSummaries.appended,
+            dropped: run.tailSummaries.dropped,
+            liveEntries: run.tailSummaries.liveEntries,
+            liveTokens: run.tailSummaries.liveTokens,
+          },
+        }),
     totals: totalsOf(metrics, options.charsPerToken),
   }
   try {

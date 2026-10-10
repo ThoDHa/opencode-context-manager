@@ -544,3 +544,61 @@ test("a queue-depth drop reports the dropped page's session as a failure delta",
   await compressor.settled()
   assert.deepEqual(failedSessions, [TEST_SESSION_KEY_B])
 })
+
+test("takeTailPending hands back completed summaries in completion order and consumes them exactly once", async () => {
+  const fake = createFakeClient({
+    readScript: async (index) => [userRow(), assistantRow(`summary number ${index + 1}`)],
+  })
+  const { sink } = collectLines()
+  const compressor = createSummaryCompressor({ client: fake.client, sink })
+  compressor.enqueue({ sessionKey: TEST_SESSION_KEY, page: pageOf({ msgIndex: 1 }) })
+  compressor.enqueue({ sessionKey: TEST_SESSION_KEY, page: pageOf({ msgIndex: 2 }) })
+  await compressor.settled()
+
+  const pending = compressor.takeTailPending(TEST_SESSION_KEY)
+  assert.equal(pending.length, 2)
+  assert.equal(pending[0]?.summary, "summary number 1")
+  assert.equal(pending[1]?.summary, "summary number 2")
+  assert.equal(compressor.takeTailPending(TEST_SESSION_KEY).length, 0)
+  // Consumed records stay served through summaryFor: recall never loses
+  // the durable record to the tail hand-off.
+  assert.ok(compressor.summaryFor(TEST_SESSION_KEY, "bash", "src/app.ts", 1, 3) !== undefined)
+  assert.ok(compressor.summaryFor(TEST_SESSION_KEY, "bash", "src/app.ts", 2, 3) !== undefined)
+})
+
+test("takeTailPending returns nothing before a summary completes and nothing for an unknown session", async () => {
+  const firstPrompt = deferred<SummaryPromptOutcome>()
+  const fake = createFakeClient({ promptScript: (index) => (index === 0 ? firstPrompt.promise : Promise.resolve({ ok: true })) })
+  const { sink } = collectLines()
+  const compressor = createSummaryCompressor({ client: fake.client, sink })
+  compressor.enqueue({ sessionKey: TEST_SESSION_KEY, page: pageOf() })
+  try {
+    assert.equal(compressor.takeTailPending(TEST_SESSION_KEY).length, 0)
+    assert.equal(compressor.takeTailPending(TEST_SESSION_KEY_B).length, 0)
+  } finally {
+    // Resolved even when the assertions above fail, so a parked prompt
+    // cannot hold the runner's readback-deadline timer open past the run.
+    firstPrompt.resolve({ ok: true })
+    await compressor.settled()
+  }
+  assert.equal(compressor.takeTailPending(TEST_SESSION_KEY).length, 1)
+})
+
+test("takeTailPending scopes by session: one session's pending never serves another's", async () => {
+  const fake = createFakeClient()
+  const { sink } = collectLines()
+  const compressor = createSummaryCompressor({ client: fake.client, sink })
+  compressor.enqueue({ sessionKey: TEST_SESSION_KEY, page: pageOf() })
+  await compressor.settled()
+  assert.equal(compressor.takeTailPending(TEST_SESSION_KEY_B).length, 0)
+  assert.equal(compressor.takeTailPending(TEST_SESSION_KEY).length, 1)
+})
+
+test("takeTailPending never hands back a failed summary", async () => {
+  const fake = createFakeClient({ promptScript: async () => ({ ok: false, error: "prompt quota exhausted" }) })
+  const { sink } = collectLines()
+  const compressor = createSummaryCompressor({ client: fake.client, sink })
+  compressor.enqueue({ sessionKey: TEST_SESSION_KEY, page: pageOf() })
+  await compressor.settled()
+  assert.equal(compressor.takeTailPending(TEST_SESSION_KEY).length, 0)
+})

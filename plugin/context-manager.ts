@@ -168,12 +168,16 @@ const server = (async (pluginInput, rawOptions) => {
   const pageStoreGuard: PageStoreGuard = { newerSchemaObserved: false }
   const persistedTotalsForSession = (sessionKey: string): Promise<PersistedTotals | undefined> =>
     newestPersistedTotalsOf(options, sessionKey)
-  // The compression-on-evict side path: built only when the gate is on
-  // AND the host provided a client. Every other start leaves the plugin
-  // byte-identical to the pre-compression build: no sink reaches the
-  // walk, no side session is created, and no summary serves ahead of the
-  // store merge. The summary map itself lives inside the compressor; the
-  // sink below only persists the line.
+  // The compression-on-evict side path: built when either summary gate is
+  // on AND the host provided a client. The tail gate shares the compressor
+  // (and its budget) with the compression gate, so a tail-only start
+  // builds the compressor and enqueues exactly like a compression start;
+  // leaving the gate a pure AND would silently measure the base on a
+  // tail-only arm. Every other start leaves the plugin byte-identical to
+  // the pre-compression build: no sink reaches the walk, no side session
+  // is created, and no summary serves ahead of the store merge. The
+  // summary map itself lives inside the compressor; the sink below only
+  // persists the line.
   const sideSessionIds = new Set<string>()
   const summarySink = async (line: SummaryStoreLine): Promise<void> => {
     // The store line rides the page writer's rotation, downgrade-refusal,
@@ -182,7 +186,7 @@ const server = (async (pluginInput, rawOptions) => {
     await recordPageStoreSummaryLines(options, metricsBySession, line.session, [summaryRecordOfStoreLine(line)], pageStoreGuard)
   }
   const summaryCompressor =
-    options.summarizeEvictedOutputs && pluginInput?.client !== undefined
+    (options.summarizeEvictedOutputs || options.tailSummaryBlocks) && pluginInput?.client !== undefined
       ? createSummaryCompressor({
           client: hostSummaryClientOf(pluginInput.client, sideSessionIds),
           sink: summarySink,

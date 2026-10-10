@@ -1,8 +1,8 @@
 import { CONTEXT_TOKENS_SOURCE_UNKNOWN, type ContextLimitEntry, contextLimitForRun } from "./context-limits.ts"
-import { type MessageBundle, runCompositionOf } from "./messages.ts"
+import { type MessageBundle, runCompositionOf, TEXT_PART_TYPE } from "./messages.ts"
 import type { ResolvedOptions } from "./options.ts"
 import { sessionKeyFromContext, touchMapEntry } from "./session-maps.ts"
-import { countFaults, countUniqueDedupedPairs, metricsForSession, type MetricsHydration, type MetricsStore, type PersistedTotals, type ReasoningExpiry, recordRunOutcome, type RunOutcome } from "./state.ts"
+import { countFaults, countUniqueDedupedPairs, metricsForSession, type MetricsHydration, type MetricsStore, type PersistedTotals, type ReasoningExpiry, recordRunOutcome, type RunOutcome, type TailSummariesResult } from "./state.ts"
 import { recordMetricsLine, recordSessionCheckpoint, type PruneThrottle } from "./persistence.ts"
 import { type PageEntry, pagesForSession, type PageStoreBySession, type PageStoreGuard, recordPageStoreLines } from "./page-store.ts"
 import { deduplicateFileAttachments, deduplicateToolOutputs } from "./dedup.ts"
@@ -11,6 +11,7 @@ import { evictLargeUserFences } from "./fences.ts"
 import { effectiveWatermarkTokensOf, evictLeastRecentlyUsed, evictionCandidatesOf, measureAdvisory, measureDryRun, measureWithoutEvicting, retentionBreakdownOf } from "./eviction.ts"
 import { type HintMembershipBySession, storeHint, storeStableHint } from "./hints.ts"
 import type { SummaryCompressor } from "./summaries.ts"
+import { buildTailSummaryEntry, TAIL_SUMMARY_TEXT_PREFIX } from "./vocabulary.ts"
 
 // The transform hook's body, extracted so the registration-site boundary
 // can wrap it in fault isolation. Everything it needs rides the deps
@@ -30,10 +31,10 @@ export type TransformHookDeps = {
   pluginSession: string
   pageStoreGuard: PageStoreGuard
   options: ResolvedOptions
-  // The compressor behind the compression-on-evict gate, built by the
-  // entry only when the gate is on and the host provided a client; absent
-  // on every other start, which leaves the walk byte-identical to the
-  // pre-compression plugin.
+  // The compressor behind the summary gates, built by the entry when
+  // either the compression or the tail gate is on and the host provided a
+  // client; absent on every other start, which leaves the walk
+  // byte-identical to the pre-compression plugin.
   summaryCompressor?: SummaryCompressor
 }
 
@@ -87,8 +88,7 @@ export const transformHookBody = async (messages: MessageBundle[], deps: Transfo
   const { summaryCompressor } = deps
   const summarizeEvicted =
     summaryCompressor === undefined ? undefined : (page: PageEntry): void => { summaryCompressor.enqueue({ sessionKey, page }) }
-  const effectiveWatermarkTokens = effectiveWatermarkTokensOf(contextLimit.tokens, options)
-  // One scan and one candidate walk feed whichever path runs: the
+  const effectiveWatermarkTokens = effectiveWatermarkTokensOf(contextLimit.tokens, options)  // One scan and one candidate walk feed whichever path runs: the
   // stand-downs (manual mode, or no watermark with the aged read tier
   // disarmed) share this candidates computation with the real evictor.
   // The aged read tier arms the evictor even without a budget, since its
@@ -114,6 +114,12 @@ export const transformHookBody = async (messages: MessageBundle[], deps: Transfo
   // still fires only at the effective watermark.
   const advisory = measureAdvisory(candidates, effectiveWatermarkTokens, options)
   const faultsThisRun = countFaults(sessionMetrics, eviction.appearances, options.minSubstringMatchChars)
+  // The tail-side durable summary block: after every mutating pass above,
+  // so appended entries land at the transform-time END of the final list
+  // and the prefix in front of them is byte-stable this run. The append
+  // carries each pending summary once; later turns freeze it behind newer
+  // history forever.
+  const tailSummaries = applyTailSummaries(messages, sessionKey, deps)
   // Composition reads the final post-transform list: every pass above has
   // applied its edits, so the sums are what this request carries.
   const composition = runCompositionOf(messages, options)
@@ -128,6 +134,7 @@ export const transformHookBody = async (messages: MessageBundle[], deps: Transfo
     faults: faultsThisRun,
     reasoningExpired: reasoningExpiredThisRun,
     fenceEvicted: fenceEvictedThisRun,
+    ...(tailSummaries === undefined ? {} : { tailSummaries }),
     dryRun,
     advisory,
     composition,
@@ -157,4 +164,63 @@ export const transformHookBody = async (messages: MessageBundle[], deps: Transfo
   await recordPageStoreLines(options, deps.metricsBySession, sessionKey, pageStoreEntries, deps.pageStoreGuard)
   await recordMetricsLine(options, sessionMetrics, sessionKey, deps.pluginSession, contextLimit, runOutcome)
   await recordSessionCheckpoint(options, sessionKey, contextLimit, sessionMetrics, sessionPageStore, eviction.hotSubjects, deps.pruneThrottle)
+}
+
+// WHY cache-aware: the lever5 series lost because the compression rewrite
+// lands mid-history (the tombstone seat), breaking every downstream
+// provider cache hit for more tokens than the summary reclaimed. The tail
+// placement keeps those tombstone bytes frozen and lands each completed
+// summary as an append-only user-role text part at the list END instead:
+// the appended seat is new, so only it prices at the uncached rate, and
+// once later turns land behind it the entry is history no pass rewrites.
+// The cap is stop-appending-at-cap, never a mid-history removal, so the
+// bound itself can never recommit the invalidation the lever exists to
+// fix. Each appended entry is its own user-role message, so a later run's
+// freeze contract is byte-identical per entry. The occupancy scan reads
+// TAIL_SUMMARY_TEXT_PREFIX, matching only entries the tail pass itself
+// built, and reports the live-list truth (this run's appends included),
+// not a counter.
+const applyTailSummaries = (messages: MessageBundle[], sessionKey: string, deps: TransformHookDeps): TailSummariesResult | undefined => {
+  const { summaryCompressor, options } = deps
+  if (!options.tailSummaryBlocks || summaryCompressor === undefined) return undefined
+  // The live scan precedes the cap decisions: an entry fits only against
+  // the occupancy that exists before this run's appends, so a full tail
+  // region drops every further summary instead of forgetting the earlier
+  // entries a post-append scan would miss.
+  let liveEntries = 0
+  let liveChars = 0
+  for (const message of messages) {
+    for (const part of message.parts) {
+      const text = part["text"]
+      if (part["type"] === TEXT_PART_TYPE && typeof text === "string" && text.startsWith(TAIL_SUMMARY_TEXT_PREFIX)) {
+        liveEntries += 1
+        liveChars += text.length + 1
+      }
+    }
+  }
+  const appendedTexts: string[] = []
+  let dropped = 0
+  for (const record of summaryCompressor.takeTailPending(sessionKey)) {
+    const entryText = buildTailSummaryEntry(record.tool, record.subject, record.summary)
+    const entryChars = entryText.length + 1
+    if (Math.ceil((liveChars + entryChars) / options.charsPerToken) > options.tailSummaryMaxTokens) {
+      dropped += 1
+      continue
+    }
+    appendedTexts.push(entryText)
+    liveChars += entryChars
+    liveEntries += 1
+  }
+  for (const entryText of appendedTexts) {
+    messages.push({
+      info: { role: "user" },
+      parts: [{ type: TEXT_PART_TYPE, text: entryText }],
+    })
+  }
+  return {
+    appended: appendedTexts.length,
+    dropped,
+    liveEntries,
+    liveTokens: Math.ceil(liveChars / options.charsPerToken),
+  }
 }

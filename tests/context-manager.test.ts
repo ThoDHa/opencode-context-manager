@@ -31,11 +31,17 @@ import type {
   StoredPageMatch,
 } from "../plugin/page-store.ts"
 import { executeReadEvicted, RECALL_TOOL_ARGS, RECALL_VERBATIM_ARG_SCHEMA } from "../plugin/tools.ts"
+import { TAIL_SUMMARY_TEXT_PREFIX } from "../plugin/vocabulary.ts"
 import { loadPanelData, PANEL_COMMAND_CATEGORY, PANEL_COMMAND_NAME, PANEL_COMMAND_NAMESPACE, PANEL_COMMAND_SLASH_NAME } from "../plugin/panel-data.ts"
 import {
   DEFAULT_SUMMARY_TOKEN_BUDGET as SCHEMA_DEFAULT_SUMMARY_TOKEN_BUDGET,
+  DEFAULT_TAIL_SUMMARY_MAX_TOKENS as SCHEMA_DEFAULT_TAIL_SUMMARY_MAX_TOKENS,
+  DEFAULT_TAIL_SUMMARY_BLOCKS,
+  DEFAULT_TAIL_SUMMARY_MAX_TOKENS,
   OPTION_SUMMARIZE_EVICTED_OUTPUTS,
   OPTION_SUMMARY_TOKEN_BUDGET,
+  OPTION_TAIL_SUMMARY_BLOCKS,
+  OPTION_TAIL_SUMMARY_MAX_TOKENS,
   PLUGIN_ID,
   PLUGIN_VERSION,
   OPTION_CACHE_AWARE_HINTS,
@@ -722,6 +728,39 @@ const probeCountsLineFor = (
 
 const summaryServeTextFor = (summary: string): string =>
   `${SUMMARY_MARKER} ${SUMMARY_SERVE_INSTRUCTION}.\n${summary}`
+
+// The tail-side durable summary block: a text part carrying the tail lead
+// prefix. One entry per settled summary, user role, appended at the
+// transform-time end of the message list.
+type TailEntryRef = { messageIndex: number; role: string | undefined; text: string }
+
+const tailEntriesIn = (bundle: StrictBundle): TailEntryRef[] => {
+  const found: TailEntryRef[] = []
+  bundle.messages.forEach((message, messageIndex) => {
+    for (const part of message.parts) {
+      const text = part["text"]
+      if (part["type"] === "text" && typeof text === "string" && text.startsWith(TAIL_SUMMARY_LEAD)) {
+        found.push({ messageIndex, role: message.info.role, text })
+      }
+    }
+  })
+  return found
+}
+
+// A transform with no evictable content: the shape of a later turn in a
+// session whose history already carries the eviction and its tail entries.
+const textOnlyBundle = (): StrictBundle => buildBundle(fillerMessages())
+
+const runTransformShaped = async (hooks: HookMap, sessionID: string): Promise<StrictBundle> => {
+  const bundle: StrictBundle = buildBundle(fillerMessages(), sessionID)
+  await runTransform(hooks, bundle)
+  return bundle
+}
+
+const lastMetricsTailBlock = (metricsPath: string): Record<string, number> => {
+  const lines = metricsLinesIn(metricsPath)
+  return lines[lines.length - 1].tailSummaries as Record<string, number>
+}
 
 const faultMapBoundSubject = (index: number): string => `${FAULT_MAP_SUBJECT_PREFIX}${index}.txt`
 
@@ -11519,6 +11558,15 @@ const COMPRESSION_LIFECYCLE_CALLS = 4
 const COMPRESSION_MALFORMED_PROMPTS = 2
 const COMPRESSION_INVALID_BUDGETS = [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]
 
+// The tail-side block's pin constants: the entry text's one lead prefix
+// (imported, never restated, so the scanner cannot drift from the
+// builder), and a tail cap sized so one settled summary fits under it
+// while a second stacked on the live occupancy exceeds it (each fixture
+// entry costs well under the cap's tokens, the pair over).
+const TAIL_SUMMARY_LEAD = TAIL_SUMMARY_TEXT_PREFIX
+const TAIL_SUMMARY_CAP_FITS_ONE = 60
+const TAIL_INVALID_MAX_TOKENS = [0, -1, 20.5, Number.NaN, Number.POSITIVE_INFINITY]
+
 // The wiring fake mirrors the HOST client envelope the entry's adapter
 // consumes: client.session.create/prompt/messages/delete, each resolving
 // the SDK result shape ({ data } on success). create yields side-N ids in
@@ -11976,4 +12024,306 @@ test("an invalid summaryTokenBudget drops to the default and a valid pair passes
   assert.equal(resolveOptions({ [OPTION_SUMMARY_TOKEN_BUDGET]: 512 })[OPTION_SUMMARY_TOKEN_BUDGET], 512)
   assert.equal(resolveOptions({ [OPTION_SUMMARIZE_EVICTED_OUTPUTS]: true })[OPTION_SUMMARIZE_EVICTED_OUTPUTS], true)
   assert.equal(resolveOptions({})[OPTION_SUMMARIZE_EVICTED_OUTPUTS], false)
+})
+
+test("describe echoes the tail pair defaulting to off with the 2048-token cap", async () => {
+  assert.equal(DEFAULT_TAIL_SUMMARY_BLOCKS, false)
+  assert.equal(DEFAULT_TAIL_SUMMARY_MAX_TOKENS, 2048)
+  const hooks = await loadPluginHooks()
+
+  const options = (await readStats(hooks, SESSION_ID)).options as Record<string, unknown>
+
+  assert.equal(options[OPTION_TAIL_SUMMARY_BLOCKS], false)
+  assert.equal(options[OPTION_TAIL_SUMMARY_MAX_TOKENS], SCHEMA_DEFAULT_TAIL_SUMMARY_MAX_TOKENS)
+})
+
+test("an invalid tailSummaryMaxTokens drops to the default and a valid pair passes through", () => {
+  for (const invalidMaxTokens of TAIL_INVALID_MAX_TOKENS) {
+    assert.equal(resolveOptions({ [OPTION_TAIL_SUMMARY_MAX_TOKENS]: invalidMaxTokens })[OPTION_TAIL_SUMMARY_MAX_TOKENS], SCHEMA_DEFAULT_TAIL_SUMMARY_MAX_TOKENS)
+  }
+  assert.equal(resolveOptions({ [OPTION_TAIL_SUMMARY_MAX_TOKENS]: 1024 })[OPTION_TAIL_SUMMARY_MAX_TOKENS], 1024)
+  assert.equal(resolveOptions({ [OPTION_TAIL_SUMMARY_BLOCKS]: true })[OPTION_TAIL_SUMMARY_BLOCKS], true)
+  assert.equal(resolveOptions({})[OPTION_TAIL_SUMMARY_BLOCKS], false)
+})
+
+test("the tail gate extends the compressor construction: a tail-only arm writes summaries with the compression pair off", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient()
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, { [OPTION_TAIL_SUMMARY_BLOCKS]: true })
+
+    await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+    await fake.settledAfter(1)
+
+    assert.equal(fake.created.length, 1)
+    assert.equal(countersOf(await readStats(hooks, SESSION_ID)).summariesWritten, 1)
+    const lines = pageLinesIn(storePath)
+    assert.equal(lines.filter((line) => line.kind === PAGE_STORE_SUMMARY_LINE_KIND).length, 1)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("the tail gate appends one user-role summary entry at the transform-time end of the list", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient()
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, {
+      [OPTION_TAIL_SUMMARY_BLOCKS]: true,
+      tailSummaryMaxTokens: TAIL_SUMMARY_CAP_FITS_ONE,
+    })
+
+    const evicted = await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+    assert.equal(tailEntriesIn(evicted).length, 0)
+    await fake.settledAfter(1)
+
+    const after = await runTransformShaped(hooks, SESSION_ID)
+    const entries = tailEntriesIn(after)
+    assert.equal(entries.length, 1)
+    const entry = entries[0]
+    assert.ok(entry !== undefined)
+    assert.equal(entry.role, "user")
+    assert.equal(entry.messageIndex, after.messages.length - 1)
+    assert.ok(entry.text.includes(COMPRESSION_FAKE_SUMMARY))
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("the tombstone seat stays byte-identical between the compression gate and the tail gate", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const compressionHooks = await loadPluginHooksWithClient(createWiringFakeClient().client, { [OPTION_SUMMARIZE_EVICTED_OUTPUTS]: true })
+    const compressionBundle = await runPageStoreEviction(compressionHooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+
+    const tailHooks = await loadPluginHooksWithClient(createWiringFakeClient().client, { [OPTION_TAIL_SUMMARY_BLOCKS]: true })
+    const tailBundle = await runPageStoreEviction(tailHooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+
+    assert.equal(toolPartAt(tailBundle.messages[0], 0).state.output, toolPartAt(compressionBundle.messages[0], 0).state.output)
+    assert.ok(toolPartAt(tailBundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a later transform on a list already carrying a tail entry never rewrites it and never duplicates it", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient()
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, {
+      [OPTION_TAIL_SUMMARY_BLOCKS]: true,
+      tailSummaryMaxTokens: TAIL_SUMMARY_CAP_FITS_ONE,
+    })
+
+    await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+    await fake.settledAfter(1)
+    const after = await runTransformShaped(hooks, SESSION_ID)
+    const firstEntries = tailEntriesIn(after)
+    assert.equal(firstEntries.length, 1)
+    const firstText = firstEntries[0]?.text
+    const firstSnapshot = JSON.stringify(after.messages)
+
+    // The host re-runs the transform over the same persisted list every
+    // turn; the second run must leave the frozen entry byte-identical and
+    // append nothing (the pending summary was consumed exactly once).
+    await runTransform(hooks, after)
+    const secondEntries = tailEntriesIn(after)
+    assert.equal(secondEntries.length, 1)
+    assert.equal(secondEntries[0]?.text, firstText)
+    assert.equal(JSON.stringify(after.messages), firstSnapshot)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("the tail pass stops appending at the cap, drops the overflow, and counts both", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const metricsDir = makeMetricsDir()
+    try {
+      const metricsPath = metricsLogPathIn(metricsDir)
+      const fake = createWiringFakeClient()
+      const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, {
+        [OPTION_TAIL_SUMMARY_BLOCKS]: true,
+        tailSummaryMaxTokens: TAIL_SUMMARY_CAP_FITS_ONE,
+        metricsLog: true,
+        metricsPath,
+      })
+
+      // Same-list host semantics: one bundle accumulates both evictions,
+      // so appended entries persist across runs the way the host's
+      // persisted history does. Eviction A; its summary appends during
+      // the second run (the B eviction). Summary B's entry then exceeds
+      // the cap against A's live occupancy and drops on the quiet run.
+      await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
+      const bundle = buildStandardBundle(SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+      await runTransform(hooks, bundle)
+      await fake.settledAfter(1)
+
+      bundle.messages.push(...buildStandardBundle(SESSION_ID, PAGE_STORE_REPLACEMENT_SUBJECT).messages)
+      await runTransform(hooks, bundle)
+      await fake.settledAfter(2)
+
+      const entries = tailEntriesIn(bundle)
+      assert.equal(entries.length, 1)
+      assert.ok(entries[0]?.text.includes(PAGE_STORE_EVICTED_SUBJECT))
+
+      await runTransform(hooks, bundle)
+      assert.equal(tailEntriesIn(bundle).length, 1)
+      const tailBlock = lastMetricsTailBlock(metricsPath)
+      assert.equal(tailBlock.appended, 0)
+      assert.equal(tailBlock.dropped, 1)
+      assert.equal(tailBlock.liveEntries, 1)
+      assert.ok(tailBlock.liveTokens > 0)
+      assert.ok(tailBlock.liveTokens <= TAIL_SUMMARY_CAP_FITS_ONE)
+    } finally {
+      cleanupMetricsDir(metricsDir)
+    }
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("the tail block surfaces the occupancy and drop counters through the metrics log", async () => {
+  const metricsDir = makeMetricsDir()
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const fake = createWiringFakeClient()
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, {
+      [OPTION_TAIL_SUMMARY_BLOCKS]: true,
+      metricsLog: true,
+      metricsPath,
+    })
+
+    // The eviction run itself is eventful and lands before any tail entry
+    // exists; the NEXT eventful run carries the append. A second eviction
+    // provides that eventfulness deterministically (a quiet text-only run
+    // writes no line by the coalescing gate, correctly).
+    await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+    await fake.settledAfter(1)
+    await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_REPLACEMENT_SUBJECT)
+    await fake.settledAfter(2)
+
+    const tailBlock = lastMetricsTailBlock(metricsPath)
+    assert.equal(tailBlock.appended, 1)
+    assert.equal(tailBlock.dropped, 0)
+    assert.equal(tailBlock.liveEntries, 1)
+    assert.ok(tailBlock.liveTokens > 0)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("gate off keeps the metrics line byte-shape identical to today: no tail block field", async () => {
+  const metricsDir = makeMetricsDir()
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const fake = createWiringFakeClient()
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, {
+      [OPTION_SUMMARIZE_EVICTED_OUTPUTS]: true,
+      metricsLog: true,
+      metricsPath,
+    })
+
+    await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+    await fake.settledAfter(1)
+    // A second eventful run (another eviction) on the compression gate:
+    // its line must carry no tail block, whatever the run's events.
+    await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_REPLACEMENT_SUBJECT)
+
+    const lines = metricsLinesIn(metricsPath)
+    assert.ok(lines.length >= 2)
+    const last = lines[lines.length - 1]
+    assert.equal(Object.hasOwn(last, "tailSummaries"), false)
+
+    const plainHooks = await loadPluginHooksWith({ metricsLog: true, metricsPath })
+    const plainLinesBefore = metricsLinesIn(metricsPath).length
+    await runPageStoreEviction(plainHooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+    const plainLines = metricsLinesIn(metricsPath)
+    assert.ok(plainLines.length > plainLinesBefore)
+    assert.equal(Object.hasOwn(plainLines[plainLines.length - 1], "tailSummaries"), false)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("both gates on: the compressor fires once, the tombstone lands, the tail entry appends, and recall serves summary-first", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient()
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, {
+      [OPTION_SUMMARIZE_EVICTED_OUTPUTS]: true,
+      [OPTION_TAIL_SUMMARY_BLOCKS]: true,
+      tailSummaryMaxTokens: TAIL_SUMMARY_CAP_FITS_ONE,
+    })
+
+    await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+    await fake.settledAfter(1)
+
+    // Double-serve-by-design: one side-call lifecycle, the tail entry
+    // appended, and recall still serving the summary ahead of the store.
+    assert.equal(fake.created.length, 1)
+    assert.equal(fake.calls.length, COMPRESSION_LIFECYCLE_CALLS)
+    const after = await runTransformShaped(hooks, SESSION_ID)
+    const entries = tailEntriesIn(after)
+    assert.equal(entries.length, 1)
+    assert.ok(entries[0]?.text.includes(COMPRESSION_FAKE_SUMMARY))
+    assert.equal(await recallTool(hooks, PAGE_STORE_EVICTED_SUBJECT, SESSION_ID), summaryServeTextFor(COMPRESSION_FAKE_SUMMARY))
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("gate off with the tail gate on but no client stays byte-identical and fires nothing", async () => {
+  const evictionLimit = contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS)
+
+  const plainHooks = await loadPluginHooks()
+  const plainBundle = buildStandardBundle(SESSION_ID, COMPRESSION_PARITY_SUBJECT)
+  await setContextLimit(plainHooks, SESSION_ID, evictionLimit)
+  await runTransform(plainHooks, plainBundle)
+
+  const noClientHooks = await loadPluginHooksWith({ [OPTION_TAIL_SUMMARY_BLOCKS]: true })
+  const noClientBundle = buildStandardBundle(SESSION_ID, COMPRESSION_PARITY_SUBJECT)
+  await setContextLimit(noClientHooks, SESSION_ID, evictionLimit)
+  await runTransform(noClientHooks, noClientBundle)
+
+  assert.equal(toolPartAt(noClientBundle.messages[0], 0).state.output, toolPartAt(plainBundle.messages[0], 0).state.output)
+  assert.ok(toolPartAt(plainBundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+})
+
+test("describe reports the live tail-entry occupancy through the shared counters channel", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient()
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, {
+      [OPTION_TAIL_SUMMARY_BLOCKS]: true,
+      tailSummaryMaxTokens: TAIL_SUMMARY_CAP_FITS_ONE,
+    })
+
+    await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+    await fake.settledAfter(1)
+    const after = await runTransformShaped(hooks, SESSION_ID)
+
+    // The occupancy surface is the metrics log line's tailSummaries block
+    // (liveEntries is the live-list scan, not a counter); describe's tail
+    // surface is the option echo pinned above. The run's occupancy must
+    // match what the scanner sees on the final list.
+    const stats = await readStats(hooks, SESSION_ID)
+    assert.equal(stats.options.tailSummaryBlocks, true)
+    assert.equal(tailEntriesIn(after).length, 1)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
 })

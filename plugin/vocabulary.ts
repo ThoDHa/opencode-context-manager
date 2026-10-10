@@ -142,6 +142,18 @@ export const buildReloadPointer = (subject: string): string =>
 export const buildFenceTombstone = (language: string | undefined, contentLines: number, subject: string): string =>
   `${FENCE_EVICTION_MARKER} ${language === undefined ? FENCE_BLOCK_NOUN : `${language} ${FENCE_BLOCK_NOUN}`} (${contentLines} ${FENCE_LINE_COUNT_LABEL}, ${FENCE_FIRST_LINE_LABEL} "${subject}") ${FENCE_EVICTED_NOTICE}${buildReloadPointer(subject)}`
 
+// The tail-side durable summary entry: the same [ctx-summary] marker
+// vocabulary the recall serve uses, in a user-role text part appended at
+// the transform-time end of the message list. The full prefix (marker
+// plus lead) is what the tail occupancy scan matches, so a recall
+// summary's different lead can never read as a tail entry.
+const TAIL_SUMMARY_MARKER = "[ctx-summary]"
+const TAIL_SUMMARY_LEAD = "durable summary of an evicted output"
+export const TAIL_SUMMARY_TEXT_PREFIX = `${TAIL_SUMMARY_MARKER} ${TAIL_SUMMARY_LEAD}`
+
+export const buildTailSummaryEntry = (tool: string, subject: string, summary: string): string =>
+  `${TAIL_SUMMARY_TEXT_PREFIX} (${tool} ${subject}): ${summary}`
+
 export const orderedRenderedSubjectsOf = (hotSubjects: HotSubject[], limit: number): string[] => {
   if (limit <= 0) return []
   const seen = new Set<string>()

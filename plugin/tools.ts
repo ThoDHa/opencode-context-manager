@@ -324,6 +324,8 @@ export const executeStatsTool = (source: StatsSource, toolContext: unknown): str
       agedReadEvictionMessages: source.options.agedReadEvictionMessages ?? null,
       summarizeEvictedOutputs: source.options.summarizeEvictedOutputs,
       summaryTokenBudget: source.options.summaryTokenBudget,
+      tailSummaryBlocks: source.options.tailSummaryBlocks,
+      tailSummaryMaxTokens: source.options.tailSummaryMaxTokens,
       modelContextTokens: source.options.modelContextTokens,
       metricsLog: source.options.metricsLog,
       metricsPath: source.options.metricsPath,
