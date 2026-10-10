@@ -4763,6 +4763,8 @@ test("describe reports zeroed counters unknown context limit and empty page stor
     agedReadEvictionMessages: null,
     summarizeEvictedOutputs: false,
     summaryTokenBudget: SCHEMA_DEFAULT_SUMMARY_TOKEN_BUDGET,
+    tailSummaryBlocks: false,
+    tailSummaryMaxTokens: SCHEMA_DEFAULT_TAIL_SUMMARY_MAX_TOKENS,
     modelContextTokens: {},
     metricsLog: false,
     metricsPath: DEFAULT_METRICS_PATH,
