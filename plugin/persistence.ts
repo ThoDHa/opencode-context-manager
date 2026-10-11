@@ -278,10 +278,10 @@ export const recordMetricsLine = async (
     // the session's cumulative compact counters since the last flushed
     // line makes the next run eventful.
     compactCountersMovedSinceLastLine(metrics) ||
-    // The tail pass's appends and cap drops are declared losses the readout
-    // must see per run; a pure-occupancy run (nothing appended, nothing
-    // dropped) stays quiet exactly like today's uneventful runs.
-    (run.tailSummaries !== undefined && (run.tailSummaries.appended > 0 || run.tailSummaries.dropped > 0))
+    // The tail pass's projected entries and cap drops are declared losses
+    // the readout must see per run; a pure re-projection of an unchanged
+    // set stays quiet exactly like today's uneventful runs.
+    (run.tailSummaries !== undefined && run.tailSummaries.dropped > 0)
   const isEventful = hasRecordedEvent || reasoningExpiredThisRun.parts > 0
   if (options.metricsLog === false || isEventful === false) return
   const hasSignificantEvent = hasRecordedEvent || contextLimit.source !== metrics.lastLineContextLimitSource
@@ -335,7 +335,7 @@ export const recordMetricsLine = async (
       ? {}
       : {
           tailSummaries: {
-            appended: run.tailSummaries.appended,
+            projected: run.tailSummaries.projected,
             dropped: run.tailSummaries.dropped,
             liveEntries: run.tailSummaries.liveEntries,
             liveTokens: run.tailSummaries.liveTokens,

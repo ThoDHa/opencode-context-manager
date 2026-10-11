@@ -4,7 +4,7 @@ import type { ResolvedOptions } from "./options.ts"
 import { sessionKeyFromContext, touchMapEntry } from "./session-maps.ts"
 import { countFaults, countUniqueDedupedPairs, metricsForSession, type MetricsHydration, type MetricsStore, type PersistedTotals, type ReasoningExpiry, recordRunOutcome, type RunOutcome, type TailSummariesResult } from "./state.ts"
 import { recordMetricsLine, recordSessionCheckpoint, type PruneThrottle } from "./persistence.ts"
-import { type PageEntry, pagesForSession, type PageStoreBySession, type PageStoreGuard, recordPageStoreLines } from "./page-store.ts"
+import { type PageEntry, type PageSummaryRecord, pagesForSession, type PageStoreBySession, type PageStoreGuard, recordPageStoreLines } from "./page-store.ts"
 import { deduplicateFileAttachments, deduplicateToolOutputs } from "./dedup.ts"
 import { expireAgedReasoning, fireCollapsePass, type HygieneCadenceBySession, purgeErroredToolInputs, REASONING_EXPIRY_NONE, resolveHygieneBatch, stripLegacyHintParts } from "./hygiene.ts"
 import { evictLargeUserFences } from "./fences.ts"
@@ -36,6 +36,10 @@ export type TransformHookDeps = {
   // client; absent on every other start, which leaves the walk
   // byte-identical to the pre-compression plugin.
   summaryCompressor?: SummaryCompressor
+  // The tail projection's persistent source: the session's durable
+  // summary records, stored and in-memory alike, wired by the entry to
+  // the page-store reader over this instance's summary lines.
+  summaryRecordsForSession: (sessionKey: string) => Promise<PageSummaryRecord[]>
 }
 
 export const transformHookBody = async (messages: MessageBundle[], deps: TransformHookDeps): Promise<void> => {
@@ -116,11 +120,11 @@ export const transformHookBody = async (messages: MessageBundle[], deps: Transfo
   const advisory = measureAdvisory(candidates, effectiveWatermarkTokens, options)
   const faultsThisRun = countFaults(sessionMetrics, eviction.appearances, options.minSubstringMatchChars)
   // The tail-side durable summary block: after every mutating pass above,
-  // so appended entries land at the transform-time END of the final list
-  // and the prefix in front of them is byte-stable this run. The append
-  // carries each pending summary once; later turns freeze it behind newer
-  // history forever.
-  const tailSummaries = applyTailSummaries(messages, sessionKey, sessionID, deps)
+  // so projected entries land at the transform-time END of the final list
+  // and the prefix in front of them is byte-stable this run. The tail is
+  // a per-request projection over the persistent summary records, re-derived
+  // on every transform.
+  const tailSummaries = await applyTailSummaries(messages, sessionKey, sessionID, deps)
   // Composition reads the final post-transform list: every pass above has
   // applied its edits, so the sums are what this request carries.
   const composition = runCompositionOf(messages, options)
@@ -171,60 +175,75 @@ export const transformHookBody = async (messages: MessageBundle[], deps: Transfo
 // lands mid-history (the tombstone seat), breaking every downstream
 // provider cache hit for more tokens than the summary reclaimed. The tail
 // placement keeps those tombstone bytes frozen and lands each completed
-// summary as an append-only user-role text part at the list END instead:
-// the appended seat is new, so only it prices at the uncached rate, and
-// once later turns land behind it the entry is history no pass rewrites.
-// The cap is stop-appending-at-cap, never a mid-history removal, so the
-// bound itself can never recommit the invalidation the lever exists to
-// fix. Each appended entry is its own user-role message, so a later run's
-// freeze contract is byte-identical per entry. The occupancy scan reads
-// TAIL_SUMMARY_TEXT_PREFIX, matching only entries the tail pass itself
-// built, and reports the live-list truth (this run's appends included),
-// not a counter.
-const applyTailSummaries = (messages: MessageBundle[], sessionKey: string, sessionID: string | undefined, deps: TransformHookDeps): TailSummariesResult | undefined => {
-  const { summaryCompressor, options } = deps
-  if (!options.tailSummaryBlocks || summaryCompressor === undefined) return undefined
-  // The live scan precedes the cap decisions: an entry fits only against
-  // the occupancy that exists before this run's appends, so a full tail
-  // region drops every further summary instead of forgetting the earlier
-  // entries a post-append scan would miss.
-  let liveEntries = 0
+// summary as a user-role text part at the list END instead: the tail seat
+// is the only new bytes, so only it prices at the uncached rate, and the
+// pre-tail history stays byte-stable.
+// PER-REQUEST PROJECTION: the host drops transform-time message-list
+// appends between requests (the F4 probe's finding), so the tail is not
+// persisted state. Every transform re-derives it from the session's
+// persistent summary records, the same source recall's summary-first
+// serve consults: oldest-first (insertion order), bounded by
+// tailSummaryMaxTokens at projection time, entries beyond the cap
+// reported as dropped. The cost profile is a bounded per-request tail
+// re-read, at most the cap's tokens. Entries the list already carries
+// (the same-list re-transform case) are skipped, never deleted: the pass
+// appends, it does not own or rewrite history.
+const applyTailSummaries = async (messages: MessageBundle[], sessionKey: string, sessionID: string | undefined, deps: TransformHookDeps): Promise<TailSummariesResult | undefined> => {
+  const { options, summaryRecordsForSession } = deps
+  if (!options.tailSummaryBlocks) return undefined
+  const records = await summaryRecordsForSession(sessionKey)
+  // The cap pass: oldest-first, an entry fits only while the sum stays
+  // under the cap, and everything beyond it counts as dropped.
+  const projectedTexts: string[] = []
   let liveChars = 0
-  for (const message of messages) {
-    for (const part of message.parts) {
-      const text = part["text"]
-      if (part["type"] === TEXT_PART_TYPE && typeof text === "string" && text.startsWith(TAIL_SUMMARY_TEXT_PREFIX)) {
-        liveEntries += 1
-        liveChars += text.length
-      }
-    }
-  }
-  const appendedTexts: string[] = []
   let dropped = 0
-  for (const record of summaryCompressor.takeTailPending(sessionKey)) {
+  for (const record of records) {
     const entryText = buildTailSummaryEntry(record.tool, record.subject, record.summary)
     if (Math.ceil((liveChars + entryText.length) / options.charsPerToken) > options.tailSummaryMaxTokens) {
       dropped += 1
       continue
     }
-    appendedTexts.push(entryText)
+    projectedTexts.push(entryText)
     liveChars += entryText.length
-    liveEntries += 1
   }
-  for (const entryText of appendedTexts) {
-    // The appended message self-attributes like every sibling message the
-    // host persisted: an undefined session id stays undefined, but a known
-    // one rides the entry so session-scoped host code reads the tail
-    // region as this session's own.
+  // Append the fitted entries the list does not already carry, oldest
+  // first, so the projection is idempotent over one list. The appended
+  // message self-attributes like every sibling message the host
+  // persisted: an undefined session id stays undefined, but a known one
+  // rides the entry so session-scoped host code reads the tail region as
+  // this session's own.
+  const existingTexts = new Set(existingTailTextsOf(messages))
+  for (const entryText of projectedTexts) {
+    if (existingTexts.has(entryText)) continue
     messages.push({
       info: sessionID === undefined ? { role: "user" } : { role: "user", sessionID },
       parts: [{ type: TEXT_PART_TYPE, text: entryText }],
     })
   }
+  // liveEntries is the projected set plus pre-existing tail-prefixed
+  // parts the projection does not carry (a changed record's stale entry,
+  // a quoted entry): counted, never trimmed.
+  let stale = 0
+  for (const text of existingTexts) {
+    if (!projectedTexts.includes(text)) stale += 1
+  }
   return {
-    appended: appendedTexts.length,
+    projected: projectedTexts.length,
     dropped,
-    liveEntries,
+    liveEntries: projectedTexts.length + stale,
     liveTokens: Math.ceil(liveChars / options.charsPerToken),
   }
+}
+
+// The texts of the tail-prefixed text parts already riding the list, so
+// the projection can skip them instead of duplicating them.
+const existingTailTextsOf = (messages: MessageBundle[]): string[] => {
+  const texts: string[] = []
+  for (const message of messages) {
+    for (const part of message.parts) {
+      const text = part["text"]
+      if (part["type"] === TEXT_PART_TYPE && typeof text === "string" && text.startsWith(TAIL_SUMMARY_TEXT_PREFIX)) texts.push(text)
+    }
+  }
+  return texts
 }

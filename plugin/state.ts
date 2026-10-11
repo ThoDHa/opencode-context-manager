@@ -5,6 +5,7 @@ import { rememberFaultForSubject, touchMapEntry, trimMapToBound } from "./sessio
 import type { DedupedPairBytes } from "./dedup.ts"
 import type { ContextTokensSource, PersistedContextLimit } from "./context-limits.ts"
 import type { HotSubject, Subject } from "./vocabulary.ts"
+import type { PageSummaryRecord } from "./page-store.ts"
 
 const TOUCH_SCAN_INITIAL_WATERMARK = -1
 export const DEFAULT_REMEMBERED_REASONING_PARTS = 4096
@@ -69,11 +70,13 @@ export type CompactCounters = { compactionsRun: number; compactedEntries: number
 // never land on a half-initialized object.
 export const compactCountersOf = (entry: SessionMetrics): CompactCounters => (entry.compact ??= { compactionsRun: 0, compactedEntries: 0, compactedBytes: 0, compactRefusals: 0 })
 
-// The tail pass's per-run result: this run's appends and cap drops plus
-// the live tail-entry occupancy after the pass (entry count and its
-// estimated tokens over the session's charsPerToken). Ride-scoped like
-// the omissions: replaced every run, never persisted as a totals counter.
-export type TailSummariesResult = { appended: number; dropped: number; liveEntries: number; liveTokens: number }
+// The tail pass's per-request result: the projected tail's occupancy
+// (entry count and estimated tokens over the session's charsPerToken) and
+// the records beyond the cap. `dropped` is stable under re-projection: it
+// derives from the durable summary set, so every request carrying the same
+// set reports the same figures. Ride-scoped like the omissions: replaced
+// every run, never persisted as a totals counter.
+export type TailSummariesResult = { projected: number; dropped: number; liveEntries: number; liveTokens: number }
 
 export type SessionMetrics = {
   evictions: number
@@ -170,6 +173,15 @@ export type SessionMetrics = {
   // compaction or a refusal between transforms) write its line. Never
   // persisted; a restart simply writes on its next eventful run.
   compactLoggedSum?: number
+  // This session's summary records as written so far, keyed by the page
+  // store's pageKeyOf: a per-process mirror of what the sink has
+  // persisted, refreshed insert-last on every write. The tail projection
+  // merges it over the session's stored lines so a record rewritten this
+  // run projects fresh even before its line is re-read, and a store read
+  // fault degrades the projection to this subset. Never persisted; the
+  // store lines are the durable copy. The record values are never
+  // mutated in place, so the read side needs no copy.
+  summaryRecords?: Map<string, PageSummaryRecord>
   // Set when this session observed a page-store line from a newer schema
   // version, or when an eviction ran while the instance guard held: the
   // store's writes and rotation are halted and describe explains why.

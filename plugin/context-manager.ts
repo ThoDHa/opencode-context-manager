@@ -9,8 +9,8 @@ import { FALLBACK_SESSION_KEY, sessionKeyFromContext, touchMapEntry } from "./se
 import { HINT_LINE_PREFIX, orderedRenderedSubjectsOf, RECALL_TOOL_NAME, SUBJECT_SEPARATOR } from "./vocabulary.ts"
 import { rememberError, withSessionMetricsEntry, type MetricsHydration, type MetricsStore, type PersistedTotals, type SessionMetrics } from "./state.ts"
 import { appendHygieneCopy, migrateLegacyDefaultPaths, newestPersistedTotalsOf, PRUNE_SCAN_NEVER, type PruneThrottle } from "./persistence.ts"
-import { recordPageStoreSummaryLines } from "./page-store.ts"
-import type { PageStoreBySession, PageStoreGuard, PageSummaryLookup, SessionPageStore } from "./page-store.ts"
+import { recordPageStoreSummaryLines, pageStoreSummaryRecordsFor } from "./page-store.ts"
+import type { PageStoreBySession, PageStoreGuard, PageSummaryLookup, PageSummaryRecord, SessionPageStore } from "./page-store.ts"
 import { stripTerminalNoiseFrom, type HygieneCadenceBySession } from "./hygiene.ts"
 import { deliverHint, type HintMembershipBySession } from "./hints.ts"
 import { createSummaryCompressor, summaryRecordOfStoreLine } from "./summaries.ts"
@@ -233,6 +233,13 @@ const server = (async (pluginInput, rawOptions) => {
           if (session === undefined) return undefined
           return summaryCompressor.summaryFor(session, tool, subject, msgIndex, partIndex, stashSlot)
         }
+  // The tail projection's persistent source: the page-store reader over
+  // this instance's summary lines, scoped to the session, newest line per
+  // page key winning. The in-memory map is always a subset of the store
+  // (the sink persists before the map remembers), so a fresh process
+  // projects exactly what its predecessor left behind.
+  const summaryRecordsForSession = async (sessionKey: string): Promise<PageSummaryRecord[]> =>
+    pageStoreSummaryRecordsFor(options, metricsBySession, sessionKey, pageStoreGuard, options.metricsSessions)
   // Hoisted per plugin instance: every run passes the same deps object to
   // the extracted transform body instead of rebuilding the literal per run.
   const transformHookDeps: TransformHookDeps = {
@@ -250,6 +257,7 @@ const server = (async (pluginInput, rawOptions) => {
     pageStoreGuard,
     options,
     summaryCompressor,
+    summaryRecordsForSession,
   }
 
   // Workaround: recall and describe are registered as plain
