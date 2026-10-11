@@ -320,6 +320,40 @@ export const pageStoreMatchesFor = async (
   return matches
 }
 
+// The tail projection's persistent source: one session's durable summary
+// records in file order (insertion order), the last line per page key
+// winning. The same degradation contract as the serving read: read and
+// parse failures degrade to visiting nothing, never a thrown error, and
+// the same schema verdicts apply (newer-version lines are skipped
+// uninterpreted and flip the instance guard). The in-memory map is always
+// a subset of these lines, so merging the live records over the stored
+// ones is exact: it refreshes a record the same run rewrote before its
+// line landed and adds nothing else.
+export const pageStoreSummaryRecordsFor = async (
+  options: ResolvedOptions,
+  metrics: MetricsStore,
+  sessionKey: string,
+  guard: PageStoreGuard,
+  sessionBound: number,
+): Promise<PageSummaryRecord[]> => {
+  if (options.pageStore === false) return []
+  const byPageKey = new Map<string, PageSummaryRecord>()
+  const live = metrics.get(sessionKey)?.summaryRecords ?? new Map<string, PageSummaryRecord>()
+  await pageStoreParsedLines(options, (parsed) => {
+    const verdict = pageStoreSchemaVerdictOf(parsed)
+    observePageStoreSchemaVerdict(verdict, guard, metrics, sessionKey, sessionBound)
+    if (verdict.kind !== "admissible") return
+    const lineSession = lineSessionOf(parsed)
+    if (lineSession !== sessionKey) return
+    if (!(isRecord(parsed) && parsed["kind"] === PAGE_STORE_SUMMARY_LINE_KIND)) return
+    const summary = pageStoreSummaryLineOf(parsed)
+    if (summary === undefined) return
+    byPageKey.set(pageKeyOf(summary.tool, summary.subject, summary.msgIndex, summary.partIndex, summary.stashSlot), summary)
+  })
+  for (const [key, record] of live) byPageKey.set(key, record)
+  return [...byPageKey.values()]
+}
+
 // The writer's rotation-time observation walk, run immediately before the
 // rotation rename so the sole burying operation can never fire unobserved:
 // an instance that only evicts and never runs an observing recall still
@@ -438,6 +472,18 @@ export const recordPageStoreSummaryLines = async (
   pageStoreGuard: PageStoreGuard,
 ): Promise<void> => {
   if (summaries.length === 0) return
+  // The per-process mirror refreshes on every write, insert-last, so the
+  // tail projection's merge sees the newest text for a rewritten record
+  // and keeps insertion order stable. Deleted only with the entry itself
+  // (store eviction or reseeding): the store lines remain the durable copy.
+  const entry = metrics.get(sessionKey)
+  if (entry !== undefined) {
+    if (entry.summaryRecords === undefined) entry.summaryRecords = new Map()
+    for (const record of summaries) {
+      entry.summaryRecords.delete(pageKeyOf(record.tool, record.subject, record.msgIndex, record.partIndex, record.stashSlot))
+      entry.summaryRecords.set(pageKeyOf(record.tool, record.subject, record.msgIndex, record.partIndex, record.stashSlot), record)
+    }
+  }
   await recordPageStorePayload(options, metrics, sessionKey, pageStoreGuard, (ts) =>
     `${summaries
       .map((record) =>
