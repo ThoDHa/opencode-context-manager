@@ -54,6 +54,17 @@ export type RunOutcome = {
 
 export type ReasoningExpiry = { parts: number; bytes: number; unique: number; uniqueBytes: number }
 
+// The compact tool's session-cumulative counters: accepted compactions
+// (compactionsRun, compactedEntries, compactedBytes) and refusals. Created
+// on the session's first tool event and absent before it, so every surface
+// that spreads it conditionally stays byte-identical on a gated-off build.
+export type CompactCounters = { compactionsRun: number; compactedEntries: number; compactedBytes: number; compactRefusals: number }
+
+// Create-or-extend the session's compact counters object: the one write
+// shape shared by the tool's accept and refuse paths, so a counter can
+// never land on a half-initialized object.
+export const compactCountersOf = (entry: SessionMetrics): CompactCounters => (entry.compact ??= { compactionsRun: 0, compactedEntries: 0, compactedBytes: 0, compactRefusals: 0 })
+
 export type SessionMetrics = {
   evictions: number
   bytesReclaimed: number
@@ -73,6 +84,12 @@ export type SessionMetrics = {
   summariesQueued: number
   summariesWritten: number
   summaryFailures: number
+  // The cooperative compact tool's session-cumulative counters, held as an
+  // optional object rather than raw numeric fields so the totals schema
+  // (and with it the panel parser and its fixtures) stays untouched: the
+  // counters surface through describe and the metrics line's conditional
+  // compact block instead, and stay absent until the tool's first event.
+  compact?: CompactCounters
   evictedSubjects: Subject[]
   faultScanThrough: number
   // Per-entry memory for the unique-event counters: content identities of
@@ -138,6 +155,11 @@ export type SessionMetrics = {
   // cleared by the next successful write like the write-error peers;
   // the counters themselves persist in the totals.
   summaryLastError?: string
+  // The compact-counter sum already flushed to a metrics line: the
+  // eventfulness cursor that makes a compact-only run (an accepted
+  // compaction or a refusal between transforms) write its line. Never
+  // persisted; a restart simply writes on its next eventful run.
+  compactLoggedSum?: number
   // Set when this session observed a page-store line from a newer schema
   // version, or when an eviction ran while the instance guard held: the
   // store's writes and rotation are halted and describe explains why.

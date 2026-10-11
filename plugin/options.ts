@@ -3,6 +3,7 @@ import { join } from "node:path"
 import type { Subject } from "./vocabulary.ts"
 import {
   DEFAULT_CACHE_AWARE_HINTS,
+  DEFAULT_COMPACT_TOOL,
   DEFAULT_EVICTION_BATCH_MULTIPLIER,
   DEFAULT_LIVE_STATE_DIR_BASENAME,
   DEFAULT_METRICS_DIR_SEGMENTS,
@@ -11,6 +12,7 @@ import {
   DEFAULT_SUMMARIZE_EVICTED_OUTPUTS,
   DEFAULT_SUMMARY_TOKEN_BUDGET,
   OPTION_CACHE_AWARE_HINTS,
+  OPTION_COMPACT_TOOL,
   OPTION_EVICTION_BATCH_MULTIPLIER,
   OPTION_MUTATION_BATCH_CADENCE,
   OPTION_SUMMARIZE_EVICTED_OUTPUTS,
@@ -112,6 +114,7 @@ export type ContextManagerOptions = {
   evictionBatchMultiplier?: number
   summarizeEvictedOutputs?: boolean
   summaryTokenBudget?: number
+  compactTool?: boolean
   protectedTools?: string[]
   protectedPatterns?: string[]
   stashLimit?: number
@@ -269,6 +272,13 @@ export const resolveOptions = (raw: ContextManagerOptions = {}): ResolvedOptions
     // regardless of model compliance. Same bounded-integer discipline as
     // the other count options: integral and at least 1, else dropped.
     [OPTION_SUMMARY_TOKEN_BUDGET]: boundedIntegerOr(raw.summaryTokenBudget, DEFAULT_SUMMARY_TOKEN_BUDGET, 1),
+    // The cooperative compact tool's gate: when true the model-invoked
+    // compact tool registers beside recall and describe, batching
+    // accumulated tool outputs into digests at model-chosen boundaries.
+    // Ships default-off pending the compaction wave's readout (the
+    // schema.ts convention); false leaves the tool map and every other
+    // path byte-identical to the pre-compact build.
+    [OPTION_COMPACT_TOOL]: typeof raw.compactTool === "boolean" ? raw.compactTool : DEFAULT_COMPACT_TOOL,
     protectedTools: Array.isArray(raw.protectedTools) && raw.protectedTools.every(isNonEmptyString) ? raw.protectedTools : DEFAULT_PROTECTED_TOOLS,
     protectedPatterns: protectedPatterns.flatMap((pattern) => {
       const compiled = compiledGlobOf(pattern)

@@ -31,6 +31,8 @@ export const OPTION_SUMMARIZE_EVICTED_OUTPUTS = "summarizeEvictedOutputs"
 export const DEFAULT_SUMMARIZE_EVICTED_OUTPUTS = false
 export const OPTION_SUMMARY_TOKEN_BUDGET = "summaryTokenBudget"
 export const DEFAULT_SUMMARY_TOKEN_BUDGET = 256
+export const OPTION_COMPACT_TOOL = "compactTool"
+export const DEFAULT_COMPACT_TOOL = false
 
 // Shared by both entry modules so their registrations never drift.
 export const PLUGIN_ID = "context-manager"

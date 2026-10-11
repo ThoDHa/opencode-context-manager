@@ -1,8 +1,10 @@
 import { contextLimitForRun } from "./context-limits.ts"
 import type { ContextLimitEntry } from "./context-limits.ts"
+import { evictionCandidatesOf } from "./eviction.ts"
 import { ATTACHMENT_MIME_KEY, ATTACHMENT_URL_KEY } from "./messages.ts"
+import type { MessageBundle } from "./messages.ts"
 import type { ResolvedOptions } from "./options.ts"
-import { pageStoreMatchesFor } from "./page-store.ts"
+import { pagesForSession, pageStoreMatchesFor, recordPageStoreLines, storeEvictedPage } from "./page-store.ts"
 import type {
   PageEntry,
   PageStoreBySession,
@@ -13,9 +15,10 @@ import type {
   StoredPageMatch,
 } from "./page-store.ts"
 import { rememberFaultForSubject, sessionIDFromContext, sessionKeyFromContext, touchMapEntry } from "./session-maps.ts"
-import { createSessionMetrics, DEFAULT_REMEMBERED_FAULT_SUBJECTS, metricsForSession, totalsOf } from "./state.ts"
+import { compactCountersOf, createSessionMetrics, DEFAULT_REMEMBERED_FAULT_SUBJECTS, metricsForSession, totalsOf, withSessionMetricsEntry } from "./state.ts"
 import type { MetricsHydration, MetricsStore, PersistedTotals } from "./state.ts"
-import { JSON_INDENT_SPACES, RECALL_TOOL_NAME, SUBJECT_SEPARATOR } from "./vocabulary.ts"
+import type { SummaryCompressor } from "./summaries.ts"
+import { buildOutputDigest, buildReloadPointer, buildTombstone, JSON_INDENT_SPACES, RECALL_TOOL_NAME, renderSubject, SUBJECT_SEPARATOR, UNKNOWN_TARGET_LABEL } from "./vocabulary.ts"
 
 export const RECALL_ARG_NAME = "subject"
 export const RECALL_PROBE_ARG_NAME = "countsOnly"
@@ -99,6 +102,19 @@ const RETENTION_FAULT_SHIFT_FIELD = "faultShieldedShiftMessages"
 const STASH_ATTACHMENTS_LEAD = "attachments evicted with this output"
 const STASH_ATTACHMENT_DROPPED_TAIL = "payloads were dropped during eviction; re-run the tool to regenerate them"
 const UNKNOWN_ATTACHMENT_MIME_LABEL = "unknown mime"
+
+// The cooperative compact tool's surface: the name, the marker, and the
+// back-pressure constants. The constants are named values, not options,
+// so the measurement wave never varies them and no knob sprawl accrues.
+export const COMPACT_TOOL_NAME = "compact"
+const COMPACT_MARKER = "[ctx-compact]"
+const COMPACT_ACCEPTED_TAIL =
+  "seats replaced with digests and recall pointers, originals persisted for reload, summaries queued under the shared budget."
+const COMPACT_BOUNDED_REASON_TAIL = "; nothing compacted."
+const COMPACT_INFLIGHT_REASON =
+  "a compaction is still settling for this session; retry once its summaries finish"
+const COMPACT_MIN_INTERVAL_MS = 30000
+const COMPACT_MIN_BATCH_ENTRIES = 2
 
 type StatsSource = {
   options: ResolvedOptions
@@ -305,6 +321,118 @@ export const executeReadEvicted = async (
   return newest.attachments === undefined ? output : `${output}\n${pageAttachmentsLineFor(newest.attachments)}`
 }
 
+export type CompactSource = {
+  options: ResolvedOptions
+  metrics: MetricsStore
+  hydrations: MetricsHydration
+  persistedTotalsForSession: (sessionKey: string) => Promise<PersistedTotals | undefined>
+  pageStores: PageStoreBySession
+  pageStoreGuard: PageStoreGuard
+  listsForSession: (sessionKey: string) => MessageBundle[] | undefined
+  summaryCompressor: SummaryCompressor | undefined
+}
+
+export const COMPACT_TOOL_DESCRIPTION =
+  "Compact this session's accumulated tool outputs now, at a boundary you choose: every window-expired, unprotected output older than the recent window is replaced by a short digest with a recall pointer, its original is persisted to the page store, and its summary side call is queued under the shared token budget. Back-pressure applies: a minimum batch size, a minimum interval between compactions, and one settling compaction at a time; a refusal names the reason and counts nothing."
+
+// The per-session settling bookkeeping: the last accepted compaction's
+// start time and whether its summary side calls are still outstanding.
+// The map is keyed by session and never trimmed: one small record per
+// session that ever ran the tool, the same lifetime the metrics map's
+// diagnostics ride. The entry clears the flag through
+// notifyCompactSettled once the session's outstanding summary count
+// returns to zero, re-arming the single-in-flight gate exactly then.
+type CompactRunState = { lastStartMs: number; settling: boolean }
+const compactRunsBySession = new Map<string, CompactRunState>()
+
+// The settle notification the entry's counter sink raises when the
+// session's outstanding summary side calls all finish.
+export const notifyCompactSettled = (sessionKey: string): void => {
+  const runState = compactRunsBySession.get(sessionKey)
+  if (runState === undefined) return
+  runState.settling = false
+}
+
+// The bounded refusal text: the reason names the gate and the tail stays
+// constant, so a refusal is never an unbounded error string.
+const compactRefusalFor = (detail: string): string => `${COMPACT_MARKER} ${detail}${COMPACT_BOUNDED_REASON_TAIL}`
+
+// The compact tool's body: resolve the session, snapshot its newest
+// transform's message list, walk the same candidate chain the evictor
+// walks (protections, recency, size, marker filters, fault adjustment),
+// refuse through the back-pressure gates, and on acceptance apply the
+// eviction walk's per-entry mechanics: tombstone with digest and reload
+// pointer, page-store persistence, compressor enqueue. The list identity
+// guard drops a batch captured from a list a newer transform replaced.
+export const executeCompact = async (source: CompactSource, toolContext: unknown): Promise<string> => {
+  const sessionKey = sessionKeyFromContext(toolContext)
+  const refuse = (detail: string): string => {
+    withSessionMetricsEntry(source.metrics, sessionKey, source.options.metricsSessions, (entry) => {
+      compactCountersOf(entry).compactRefusals += 1
+    })
+    return compactRefusalFor(detail)
+  }
+  const list = source.listsForSession(sessionKey)
+  if (list === undefined) return refuse(`accumulated tool outputs (0) sit below the minimum batch of ${COMPACT_MIN_BATCH_ENTRIES}`)
+  const candidates = evictionCandidatesOf(list, source.options, new Map())
+  const batch = candidates.evictable.map((entry) => ({
+    stateRef: entry.stateRef,
+    tool: entry.tool,
+    msgIndex: entry.msgIndex,
+    partIndex: entry.partIndex,
+    bytes: entry.bytes,
+    subject: renderSubject(entry.subjects[0] ?? { path: UNKNOWN_TARGET_LABEL }),
+  }))
+  if (batch.length < COMPACT_MIN_BATCH_ENTRIES)
+    return refuse(`accumulated tool outputs (${batch.length}) sit below the minimum batch of ${COMPACT_MIN_BATCH_ENTRIES}`)
+  const runState = touchMapEntry(compactRunsBySession, sessionKey) ?? { lastStartMs: Number.NEGATIVE_INFINITY, settling: false }
+  if (runState.settling) return refuse(COMPACT_INFLIGHT_REASON)
+  const nowMs = source.options.now()
+  const elapsedMs = nowMs - runState.lastStartMs
+  if (elapsedMs < COMPACT_MIN_INTERVAL_MS)
+    return refuse(`the minimum interval of ${COMPACT_MIN_INTERVAL_MS}ms between compactions has not elapsed (last ran ${elapsedMs}ms ago)`)
+  // The hydration await settles the entry's persisted reseed before the
+  // counters write below, so an accepted compaction never lands on an
+  // entry that a still-loading record would overwrite.
+  await metricsForSession(
+    source.metrics,
+    source.hydrations,
+    source.persistedTotalsForSession,
+    sessionKey,
+    source.options.metricsSessions,
+  )
+  const pageStore = pagesForSession(source.pageStores, sessionKey, source.options.stashSessions)
+  const pageStoreEntries: PageEntry[] = []
+  let compactedBytes = 0
+  for (const candidate of batch) {
+    const digest = buildOutputDigest(candidate.tool, candidate.subject, candidate.stateRef.output)
+    const tombstone = buildTombstone(candidate.tool, candidate.subject, candidate.bytes, list.length - candidate.msgIndex, false, digest)
+    const stored: PageEntry = {
+      output: candidate.stateRef.output,
+      tool: candidate.tool,
+      subject: candidate.subject,
+      msgIndex: candidate.msgIndex,
+      partIndex: candidate.partIndex,
+    }
+    storeEvictedPage(pageStore, stored, source.options.stashLimit)
+    pageStoreEntries.push(stored)
+    source.summaryCompressor?.enqueue({ sessionKey, page: stored })
+    candidate.stateRef.output = `${tombstone}${buildReloadPointer(candidate.subject)}`
+    compactedBytes += candidate.bytes
+  }
+  compactRunsBySession.set(sessionKey, { lastStartMs: nowMs, settling: source.summaryCompressor !== undefined })
+  withSessionMetricsEntry(source.metrics, sessionKey, source.options.metricsSessions, (entry) => {
+    const counters = compactCountersOf(entry)
+    counters.compactionsRun += 1
+    counters.compactedEntries += pageStoreEntries.length
+    counters.compactedBytes += compactedBytes
+  })
+  if (pageStoreEntries.length > 0) {
+    await recordPageStoreLines(source.options, source.metrics, sessionKey, pageStoreEntries, source.pageStoreGuard)
+  }
+  return `${COMPACT_MARKER} compacted ${pageStoreEntries.length} accumulated outputs (${compactedBytes} bytes) at this boundary: ${COMPACT_ACCEPTED_TAIL}`
+}
+
 export const executeStatsTool = (source: StatsSource, toolContext: unknown): string => {
   const sessionKey = sessionKeyFromContext(toolContext)
   const sessionID = sessionIDFromContext(toolContext)
@@ -324,6 +452,7 @@ export const executeStatsTool = (source: StatsSource, toolContext: unknown): str
       agedReadEvictionMessages: source.options.agedReadEvictionMessages ?? null,
       summarizeEvictedOutputs: source.options.summarizeEvictedOutputs,
       summaryTokenBudget: source.options.summaryTokenBudget,
+      compactTool: source.options.compactTool,
       modelContextTokens: source.options.modelContextTokens,
       metricsLog: source.options.metricsLog,
       metricsPath: source.options.metricsPath,
@@ -408,6 +537,10 @@ export const executeStatsTool = (source: StatsSource, toolContext: unknown): str
     ...(metrics.pageStoreWriteError === undefined ? {} : { pageStoreWriteError: metrics.pageStoreWriteError }),
     ...(metrics.pageStoreSchemaError === undefined ? {} : { pageStoreSchemaError: metrics.pageStoreSchemaError }),
     ...(metrics.summaryLastError === undefined ? {} : { summaryLastError: metrics.summaryLastError }),
+    // The compact tool's session-cumulative counters, present only once
+    // the tool has recorded its first event: a gated-off or never-invoked
+    // build leaves the block absent, byte-identical to today's report.
+    ...(metrics.compact === undefined ? {} : { compact: metrics.compact }),
   }
   return JSON.stringify(report, null, JSON_INDENT_SPACES)
 }

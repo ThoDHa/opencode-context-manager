@@ -4724,7 +4724,7 @@ test("describe reports zeroed counters unknown context limit and empty page stor
     agedReadEvictionMessages: null,
     summarizeEvictedOutputs: false,
     summaryTokenBudget: SCHEMA_DEFAULT_SUMMARY_TOKEN_BUDGET,
-    modelContextTokens: {},
+    modelContextTokens: {}
     metricsLog: false,
     metricsPath: DEFAULT_METRICS_PATH,
     metricsRotationMaxBytes: DEFAULT_METRICS_ROTATION_MAX_BYTES,
@@ -11976,4 +11976,346 @@ test("an invalid summaryTokenBudget drops to the default and a valid pair passes
   assert.equal(resolveOptions({ [OPTION_SUMMARY_TOKEN_BUDGET]: 512 })[OPTION_SUMMARY_TOKEN_BUDGET], 512)
   assert.equal(resolveOptions({ [OPTION_SUMMARIZE_EVICTED_OUTPUTS]: true })[OPTION_SUMMARIZE_EVICTED_OUTPUTS], true)
   assert.equal(resolveOptions({})[OPTION_SUMMARIZE_EVICTED_OUTPUTS], false)
+})
+
+// ---------------------------------------------------------------------------
+// The cooperative compact tool (compactTool, default false): a model-invoked
+// tool that compacts accumulated tool outputs into digests at a boundary the
+// model itself chooses. The call executes synchronously on the newest
+// transform's message list for its session: window-expired, unprotected
+// outputs tombstone with digests and recall pointers exactly as the eviction
+// walk writes them, persist to the v2 page store, and enqueue one batch of
+// side-session summaries under the shared summaryTokenBudget (the compressor
+// construction gate extends to compactTool, so the compact-only arm drives
+// it with the compression pair off). Back-pressure is three named constants
+// with bounded refusal returns and one refusal counter: a minimum batch, a
+// minimum interval between compactions, and one settling compaction at a
+// time. Declared losses ride the return (entries and bytes) and the shared
+// counters surface through describe and the metrics totals.
+// ---------------------------------------------------------------------------
+
+const COMPACT_TOOL_NAME = "compact"
+const COMPACT_OPTION_KEY = "compactTool"
+const COMPACT_MARKER = "[ctx-compact]"
+const COMPACT_REPORT_KEY = "compact"
+const COMPACT_COUNTER_RUNS = "compactionsRun"
+const COMPACT_COUNTER_ENTRIES = "compactedEntries"
+const COMPACT_COUNTER_BYTES = "compactedBytes"
+const COMPACT_COUNTER_REFUSALS = "compactRefusals"
+const COMPACT_MIN_INTERVAL_MS = 30000
+const COMPACT_MIN_BATCH_ENTRIES = 2
+const COMPACT_OLD_OUTPUT_BYTES = MIN_EVICTABLE_BYTES
+const COMPACT_OLD_PATH_A = "/data/compact-a.txt"
+const COMPACT_OLD_PATH_B = "/data/compact-b.txt"
+const COMPACT_OLD_PATH_C = "/data/compact-c.txt"
+const COMPACT_OLD_PATH_D = "/data/compact-d.txt"
+const COMPACT_OLD_PATH_E = "/data/compact-e.txt"
+const COMPACT_HOT_PATH = "/data/compact-hot.txt"
+const COMPACT_PROTECTED_TOOL = "task"
+const COMPACT_WINDOW_FILLERS = 4
+// One fresh session id per compact test: the tool's per-session run-state
+// and metrics outlive one plugin instance in the module maps, so tests
+// must never share a session key with each other.
+const compactSessionId = (tag: string): string => `ctx-compact-${tag}`
+const COMPACT_ACCEPTED_TAIL =
+  "seats replaced with digests and recall pointers, originals persisted for reload, summaries queued under the shared budget."
+const COMPACT_ACCEPTED_FOR = (count: number, bytes: number): string =>
+  `${COMPACT_MARKER} compacted ${count} accumulated outputs (${bytes} bytes) at this boundary: ${COMPACT_ACCEPTED_TAIL}`
+const COMPACT_BATCH_REFUSAL_FOR = (count: number): string =>
+  `${COMPACT_MARKER} accumulated tool outputs (${count}) sit below the minimum batch of ${COMPACT_MIN_BATCH_ENTRIES}; nothing compacted.`
+const COMPACT_INFLIGHT_REFUSAL = `${COMPACT_MARKER} a compaction is still settling for this session; retry once its summaries finish; nothing compacted.`
+const COMPACT_COOLDOWN_REFUSAL_FOR = (elapsedMs: number): string =>
+  `${COMPACT_MARKER} the minimum interval of ${COMPACT_MIN_INTERVAL_MS}ms between compactions has not elapsed (last ran ${elapsedMs}ms ago); nothing compacted.`
+
+const compactCountersOf = (stats: Record<string, unknown>): Record<string, number> => stats[COMPACT_REPORT_KEY] as Record<string, number>
+
+const compactToolCall = async (hooks: HookMap, sessionID: string): Promise<unknown> =>
+  (hooks as Record<string, Record<string, RecallToolDefinition>>)[TOOL_MAP_KEY][COMPACT_TOOL_NAME].execute({}, { sessionID })
+
+const compactToolMapKeys = (hooks: HookMap): string[] => Object.keys((hooks as Record<string, Record<string, unknown>>)[TOOL_MAP_KEY]).sort()
+
+// The compact batch fixture: two window-expired read outputs the batch
+// compacts, one output seated inside the recent window the batch must never
+// touch, and window-filling text messages (list length 8, window 4, so the
+// eligible set is exactly the first two outputs).
+const buildCompactBatchBundle = (sessionID: string): StrictBundle =>
+  buildBundle(
+    [
+      [pathToolPart(COMPACT_OLD_PATH_A, COMPACT_OLD_OUTPUT_BYTES)],
+      [pathToolPart(COMPACT_OLD_PATH_B, COMPACT_OLD_OUTPUT_BYTES)],
+      ...fillerMessages(2),
+      [pathToolPart(COMPACT_HOT_PATH, COMPACT_OLD_OUTPUT_BYTES)],
+      ...fillerMessages(2),
+    ],
+    sessionID,
+  )
+
+test("the compact tool registers beside recall and describe only when compactTool is on", async () => {
+  const offHooks = await loadPluginHooks()
+  assert.deepEqual(compactToolMapKeys(offHooks), [DESCRIBE_TOOL_NAME, RECALL_TOOL_NAME])
+
+  const onHooks = await loadPluginHooksWith({ [COMPACT_OPTION_KEY]: true })
+  assert.deepEqual(compactToolMapKeys(onHooks), [COMPACT_TOOL_NAME, DESCRIBE_TOOL_NAME, RECALL_TOOL_NAME])
+})
+
+test("describe echoes compactTool defaulting to off and leaves the compact block absent before the first event", async () => {
+  const hooks = await loadPluginHooks()
+
+  const stats = await readStats(hooks, SESSION_ID)
+
+  assert.equal((stats.options as Record<string, unknown>)[COMPACT_OPTION_KEY], false)
+  assert.equal(Object.hasOwn(stats, COMPACT_REPORT_KEY), false)
+})
+
+test("a compact call below the minimum batch refuses with a bounded reason and counts one refusal", async () => {
+  const sessionID = compactSessionId("min-batch")
+  const hooks = await loadPluginHooksWith({ [COMPACT_OPTION_KEY]: true })
+  await runTransform(hooks, buildBundle([[pathToolPart(COMPACT_OLD_PATH_A, COMPACT_OLD_OUTPUT_BYTES)], ...fillerMessages(COMPACT_WINDOW_FILLERS)], sessionID))
+
+  assert.equal(await compactToolCall(hooks, sessionID), COMPACT_BATCH_REFUSAL_FOR(1))
+  assert.equal(compactCountersOf(await readStats(hooks, sessionID))[COMPACT_COUNTER_REFUSALS], 1)
+
+  await runTransform(hooks, buildBundle([[pathToolPart(COMPACT_OLD_PATH_A, COMPACT_OLD_OUTPUT_BYTES)], ...fillerMessages(COMPACT_WINDOW_FILLERS)], sessionID))
+  const counters = compactCountersOf(await readStats(hooks, sessionID))
+  assert.equal(counters[COMPACT_COUNTER_RUNS], 0)
+  assert.equal(counters[COMPACT_COUNTER_ENTRIES], 0)
+  assert.equal(counters[COMPACT_COUNTER_BYTES], 0)
+})
+
+test("a compact call with no recorded transform list refuses below the minimum batch", async () => {
+  const sessionID = compactSessionId("no-list")
+  const hooks = await loadPluginHooksWith({ [COMPACT_OPTION_KEY]: true })
+
+  assert.equal(await compactToolCall(hooks, sessionID), COMPACT_BATCH_REFUSAL_FOR(0))
+  assert.equal(compactCountersOf(await readStats(hooks, sessionID))[COMPACT_COUNTER_REFUSALS], 1)
+})
+
+test("a protected tool output is excluded from the compact batch so a task sibling leaves the count below the minimum", async () => {
+  const sessionID = compactSessionId("protected")
+  const hooks = await loadPluginHooksWith({ [COMPACT_OPTION_KEY]: true })
+  await runTransform(
+    hooks,
+    buildBundle(
+      [
+        [completedToolPart(COMPACT_PROTECTED_TOOL, { prompt: PROTECTED_TASK_PROMPT }, outputOfBytes(PROTECTED_OUTPUT_BYTES))],
+        [pathToolPart(COMPACT_OLD_PATH_A, COMPACT_OLD_OUTPUT_BYTES)],
+        ...fillerMessages(COMPACT_WINDOW_FILLERS),
+      ],
+      sessionID,
+    ),
+  )
+
+  assert.equal(await compactToolCall(hooks, sessionID), COMPACT_BATCH_REFUSAL_FOR(1))
+  assert.equal(compactCountersOf(await readStats(hooks, sessionID))[COMPACT_COUNTER_REFUSALS], 1)
+})
+
+test("a second compact call while the first batch's summaries settle refuses as the single in-flight compaction", async () => {
+  const sessionID = compactSessionId("in-flight")
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient({ holdPrompt: true })
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, { [COMPACT_OPTION_KEY]: true })
+    const bundle = buildCompactBatchBundle(sessionID)
+    await runTransform(hooks, bundle)
+
+    assert.equal(await compactToolCall(hooks, sessionID), COMPACT_ACCEPTED_FOR(2, COMPACT_OLD_OUTPUT_BYTES * 2))
+
+    // Two fresh window-expired outputs grow the same list, so the second
+    // call has an eligible batch to size: the refusal fires on the
+    // settling flag, not on an empty batch.
+    bundle.messages.push(
+      syntheticMessageFor(sessionID, [pathToolPart(COMPACT_OLD_PATH_C, COMPACT_OLD_OUTPUT_BYTES)]),
+      syntheticMessageFor(sessionID, [pathToolPart(COMPACT_OLD_PATH_D, COMPACT_OLD_OUTPUT_BYTES)]),
+      ...fillerMessages(4).map((parts) => syntheticMessageFor(sessionID, parts)),
+    )
+    assert.equal(await compactToolCall(hooks, sessionID), COMPACT_INFLIGHT_REFUSAL)
+
+    const counters = compactCountersOf(await readStats(hooks, sessionID))
+    assert.equal(counters[COMPACT_COUNTER_RUNS], 1)
+    assert.equal(counters[COMPACT_COUNTER_REFUSALS], 1)
+
+    // The drain is serial: release the parked first prompt so the second
+    // item's prompt parks, then release that one; waiting for two parked
+    // prompts before any release would deadlock against the serial queue.
+    fake.releasePrompts()
+    await fake.whenPrompted(2)
+    fake.releasePrompts()
+    await fake.settledAfter(2)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a compact call inside the minimum interval refuses on cooldown and one past it compacts again", async () => {
+  const sessionID = compactSessionId("cooldown")
+  let nowMs = 1_000_000
+  const hooks = await loadPluginHooksWith({ [COMPACT_OPTION_KEY]: true, now: () => nowMs })
+  const bundle = buildBundle(
+    [
+      [pathToolPart(COMPACT_OLD_PATH_A, COMPACT_OLD_OUTPUT_BYTES)],
+      [pathToolPart(COMPACT_OLD_PATH_B, COMPACT_OLD_OUTPUT_BYTES)],
+      [pathToolPart(COMPACT_OLD_PATH_C, COMPACT_OLD_OUTPUT_BYTES)],
+      ...fillerMessages(4),
+    ],
+    sessionID,
+  )
+  await runTransform(hooks, bundle)
+
+  assert.equal(await compactToolCall(hooks, sessionID), COMPACT_ACCEPTED_FOR(3, COMPACT_OLD_OUTPUT_BYTES * 3))
+
+  bundle.messages.push(
+    syntheticMessageFor(sessionID, [pathToolPart(COMPACT_OLD_PATH_D, COMPACT_OLD_OUTPUT_BYTES)]),
+    syntheticMessageFor(sessionID, [pathToolPart(COMPACT_OLD_PATH_E, COMPACT_OLD_OUTPUT_BYTES)]),
+    ...fillerMessages(6).map((parts) => syntheticMessageFor(sessionID, parts)),
+  )
+
+  nowMs += 10_000
+  assert.equal(await compactToolCall(hooks, sessionID), COMPACT_COOLDOWN_REFUSAL_FOR(10_000))
+  assert.equal(compactCountersOf(await readStats(hooks, sessionID))[COMPACT_COUNTER_REFUSALS], 1)
+
+  nowMs += COMPACT_MIN_INTERVAL_MS
+  assert.equal(await compactToolCall(hooks, sessionID), COMPACT_ACCEPTED_FOR(2, COMPACT_OLD_OUTPUT_BYTES * 2))
+  const counters = compactCountersOf(await readStats(hooks, sessionID))
+  assert.equal(counters[COMPACT_COUNTER_RUNS], 2)
+  assert.equal(counters[COMPACT_COUNTER_ENTRIES], 5)
+  assert.equal(counters[COMPACT_COUNTER_BYTES], COMPACT_OLD_OUTPUT_BYTES * 5)
+  assert.equal(counters[COMPACT_COUNTER_REFUSALS], 1)
+})
+
+test("an accepted compact call compacts exactly the window-expired seats and leaves the in-window seat intact", async () => {
+  const sessionID = compactSessionId("seats")
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient()
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, { [COMPACT_OPTION_KEY]: true })
+    const bundle = buildCompactBatchBundle(sessionID)
+    await runTransform(hooks, bundle)
+
+    assert.equal(await compactToolCall(hooks, sessionID), COMPACT_ACCEPTED_FOR(2, COMPACT_OLD_OUTPUT_BYTES * 2))
+
+    const firstSeat = toolPartAt(bundle.messages[0], 0).state.output
+    const secondSeat = toolPartAt(bundle.messages[1], 0).state.output
+    assert.ok(firstSeat.startsWith(TOMBSTONE_MARKER))
+    assert.ok(firstSeat.includes(digestSentenceFor(READ_TOOL, COMPACT_OLD_PATH_A, outputOfBytes(COMPACT_OLD_OUTPUT_BYTES))))
+    assert.ok(firstSeat.includes(reloadPointerFor(COMPACT_OLD_PATH_A)))
+    assert.ok(secondSeat.startsWith(TOMBSTONE_MARKER))
+    assert.ok(secondSeat.includes(digestSentenceFor(READ_TOOL, COMPACT_OLD_PATH_B, outputOfBytes(COMPACT_OLD_OUTPUT_BYTES))))
+    assert.ok(secondSeat.includes(reloadPointerFor(COMPACT_OLD_PATH_B)))
+    assert.equal(toolPartAt(bundle.messages[4], 0).state.output, outputOfBytes(COMPACT_OLD_OUTPUT_BYTES))
+
+    const pageStoreLines = pageLinesIn(storePath).filter((line) => line.kind === undefined)
+    assert.equal(pageStoreLines.length, 2)
+    assert.equal(pageStoreLines[0].session, sessionID)
+    assert.equal(pageStoreLines[0].subject, COMPACT_OLD_PATH_A)
+    assert.equal(pageStoreLines[0].output, outputOfBytes(COMPACT_OLD_OUTPUT_BYTES))
+    assert.equal(pageStoreLines[1].subject, COMPACT_OLD_PATH_B)
+
+    await fake.settledAfter(2)
+    assert.equal(await recallTool(hooks, COMPACT_OLD_PATH_A, sessionID), summaryServeTextFor(COMPRESSION_FAKE_SUMMARY))
+    assert.equal(
+      await recallToolArgs(hooks, { [RECALL_ARG_NAME]: COMPACT_OLD_PATH_A, [RECALL_VERBATIM_ARG_NAME]: true }, sessionID),
+      outputOfBytes(COMPACT_OLD_OUTPUT_BYTES),
+    )
+
+    const counters = compactCountersOf(await readStats(hooks, sessionID))
+    assert.equal(counters[COMPACT_COUNTER_RUNS], 1)
+    assert.equal(counters[COMPACT_COUNTER_ENTRIES], 2)
+    assert.equal(counters[COMPACT_COUNTER_BYTES], COMPACT_OLD_OUTPUT_BYTES * 2)
+    assert.equal(counters[COMPACT_COUNTER_REFUSALS], 0)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a compacted page persists in the v2 store and a cross-session recall reloads the original", async () => {
+  const sessionID = compactSessionId("cross-session")
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient()
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, { [COMPACT_OPTION_KEY]: true })
+    const bundle = buildCompactBatchBundle(sessionID)
+    await runTransform(hooks, bundle)
+    await compactToolCall(hooks, sessionID)
+    await fake.settledAfter(2)
+
+    assert.equal(
+      await recallToolArgs(hooks, { [RECALL_ARG_NAME]: COMPACT_OLD_PATH_A, [RECALL_VERBATIM_ARG_NAME]: true }, SESSION_ID_B),
+      `${outputOfBytes(COMPACT_OLD_OUTPUT_BYTES)}\n${PAGE_STORE_RESTORED_LINE}`,
+    )
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("the compact arm drives the shared compressor with the compression pair off and recall serves the summary first", async () => {
+  const sessionID = compactSessionId("compressor")
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient()
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, { [COMPACT_OPTION_KEY]: true })
+    const bundle = buildCompactBatchBundle(sessionID)
+    await runTransform(hooks, bundle)
+    await compactToolCall(hooks, sessionID)
+    await fake.settledAfter(2)
+
+    assert.equal(fake.created.length, 2)
+    assert.equal(fake.deleted.length, 2)
+    const lines = pageLinesIn(storePath)
+    assert.equal(lines.filter((line) => line.kind === PAGE_STORE_SUMMARY_LINE_KIND).length, 2)
+    assert.equal(await recallTool(hooks, COMPACT_OLD_PATH_A, sessionID), summaryServeTextFor(COMPRESSION_FAKE_SUMMARY))
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("the compact counters ride the metrics log totals and the option echoes through describe when on", async () => {
+  const sessionID = compactSessionId("metrics-log")
+  const metricsDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(metricsDir)
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const fake = createWiringFakeClient()
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, {
+      [COMPACT_OPTION_KEY]: true,
+      metricsLog: true,
+      metricsPath,
+    })
+    const bundle = buildCompactBatchBundle(sessionID)
+    await runTransform(hooks, bundle)
+    await compactToolCall(hooks, sessionID)
+    await fake.settledAfter(2)
+    await runTransform(hooks, bundle)
+
+    const lines = metricsLinesIn(metricsPath)
+    assert.ok(lines.length >= 1)
+    const newestCompact = lines[lines.length - 1][COMPACT_REPORT_KEY] as Record<string, number>
+    assert.equal(newestCompact[COMPACT_COUNTER_RUNS], 1)
+    assert.equal(newestCompact[COMPACT_COUNTER_ENTRIES], 2)
+    assert.equal(newestCompact[COMPACT_COUNTER_BYTES], COMPACT_OLD_OUTPUT_BYTES * 2)
+    const statsOptions = (await readStats(hooks, sessionID)).options as Record<string, unknown>
+    assert.equal(statsOptions[COMPACT_OPTION_KEY], true)
+  } finally {
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
+test("compactTool on stays byte-identical to off when the tool is never invoked", async () => {
+  const evictionLimit = contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS)
+
+  const offHooks = await loadPluginHooks()
+  const offBundle = buildStandardBundle(SESSION_ID, COMPACT_OLD_PATH_A)
+  await setContextLimit(offHooks, SESSION_ID, evictionLimit)
+  await runTransform(offHooks, offBundle)
+
+  const onHooks = await loadPluginHooksWith({ [COMPACT_OPTION_KEY]: true })
+  const onBundle = buildStandardBundle(SESSION_ID, COMPACT_OLD_PATH_A)
+  await setContextLimit(onHooks, SESSION_ID, evictionLimit)
+  await runTransform(onHooks, onBundle)
+
+  assert.ok(toolPartAt(offBundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+  assert.equal(toolPartAt(onBundle.messages[0], 0).state.output, toolPartAt(offBundle.messages[0], 0).state.output)
 })

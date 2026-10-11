@@ -15,7 +15,8 @@ import { stripTerminalNoiseFrom, type HygieneCadenceBySession } from "./hygiene.
 import { deliverHint, type HintMembershipBySession } from "./hints.ts"
 import { createSummaryCompressor, summaryRecordOfStoreLine } from "./summaries.ts"
 import type { SummaryClient, SummaryStoreLine } from "./summaries.ts"
-import { DESCRIBE_TOOL_DESCRIPTION, DESCRIBE_TOOL_NAME, executeReadEvicted, executeStatsTool, guardTool, RECALL_TOOL_ARGS, RECALL_TOOL_DESCRIPTION } from "./tools.ts"
+import { DESCRIBE_TOOL_DESCRIPTION, DESCRIBE_TOOL_NAME, executeCompact, executeReadEvicted, executeStatsTool, guardTool, notifyCompactSettled, RECALL_TOOL_ARGS, RECALL_TOOL_DESCRIPTION } from "./tools.ts"
+import { COMPACT_TOOL_DESCRIPTION, COMPACT_TOOL_NAME } from "./tools.ts"
 import { transformHookBody, type TransformHookDeps } from "./pipeline.ts"
 
 export { ADVISORY_BAND_RATIO_DEFAULT, DEFAULT_INGESTION_HYGIENE_ROTATION_MAX_BYTES, DEFAULT_METRICS_ROTATION_MAX_BYTES, DEFAULT_PAGE_STORE_ROTATION_MAX_BYTES } from "./options.ts"
@@ -168,13 +169,22 @@ const server = (async (pluginInput, rawOptions) => {
   const pageStoreGuard: PageStoreGuard = { newerSchemaObserved: false }
   const persistedTotalsForSession = (sessionKey: string): Promise<PersistedTotals | undefined> =>
     newestPersistedTotalsOf(options, sessionKey)
-  // The compression-on-evict side path: built only when the gate is on
-  // AND the host provided a client. Every other start leaves the plugin
-  // byte-identical to the pre-compression build: no sink reaches the
-  // walk, no side session is created, and no summary serves ahead of the
-  // store merge. The summary map itself lives inside the compressor; the
-  // sink below only persists the line.
+  // The compression-on-evict side path: built only when a summary-writing
+  // gate is on (the compression pair, or the compact tool whose batch rides
+  // the same compressor under the shared budget) AND the host provided a
+  // client. Every other start leaves the plugin byte-identical to the
+  // pre-compression build: no sink reaches the walk, no side session is
+  // created, and no summary serves ahead of the store merge. The summary
+  // map itself lives inside the compressor; the sink below only persists
+  // the line.
   const sideSessionIds = new Set<string>()
+  // The outstanding-summary census the settle notification consumes: one
+  // count per session, incremented by the queued deltas and decremented by
+  // the written and failed ones, so the compact tool's single-in-flight
+  // gate re-arms exactly when its batch's side calls all finish. Plain
+  // compression sessions never reach the notify (their queue counts live
+  // only here), so the sink stays compact-scoped.
+  const outstandingSummariesBySession = new Map<string, number>()
   const summarySink = async (line: SummaryStoreLine): Promise<void> => {
     // The store line rides the page writer's rotation, downgrade-refusal,
     // and diagnostic machinery; a failed write is a session diagnostic,
@@ -182,7 +192,7 @@ const server = (async (pluginInput, rawOptions) => {
     await recordPageStoreSummaryLines(options, metricsBySession, line.session, [summaryRecordOfStoreLine(line)], pageStoreGuard)
   }
   const summaryCompressor =
-    options.summarizeEvictedOutputs && pluginInput?.client !== undefined
+    (options.summarizeEvictedOutputs || options.compactTool) && pluginInput?.client !== undefined
       ? createSummaryCompressor({
           client: hostSummaryClientOf(pluginInput.client, sideSessionIds),
           sink: summarySink,
@@ -203,6 +213,13 @@ const server = (async (pluginInput, rawOptions) => {
               if (delta.failureMessage !== undefined) entry.summaryLastError = delta.failureMessage
               else if (delta.written > 0) delete entry.summaryLastError
             })
+            const outstanding = (outstandingSummariesBySession.get(sessionKey) ?? 0) + delta.queued - delta.written - delta.failed
+            if (outstanding <= 0) {
+              outstandingSummariesBySession.delete(sessionKey)
+              notifyCompactSettled(sessionKey)
+            } else {
+              outstandingSummariesBySession.set(sessionKey, outstanding)
+            }
           },
         })
       : undefined
@@ -253,6 +270,28 @@ const server = (async (pluginInput, rawOptions) => {
   const describeTool = async (_args: unknown, toolContext: unknown): Promise<string> =>
     executeStatsTool({ options, limits: contextLimits, modelKeys: modelKeyBySession, pageStores: pageStoreBySession, metrics: metricsBySession }, toolContext)
 
+  // The newest transform's message list per session, captured by reference
+  // so the compact tool reads and mutates exactly the array the next
+  // request carries. The map never trims: one reference per live session,
+  // replaced on every transform (the same lifetime the page-store map rides;
+  // a replaced array is garbage the moment the host drops it).
+  const messageListsBySession = new Map<string, MessageBundle[]>()
+
+  const compactTool = async (_args: unknown, toolContext: unknown): Promise<string> =>
+    executeCompact(
+      {
+        options,
+        metrics: metricsBySession,
+        hydrations: metricsHydrationBySession,
+        persistedTotalsForSession,
+        pageStores: pageStoreBySession,
+        pageStoreGuard,
+        listsForSession: (sessionKey) => messageListsBySession.get(sessionKey),
+        summaryCompressor,
+      },
+      toolContext,
+    )
+
   return {
     "chat.params": async (input: { sessionID: string; model?: ChatParamsModel }) => {
       try {
@@ -272,6 +311,7 @@ const server = (async (pluginInput, rawOptions) => {
       let sessionKey = FALLBACK_SESSION_KEY
       try {
         sessionKey = sessionKeyFromContext(messages[0]?.info)
+        messageListsBySession.set(sessionKey, messages)
         // Side-session stand-down: a side session's own model call
         // re-enters this hook, and returning identity output is the
         // recursion guard the LRU-60 spike validated. The session key is
@@ -364,6 +404,18 @@ const server = (async (pluginInput, rawOptions) => {
         args: {},
         execute: guardTool(describeTool),
       },
+      // The cooperative compact tool registers only when its gate is on:
+      // a gated-off start leaves the tool map exactly today's two entries,
+      // and no host surface learns the tool existed.
+      ...(options.compactTool
+        ? {
+            [COMPACT_TOOL_NAME]: {
+              description: COMPACT_TOOL_DESCRIPTION,
+              args: {},
+              execute: guardTool(compactTool),
+            },
+          }
+        : {}),
     },
   }
 }) satisfies Plugin

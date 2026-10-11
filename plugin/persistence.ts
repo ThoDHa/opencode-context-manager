@@ -10,6 +10,15 @@ import { JSON_INDENT_SPACES, orderedRenderedSubjectsOf } from "./vocabulary.ts"
 import type { HotSubject } from "./vocabulary.ts"
 import { RAW_COUNTER_KEYS, totalsOf, withSessionMetricsEntry } from "./state.ts"
 import type { AdvisoryResult, CumulativeCounters, LastRunMetrics, MetricsStore, PersistedContextLimitSeed, PersistedCounters, PersistedTotals, RawCounterKey, RetentionBreakdown, RunOutcome, SessionMetrics } from "./state.ts"
+
+// The compact counters' eventfulness delta: whether any cumulative compact
+// counter moved since the value sum already flushed to a line. A session
+// without a compact block never moves.
+const compactCountersMovedSinceLastLine = (metrics: SessionMetrics): boolean => {
+  if (metrics.compact === undefined) return false
+  const sum = metrics.compact.compactionsRun + metrics.compact.compactedEntries + metrics.compact.compactedBytes + metrics.compact.compactRefusals
+  return sum !== (metrics.compactLoggedSum ?? 0)
+}
 import type { SessionPageStore } from "./page-store.ts"
 
 const HYGIENE_COPY_DISABLED_MAX_BYTES = 0
@@ -263,7 +272,12 @@ export const recordMetricsLine = async (
     purgedThisRun > 0 ||
     faultsThisRun > 0 ||
     fenceEvictedThisRun.blocks > 0 ||
-    recallsSinceLastLine > 0
+    recallsSinceLastLine > 0 ||
+    // A compact-tool event between transforms (an accepted compaction or
+    // a refusal) is a declared loss the readout must see: any movement in
+    // the session's cumulative compact counters since the last flushed
+    // line makes the next run eventful.
+    compactCountersMovedSinceLastLine(metrics)
   const isEventful = hasRecordedEvent || reasoningExpiredThisRun.parts > 0
   if (options.metricsLog === false || isEventful === false) return
   const hasSignificantEvent = hasRecordedEvent || contextLimit.source !== metrics.lastLineContextLimitSource
@@ -305,6 +319,11 @@ export const recordMetricsLine = async (
     fenceEvictedThisRun: fenceEvictedThisRun.blocks,
     faultsThisRun,
     recallsSinceLastLine,
+    // The compact tool's session-cumulative counters, present only once
+    // the tool has recorded its first event: the spread keeps the line's
+    // JSON byte-shape identical on every gated-off or never-invoked run,
+    // pre-compact readers included.
+    ...(metrics.compact === undefined ? {} : { compact: metrics.compact }),
     totals: totalsOf(metrics, options.charsPerToken),
   }
   try {
@@ -312,6 +331,10 @@ export const recordMetricsLine = async (
     await rotateMetricsLogPastCap(options.metricsPath, Buffer.byteLength(metricsJsonLine), options.metricsRotationMaxBytes)
     await appendFile(options.metricsPath, metricsJsonLine)
     metrics.recallsLoggedThrough = metrics.recallHits + metrics.recallMisses
+    if (metrics.compact !== undefined) {
+      metrics.compactLoggedSum =
+        metrics.compact.compactionsRun + metrics.compact.compactedEntries + metrics.compact.compactedBytes + metrics.compact.compactRefusals
+    }
     metrics.lastLineAtMs = nowMs
     metrics.lastLineContextLimitSource = contextLimit.source
     delete metrics.logWriteError
