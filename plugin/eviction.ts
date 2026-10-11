@@ -23,7 +23,6 @@ type EvictableEntry = {
   attachmentBytes: number
   subjects: Subject[]
 }
-export type CompactEvictableEntry = EvictableEntry
 
 // The effective eviction watermark in tokens: the absolute watermarkTokens
 // option wins when set; otherwise the budget times the fractional
