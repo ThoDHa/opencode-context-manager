@@ -747,6 +747,16 @@ const tailEntriesIn = (bundle: StrictBundle): TailEntryRef[] => {
   return found
 }
 
+// The host drops transform-time message-list appends between requests
+// (the F4 probe's finding), so each new request arrives without the tail
+// region the previous projection built; the suite models that by splicing
+// the projected entries back out before the next transform.
+const stripTailEntries = (bundle: StrictBundle): void => {
+  bundle.messages = bundle.messages.filter(
+    (message) => !message.parts.some((part) => part["type"] === "text" && typeof part["text"] === "string" && part["text"].startsWith(TAIL_SUMMARY_LEAD)),
+  )
+}
+
 const runTransformShaped = async (hooks: HookMap, sessionID: string): Promise<StrictBundle> => {
   const bundle: StrictBundle = buildBundle(fillerMessages(), sessionID)
   await runTransform(hooks, bundle)
@@ -10761,6 +10771,7 @@ const PAGE_STORE_DISABLED_PROBE_SUBJECT = "/data/page-store-disabled.txt"
 const PAGE_STORE_ROTATION_A_SUBJECT = "/data/page-store-rotation-a.txt"
 const PAGE_STORE_ROTATION_B_SUBJECT = "/data/page-store-rotation-b.txt"
 const PAGE_STORE_REPLACEMENT_SUBJECT = "/data/page-store-replacement.txt"
+const PAGE_STORE_THIRD_SUBJECT = "/data/page-store-third.txt"
 const PAGE_STORE_ROUNDTRIP_SUBJECT = "/data/page-store-roundtrip.txt"
 const PAGE_STORE_OLDER_SUBJECT = "/data/page-store-older.txt"
 const PAGE_STORE_OLDER_OUTPUTS = ["older page one", "older page two", "newest page of three"]
@@ -12063,7 +12074,7 @@ test("the tail gate extends the compressor construction: a tail-only arm writes 
   }
 })
 
-test("the tail gate appends one user-role summary entry at the transform-time end of the list", async () => {
+test("the tail gate projects one user-role summary entry at the transform-time end of the list", async () => {
   const pagesDir = makeMetricsDir()
   try {
     const storePath = pageStorePathIn(pagesDir)
@@ -12073,8 +12084,7 @@ test("the tail gate appends one user-role summary entry at the transform-time en
       tailSummaryMaxTokens: TAIL_SUMMARY_CAP_FITS_ONE,
     })
 
-    const evicted = await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
-    assert.equal(tailEntriesIn(evicted).length, 0)
+    await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
     await fake.settledAfter(1)
 
     const after = await runTransformShaped(hooks, SESSION_ID)
@@ -12110,7 +12120,7 @@ test("the tombstone seat stays byte-identical between the compression gate and t
   }
 })
 
-test("a later transform on a list already carrying a tail entry never rewrites it and never duplicates it", async () => {
+test("a later transform re-derives the same tail after the host dropped the previous projection", async () => {
   const pagesDir = makeMetricsDir()
   try {
     const storePath = pageStorePathIn(pagesDir)
@@ -12126,65 +12136,104 @@ test("a later transform on a list already carrying a tail entry never rewrites i
     const firstEntries = tailEntriesIn(after)
     assert.equal(firstEntries.length, 1)
     const firstText = firstEntries[0]?.text
-    const firstSnapshot = JSON.stringify(after.messages)
 
-    // The host re-runs the transform over the same persisted list every
-    // turn; the second run must leave the frozen entry byte-identical and
-    // append nothing (the pending summary was consumed exactly once).
+    // The host drops the projection between requests; the next transform
+    // re-derives the identical entry from the persistent summary records,
+    // oldest-first at the array end, and fires no new side call to do it.
+    stripTailEntries(after)
+    const callsBefore = fake.calls.length
     await runTransform(hooks, after)
     const secondEntries = tailEntriesIn(after)
     assert.equal(secondEntries.length, 1)
     assert.equal(secondEntries[0]?.text, firstText)
-    assert.equal(JSON.stringify(after.messages), firstSnapshot)
+    assert.equal(secondEntries[0]?.messageIndex, after.messages.length - 1)
+    assert.equal(fake.calls.length, callsBefore)
   } finally {
     cleanupMetricsDir(pagesDir)
   }
 })
 
-test("transform leaves a frozen tail entry byte-identical when the fence pass scans it with userFenceEviction enabled", async () => {
+test("a settled summary lands in every later request's array instead of flashing once", async () => {
   const pagesDir = makeMetricsDir()
   try {
     const storePath = pageStorePathIn(pagesDir)
-    const fencedSummary = [
-      "1. the build passed",
-      `${FENCE_TICKS}${FENCE_LANGUAGE_TS}`,
-      ...fenceContentLines(FENCE_TEST_THRESHOLD + 1, FENCE_LINE_TAG),
-      FENCE_TICKS,
-    ].join("\n")
-    const fake = createWiringFakeClient({ readTexts: [fencedSummary] })
+    const fake = createWiringFakeClient()
     const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, {
       [OPTION_TAIL_SUMMARY_BLOCKS]: true,
       tailSummaryMaxTokens: TAIL_SUMMARY_CAP_FITS_ONE,
-      userFenceEviction: { enabled: true, minBlockLines: FENCE_TEST_THRESHOLD },
     })
 
     await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
     await fake.settledAfter(1)
-    const after = await runTransformShaped(hooks, SESSION_ID)
-    const frozen = tailEntriesIn(after)
-    assert.equal(frozen.length, 1)
-    const frozenIndex = frozen[0]?.messageIndex
-    const frozenText = frozen[0]?.text
-    const frozenSnapshot = JSON.stringify(after.messages[frozenIndex])
 
-    // Later turns move the appended entry behind the hot window, where the
-    // fence pass scans user-role text parts; a summary quoting a fenced
-    // snippet must ride out that scan untouched like every other frozen
-    // entry the list holds.
-    after.messages.push(...fillerMessages().map((parts) => syntheticMessageFor(SESSION_ID, parts)))
-    await runTransform(hooks, after)
-
-    const rescanned = tailEntriesIn(after)
-    assert.equal(rescanned.length, 1)
-    assert.equal(rescanned[0]?.messageIndex, frozenIndex)
-    assert.equal(rescanned[0]?.text, frozenText)
-    assert.equal(JSON.stringify(after.messages[frozenIndex]), frozenSnapshot)
+    // The one-shot flash defect the F4 probe exposed: a summary that
+    // appears in exactly one request's array and vanishes. Three
+    // successive requests must each carry the entry, once per request.
+    for (let request = 1; request <= 3; request += 1) {
+      const bundle = await runTransformShaped(hooks, SESSION_ID)
+      const entries = tailEntriesIn(bundle)
+      assert.equal(entries.length, 1, `request ${request} lost the tail entry`)
+      assert.ok(entries[0]?.text.includes(COMPRESSION_FAKE_SUMMARY), `request ${request} lost the summary text`)
+      stripTailEntries(bundle)
+    }
   } finally {
     cleanupMetricsDir(pagesDir)
   }
 })
 
-test("the tail pass stops appending at the cap, drops the overflow, and counts both", async () => {
+test("a fresh plugin instance projects the tail from the prior instance's persisted summary lines", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const writerFake = createWiringFakeClient()
+    const writerHooks = await loadPluginHooksWithClientAndStore(writerFake.client, storePath, {
+      [OPTION_TAIL_SUMMARY_BLOCKS]: true,
+      tailSummaryMaxTokens: TAIL_SUMMARY_CAP_FITS_ONE,
+    })
+
+    await runPageStoreEviction(writerHooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+    await writerFake.settledAfter(1)
+
+    // Restart shape: a new process over the same store. The v2 summary
+    // lines are the durable source, so the first transform projects the
+    // prior session's summary without consulting the model at all.
+    const freshFake = createWiringFakeClient()
+    const freshHooks = await loadPluginHooksWithClientAndStore(freshFake.client, storePath, {
+      [OPTION_TAIL_SUMMARY_BLOCKS]: true,
+      tailSummaryMaxTokens: TAIL_SUMMARY_CAP_FITS_ONE,
+    })
+    const after = await runTransformShaped(freshHooks, SESSION_ID)
+
+    const entries = tailEntriesIn(after)
+    assert.equal(entries.length, 1)
+    assert.ok(entries[0]?.text.includes(COMPRESSION_FAKE_SUMMARY))
+    assert.equal(freshFake.created.length, 0)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("the fence pass skips a user text part carrying the tail summary prefix even when it holds a qualifying fence", async () => {
+  const hooks = await loadPluginHooksWith({ userFenceEviction: { enabled: true, minBlockLines: FENCE_TEST_THRESHOLD } })
+  const entryText = [
+    `${TAIL_SUMMARY_LEAD} (read ${PAGE_STORE_EVICTED_SUBJECT}): 1. the build passed`,
+    fenceBlockText(FENCE_LANGUAGE_TS, fenceContentLines(FENCE_TEST_THRESHOLD + 1, FENCE_LINE_TAG)),
+    "2. one warning on line 9",
+  ].join("\n")
+  const bundle = userFenceBundle(entryText)
+  await runTransform(hooks, bundle)
+
+  // A projected tail entry below the hot window (or a user part quoting
+  // one) is append-only history: the fence pass must ride past the tail
+  // prefix untouched and store no page for its fenced snippet.
+  assert.equal(textAt(bundle, 0), entryText)
+  assert.equal(
+    await recallTool(hooks, fenceFirstLineOf(FENCE_LINE_TAG), SESSION_ID),
+    stashMissFor(fenceFirstLineOf(FENCE_LINE_TAG), STASH_EMPTY_OCCUPANCY),
+  )
+})
+
+test("the tail pass stops projecting at the cap, drops the overflow, and counts both", async () => {
   const pagesDir = makeMetricsDir()
   try {
     const storePath = pageStorePathIn(pagesDir)
@@ -12199,28 +12248,22 @@ test("the tail pass stops appending at the cap, drops the overflow, and counts b
         metricsPath,
       })
 
-      // Same-list host semantics: one bundle accumulates both evictions,
-      // so appended entries persist across runs the way the host's
-      // persisted history does. Eviction A; its summary appends during
-      // the second run (the B eviction). Summary B's entry then exceeds
-      // the cap against A's live occupancy and drops on the quiet run.
-      await setContextLimit(hooks, SESSION_ID, contextForDeficit(STANDARD_BUNDLE_CHARS, OVER_BY_ONE_TOKENS))
-      const bundle = buildStandardBundle(SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
-      await runTransform(hooks, bundle)
+      // Two settled summaries, one cap: the projection fits the oldest
+      // (insertion order) and drops the overflow. Every summary is a
+      // persistent record now, so nothing depends on same-list history;
+      // plain requests build the whole tail per run.
+      await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
       await fake.settledAfter(1)
-
-      bundle.messages.push(...buildStandardBundle(SESSION_ID, PAGE_STORE_REPLACEMENT_SUBJECT).messages)
-      await runTransform(hooks, bundle)
+      await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_REPLACEMENT_SUBJECT)
       await fake.settledAfter(2)
 
+      const bundle = await runTransformShaped(hooks, SESSION_ID)
       const entries = tailEntriesIn(bundle)
       assert.equal(entries.length, 1)
       assert.ok(entries[0]?.text.includes(PAGE_STORE_EVICTED_SUBJECT))
 
-      await runTransform(hooks, bundle)
-      assert.equal(tailEntriesIn(bundle).length, 1)
       const tailBlock = lastMetricsTailBlock(metricsPath)
-      assert.equal(tailBlock.appended, 0)
+      assert.equal(tailBlock.projected, 1)
       assert.equal(tailBlock.dropped, 1)
       assert.equal(tailBlock.liveEntries, 1)
       assert.ok(tailBlock.liveTokens > 0)
@@ -12233,7 +12276,7 @@ test("the tail pass stops appending at the cap, drops the overflow, and counts b
   }
 })
 
-test("the tail block surfaces the occupancy and drop counters through the metrics log", async () => {
+test("a re-projection of an unchanged summary set stays quiet while a changed set reports dropped", async () => {
   const metricsDir = makeMetricsDir()
   const pagesDir = makeMetricsDir()
   try {
@@ -12246,20 +12289,30 @@ test("the tail block surfaces the occupancy and drop counters through the metric
       metricsPath,
     })
 
-    // The eviction run itself is eventful and lands before any tail entry
-    // exists; the NEXT eventful run carries the append. A second eviction
-    // provides that eventfulness deterministically (a quiet text-only run
-    // writes no line by the coalescing gate, correctly).
     await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
     await fake.settledAfter(1)
     await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_REPLACEMENT_SUBJECT)
     await fake.settledAfter(2)
 
-    const tailBlock = lastMetricsTailBlock(metricsPath)
-    assert.equal(tailBlock.appended, 1)
-    assert.equal(tailBlock.dropped, 0)
-    assert.equal(tailBlock.liveEntries, 1)
-    assert.ok(tailBlock.liveTokens > 0)
+    // First projection run: the block reports the projected set.
+    const bundle = await runTransformShaped(hooks, SESSION_ID)
+    const linesBeforeQuietRun = metricsLinesIn(metricsPath).length
+    const first = lastMetricsTailBlock(metricsPath)
+    assert.equal(first.projected, 2)
+    assert.equal(first.dropped, 0)
+    assert.equal(first.liveEntries, 2)
+
+    // An unchanged re-projection writes nothing (correctly quiet); a new
+    // eviction makes the run eventful again and the stable counter shape
+    // returns: projected full set, dropped stable at zero.
+    stripTailEntries(bundle)
+    await runTransformShaped(hooks, SESSION_ID)
+    assert.equal(metricsLinesIn(metricsPath).length, linesBeforeQuietRun)
+    await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_THIRD_SUBJECT)
+    const third = lastMetricsTailBlock(metricsPath)
+    assert.equal(third.projected, 3)
+    assert.equal(third.dropped, 0)
+    assert.equal(third.liveEntries, 3)
   } finally {
     cleanupMetricsDir(pagesDir)
     cleanupMetricsDir(metricsDir)
@@ -12316,8 +12369,8 @@ test("both gates on: the compressor fires once, the tombstone lands, the tail en
     await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
     await fake.settledAfter(1)
 
-    // Double-serve-by-design: one side-call lifecycle, the tail entry
-    // appended, and recall still serving the summary ahead of the store.
+    // Double-serve-by-design: one side-call lifecycle, the projected tail
+    // entry, and recall still serving the summary ahead of the store.
     assert.equal(fake.created.length, 1)
     assert.equal(fake.calls.length, COMPRESSION_LIFECYCLE_CALLS)
     const after = await runTransformShaped(hooks, SESSION_ID)
@@ -12325,6 +12378,11 @@ test("both gates on: the compressor fires once, the tombstone lands, the tail en
     assert.equal(entries.length, 1)
     assert.ok(entries[0]?.text.includes(COMPRESSION_FAKE_SUMMARY))
     assert.equal(await recallTool(hooks, PAGE_STORE_EVICTED_SUBJECT, SESSION_ID), summaryServeTextFor(COMPRESSION_FAKE_SUMMARY))
+    stripTailEntries(after)
+    const again = await runTransformShaped(hooks, SESSION_ID)
+    const reDerived = tailEntriesIn(again)
+    assert.equal(reDerived.length, 1)
+    assert.ok(reDerived[0]?.text.includes(COMPRESSION_FAKE_SUMMARY))
   } finally {
     cleanupMetricsDir(pagesDir)
   }
@@ -12362,9 +12420,9 @@ test("describe echoes the tail gate option while the transformed list carries th
     const after = await runTransformShaped(hooks, SESSION_ID)
 
     // The occupancy surface is the metrics log line's tailSummaries block
-    // (liveEntries is the live-list scan, not a counter); describe's tail
-    // surface is the option echo pinned above. The run's occupancy must
-    // match what the scanner sees on the final list.
+    // (liveEntries is the projected set's size, not a counter); describe's
+    // tail surface is the option echo pinned above. The run's occupancy
+    // must match what the scanner sees on the final list.
     const stats = await readStats(hooks, SESSION_ID)
     assert.equal(stats.options.tailSummaryBlocks, true)
     assert.equal(tailEntriesIn(after).length, 1)
