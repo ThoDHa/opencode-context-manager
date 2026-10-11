@@ -1,6 +1,6 @@
 import { hotFromIndexOf, TEXT_PART_TYPE } from "./messages.ts"
 import type { MessageBundle } from "./messages.ts"
-import { boundedSingleLineOf, buildFenceTombstone } from "./vocabulary.ts"
+import { boundedSingleLineOf, buildFenceTombstone, TAIL_SUMMARY_TEXT_PREFIX } from "./vocabulary.ts"
 import type { ResolvedOptions } from "./options.ts"
 import type { PageEntry, SessionPageStore } from "./page-store.ts"
 import { storeEvictedPage } from "./page-store.ts"
@@ -108,6 +108,10 @@ export const evictLargeUserFences = (messages: MessageBundle[], options: Resolve
       if (part["type"] !== TEXT_PART_TYPE) continue
       const text = part["text"]
       if (typeof text !== "string") continue
+      // Frozen tail entries are append-only history: rewriting one here
+      // would breach the tail block's freeze contract mid-history and
+      // shrink the tail scan's live occupancy under the bytes it counted.
+      if (text.startsWith(TAIL_SUMMARY_TEXT_PREFIX)) continue
       const lines = text.split("\n")
       let lineStarts: number[] | undefined
       const plans: FenceReplacement[] = []

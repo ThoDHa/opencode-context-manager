@@ -12141,6 +12141,49 @@ test("a later transform on a list already carrying a tail entry never rewrites i
   }
 })
 
+test("transform leaves a frozen tail entry byte-identical when the fence pass scans it with userFenceEviction enabled", async () => {
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fencedSummary = [
+      "1. the build passed",
+      `${FENCE_TICKS}${FENCE_LANGUAGE_TS}`,
+      ...fenceContentLines(FENCE_TEST_THRESHOLD + 1, FENCE_LINE_TAG),
+      FENCE_TICKS,
+    ].join("\n")
+    const fake = createWiringFakeClient({ readTexts: [fencedSummary] })
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, {
+      [OPTION_TAIL_SUMMARY_BLOCKS]: true,
+      tailSummaryMaxTokens: TAIL_SUMMARY_CAP_FITS_ONE,
+      userFenceEviction: { enabled: true, minBlockLines: FENCE_TEST_THRESHOLD },
+    })
+
+    await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+    await fake.settledAfter(1)
+    const after = await runTransformShaped(hooks, SESSION_ID)
+    const frozen = tailEntriesIn(after)
+    assert.equal(frozen.length, 1)
+    const frozenIndex = frozen[0]?.messageIndex
+    const frozenText = frozen[0]?.text
+    const frozenSnapshot = JSON.stringify(after.messages[frozenIndex])
+
+    // Later turns move the appended entry behind the hot window, where the
+    // fence pass scans user-role text parts; a summary quoting a fenced
+    // snippet must ride out that scan untouched like every other frozen
+    // entry the list holds.
+    after.messages.push(...fillerMessages().map((parts) => syntheticMessageFor(SESSION_ID, parts)))
+    await runTransform(hooks, after)
+
+    const rescanned = tailEntriesIn(after)
+    assert.equal(rescanned.length, 1)
+    assert.equal(rescanned[0]?.messageIndex, frozenIndex)
+    assert.equal(rescanned[0]?.text, frozenText)
+    assert.equal(JSON.stringify(after.messages[frozenIndex]), frozenSnapshot)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
 test("the tail pass stops appending at the cap, drops the overflow, and counts both", async () => {
   const pagesDir = makeMetricsDir()
   try {
@@ -12304,7 +12347,7 @@ test("gate off with the tail gate on but no client stays byte-identical and fire
   assert.ok(toolPartAt(plainBundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
 })
 
-test("describe reports the live tail-entry occupancy through the shared counters channel", async () => {
+test("describe echoes the tail gate option while the transformed list carries the live tail-entry occupancy", async () => {
   const pagesDir = makeMetricsDir()
   try {
     const storePath = pageStorePathIn(pagesDir)
