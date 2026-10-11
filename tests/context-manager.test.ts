@@ -12790,10 +12790,14 @@ test("the settle re-arm accepts a second compaction after the first batch's summ
     assert.equal(counters[COMPACT_COUNTER_ENTRIES], 5)
     assert.equal(counters[COMPACT_COUNTER_BYTES], COMPACT_OLD_OUTPUT_BYTES * 5)
 
+    // Drain the second batch fully: release the third parked prompt so
+    // the fourth and fifth park, release those, and wait out all five
+    // side sessions (2 + 3), so no prompt or delete is still in flight
+    // when the temp store is cleaned up.
     fake.releasePrompts()
-    await fake.whenPrompted(4)
+    await fake.whenPrompted(5)
     fake.releasePrompts()
-    await fake.settledAfter(4)
+    await fake.settledAfter(5)
   } finally {
     cleanupMetricsDir(pagesDir)
   }

@@ -76,6 +76,17 @@ const compactionContextFor = (metricsEntry: SessionMetrics | undefined, pageStor
 // deleted when its summary settles or fails). Deriving the map from a
 // host tool inventory instead of hardcoding it is the designated
 // follow-up the moment the SDK exposes a session-level tools policy.
+// The compact tool's capture map (messageListsBySession) holds one array
+// reference per session whose transforms are recent. The bound is its own
+// constant at 64 rather than the metrics map's session bound: the metrics
+// bound's small default (8) lets concurrent sessions age a capture out
+// while its session is still mid-request, and a compact call refused for
+// a missing list would then be a bound eviction masquerading as
+// back-pressure, polluting the refusal covariate the wave's evidence
+// reads. At 64 a capture survives every realistic request interleave, so
+// a missing-list refusal means the session genuinely never transformed.
+const COMPACT_LIST_SESSIONS_BOUND = 64
+
 const SIDE_SESSION_TOOLS_OFF: Record<string, boolean> = {
   bash: false,
   edit: false,
@@ -281,7 +292,7 @@ const server = (async (pluginInput, rawOptions) => {
   // The newest transform's message list per session, captured by reference
   // so the compact tool reads and mutates exactly the array the next
   // request carries. Written only when the compact gate is on (every other
-  // build has no reader), and bounded at the metrics map's session bound
+  // build has no reader), and bounded at the capture map's own constant
   // with the shared remember-session idiom: a stale list is garbage the
   // moment its session goes quiet past the bound, and the newest sessions
   // survive the trim exactly as they do in the metrics map.
@@ -321,7 +332,7 @@ const server = (async (pluginInput, rawOptions) => {
       let sessionKey = FALLBACK_SESSION_KEY
       try {
         sessionKey = sessionKeyFromContext(messages[0]?.info)
-        if (options.compactTool) rememberSessionValue(messageListsBySession, sessionKey, messages, options.metricsSessions)
+        if (options.compactTool) rememberSessionValue(messageListsBySession, sessionKey, messages, COMPACT_LIST_SESSIONS_BOUND)
         // Side-session stand-down: a side session's own model call
         // re-enters this hook, and returning identity output is the
         // recursion guard the LRU-60 spike validated. The session key is
