@@ -357,13 +357,12 @@ export const notifyCompactSettled = (sessionKey: string): void => {
 // constant, so a refusal is never an unbounded error string.
 const compactRefusalFor = (detail: string): string => `${COMPACT_MARKER} ${detail}${COMPACT_BOUNDED_REASON_TAIL}`
 
-// The compact tool's body: resolve the session, snapshot its newest
+// The compact tool's body: resolve the session, read its newest
 // transform's message list, walk the same candidate chain the evictor
 // walks (protections, recency, size, marker filters, fault adjustment),
 // refuse through the back-pressure gates, and on acceptance apply the
 // eviction walk's per-entry mechanics: tombstone with digest and reload
-// pointer, page-store persistence, compressor enqueue. The list identity
-// guard drops a batch captured from a list a newer transform replaced.
+// pointer, page-store persistence, compressor enqueue.
 export const executeCompact = async (source: CompactSource, toolContext: unknown): Promise<string> => {
   const sessionKey = sessionKeyFromContext(toolContext)
   const refuse = (detail: string): string => {

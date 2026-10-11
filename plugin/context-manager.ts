@@ -15,8 +15,7 @@ import { stripTerminalNoiseFrom, type HygieneCadenceBySession } from "./hygiene.
 import { deliverHint, type HintMembershipBySession } from "./hints.ts"
 import { createSummaryCompressor, summaryRecordOfStoreLine } from "./summaries.ts"
 import type { SummaryClient, SummaryStoreLine } from "./summaries.ts"
-import { DESCRIBE_TOOL_DESCRIPTION, DESCRIBE_TOOL_NAME, executeCompact, executeReadEvicted, executeStatsTool, guardTool, notifyCompactSettled, RECALL_TOOL_ARGS, RECALL_TOOL_DESCRIPTION } from "./tools.ts"
-import { COMPACT_TOOL_DESCRIPTION, COMPACT_TOOL_NAME } from "./tools.ts"
+import { COMPACT_TOOL_DESCRIPTION, COMPACT_TOOL_NAME, DESCRIBE_TOOL_DESCRIPTION, DESCRIBE_TOOL_NAME, executeCompact, executeReadEvicted, executeStatsTool, guardTool, notifyCompactSettled, RECALL_TOOL_ARGS, RECALL_TOOL_DESCRIPTION } from "./tools.ts"
 import { transformHookBody, type TransformHookDeps } from "./pipeline.ts"
 
 export { ADVISORY_BAND_RATIO_DEFAULT, DEFAULT_INGESTION_HYGIENE_ROTATION_MAX_BYTES, DEFAULT_METRICS_ROTATION_MAX_BYTES, DEFAULT_PAGE_STORE_ROTATION_MAX_BYTES } from "./options.ts"
