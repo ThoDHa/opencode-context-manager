@@ -12071,6 +12071,7 @@ const COMPACT_OLD_PATH_E = "/data/compact-e.txt"
 const COMPACT_HOT_PATH = "/data/compact-hot.txt"
 const COMPACT_PROTECTED_TOOL = "task"
 const COMPACT_WINDOW_FILLERS = 4
+const COMPACT_OVERFLOW_STASH_LIMIT = 1
 // One fresh session id per compact test: the tool's per-session run-state
 // and metrics outlive one plugin instance in the module maps, so tests
 // must never share a session key with each other.
@@ -12660,6 +12661,142 @@ test("compactTool on stays byte-identical to off when the tool is never invoked"
 
   assert.ok(toolPartAt(offBundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
   assert.equal(toolPartAt(onBundle.messages[0], 0).state.output, toolPartAt(offBundle.messages[0], 0).state.output)
+})
+
+test("a gate-off build records no message list for the compact tool to read", async () => {
+  const sessionID = compactSessionId("gate-off-list")
+  const hooks = await loadPluginHooksWith({ [COMPACT_OPTION_KEY]: false })
+  await runTransform(hooks, buildCompactBatchBundle(sessionID))
+
+  // The gate-off build registers no compact tool, so the list capture has
+  // no consumer; the pin rides the registration surface (empty) plus the
+  // accepted-shape invariant that no compact counters can ever appear on
+  // a gate-off session's describe report.
+  assert.deepEqual(compactToolMapKeys(hooks), [DESCRIBE_TOOL_NAME, RECALL_TOOL_NAME])
+  assert.equal(Object.hasOwn(await readStats(hooks, sessionID), COMPACT_REPORT_KEY), false)
+})
+
+test("a compacted attachment-bearing output persists its payloads and strips them from the live seat", async () => {
+  const sessionID = compactSessionId("attachments")
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient()
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, { [COMPACT_OPTION_KEY]: true })
+    const attachment = { mime: FILE_MIME_TEXT, url: FILE_URL }
+    const bundle = buildBundle(
+      [
+        [
+          {
+            type: "tool",
+            tool: READ_TOOL,
+            state: { status: "completed", input: { [PATH_INPUT_KEY]: COMPACT_OLD_PATH_A }, output: outputOfBytes(COMPACT_OLD_OUTPUT_BYTES), attachments: [attachment] },
+          },
+        ],
+        [pathToolPart(COMPACT_OLD_PATH_B, COMPACT_OLD_OUTPUT_BYTES)],
+        ...fillerMessages(2),
+        [pathToolPart(COMPACT_HOT_PATH, COMPACT_OLD_OUTPUT_BYTES)],
+        ...fillerMessages(2),
+      ],
+      sessionID,
+    )
+    await runTransform(hooks, bundle)
+    await compactToolCall(hooks, sessionID)
+
+    const seatState = toolPartAt(bundle.messages[0], 0).state as { output: string; attachments?: unknown[] }
+    assert.ok(seatState.output.startsWith(TOMBSTONE_MARKER))
+    assert.ok(seatState.output.includes(TOMBSTONE_ATTACHMENTS_NOTICE))
+    assert.equal(seatState.attachments, undefined)
+
+    const pageStoreLines = pageLinesIn(storePath).filter((line) => line.kind === undefined)
+    const persisted = pageStoreLines.find((line) => line.subject === COMPACT_OLD_PATH_A)
+    assert.ok(persisted !== undefined)
+    assert.deepEqual(persisted.attachments, [attachment])
+
+    await fake.settledAfter(2)
+    const verbatim = await recallToolArgs(hooks, { [RECALL_ARG_NAME]: COMPACT_OLD_PATH_A, [RECALL_VERBATIM_ARG_NAME]: true }, SESSION_ID_B)
+    assert.ok(String(verbatim).startsWith(outputOfBytes(COMPACT_OLD_OUTPUT_BYTES)))
+    assert.ok(String(verbatim).includes(STASH_ATTACHMENTS_LEAD))
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("an accepted compact call reports stash-overflow drops in its return instead of dropping them silently", async () => {
+  const sessionID = compactSessionId("overflow")
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient({ readTexts: [""] })
+    // stashLimit 1: the batch's two pages overflow the session store, so
+    // the second page's insert drops the first (storeEvictedPage's
+    // returned count), while the store file still carries both because
+    // the persistent record is write-ordered.
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, { [COMPACT_OPTION_KEY]: true, stashLimit: COMPACT_OVERFLOW_STASH_LIMIT })
+    const bundle = buildCompactBatchBundle(sessionID)
+    await runTransform(hooks, bundle)
+    const report = String(await compactToolCall(hooks, sessionID))
+    await fake.settledAfter(2)
+
+    // The batch's second insert overflows the one-seat store and drops
+    // the first page from the live session store; the return must name
+    // the drop, never stay silent about the lost seat.
+    assert.match(report, /^\[ctx-compact\] compacted 2 accumulated outputs \(4096 bytes\) at this boundary: 1 older stashed page was dropped by the session store's overflow to make room\./)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("the settle re-arm accepts a second compaction after the first batch's summaries finish", async () => {
+  const sessionID = compactSessionId("re-arm")
+  let nowMs = 5_000_000
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient({ holdPrompt: true })
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, { [COMPACT_OPTION_KEY]: true, now: () => nowMs })
+    const bundle = buildCompactBatchBundle(sessionID)
+    await runTransform(hooks, bundle)
+
+    assert.equal(await compactToolCall(hooks, sessionID), COMPACT_ACCEPTED_FOR(2, COMPACT_OLD_OUTPUT_BYTES * 2))
+
+    // The serial drain parks the first prompt; release it so the second
+    // parks, release that, and the batch settles: the census zero-crosses
+    // and the settling flag clears.
+    fake.releasePrompts()
+    await fake.whenPrompted(2)
+    fake.releasePrompts()
+    await fake.settledAfter(2)
+
+    // Fresh eligible outputs grow the same list and the clock advances
+    // past the interval: the second accept proves the re-arm path
+    // end-to-end (settling cleared through the counter sink, not
+    // trivially false).
+    // Append-only growth makes the first batch's in-window sibling
+    // eligible again (the A/B seats are tombstones now, and the window
+    // slides past the hot seat once four more messages land), so the
+    // honest second batch is three outputs. The accept at 3 pins that the
+    // re-arm came from the settle zero-crossing, not from a smaller gate.
+    bundle.messages.push(
+      syntheticMessageFor(sessionID, [pathToolPart(COMPACT_OLD_PATH_C, COMPACT_OLD_OUTPUT_BYTES)]),
+      syntheticMessageFor(sessionID, [pathToolPart(COMPACT_OLD_PATH_D, COMPACT_OLD_OUTPUT_BYTES)]),
+      ...fillerMessages(4).map((parts) => syntheticMessageFor(sessionID, parts)),
+    )
+    nowMs += COMPACT_MIN_INTERVAL_MS
+    assert.equal(await compactToolCall(hooks, sessionID), COMPACT_ACCEPTED_FOR(3, COMPACT_OLD_OUTPUT_BYTES * 3))
+
+    const counters = compactCountersOf(await readStats(hooks, sessionID))
+    assert.equal(counters[COMPACT_COUNTER_RUNS], 2)
+    assert.equal(counters[COMPACT_COUNTER_ENTRIES], 5)
+    assert.equal(counters[COMPACT_COUNTER_BYTES], COMPACT_OLD_OUTPUT_BYTES * 5)
+
+    fake.releasePrompts()
+    await fake.whenPrompted(4)
+    fake.releasePrompts()
+    await fake.settledAfter(4)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
 })
 
 test("gate off keeps the metrics line byte-shape identical to today: no tail block field", async () => {

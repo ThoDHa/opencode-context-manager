@@ -23,6 +23,7 @@ type EvictableEntry = {
   attachmentBytes: number
   subjects: Subject[]
 }
+export type CompactEvictableEntry = EvictableEntry
 
 // The effective eviction watermark in tokens: the absolute watermarkTokens
 // option wins when set; otherwise the budget times the fractional
@@ -96,7 +97,11 @@ const scanToolOutputs = (
 // list the evictor walks.
 type EvictionCandidates = { appearances: ToolAppearance[]; entries: EvictableEntry[]; evictable: EvictableEntry[]; estimatedTokens: number }
 
-const primaryRenderedSubjectOf = (entry: EvictableEntry): string =>
+// The rendered primary subject a seat's counters, sort key, and tombstone
+// narrate: the first subject, or the unknown-target label for an entry
+// without one. Exported so the compact tool's batch shapes its subjects
+// through the same rule instead of a parallel copy.
+export const primaryRenderedSubjectOf = (entry: EvictableEntry): string =>
   entry.subjects.length > 0 ? renderSubject(entry.subjects[0]) : UNKNOWN_TARGET_LABEL
 
 // The sort key fault feedback adjusts: each recorded fault pushes the

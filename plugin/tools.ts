@@ -1,7 +1,7 @@
 import { contextLimitForRun } from "./context-limits.ts"
 import type { ContextLimitEntry } from "./context-limits.ts"
-import { evictionCandidatesOf } from "./eviction.ts"
-import { ATTACHMENT_MIME_KEY, ATTACHMENT_URL_KEY } from "./messages.ts"
+import { evictionCandidatesOf, primaryRenderedSubjectOf } from "./eviction.ts"
+import { ATTACHMENT_MIME_KEY, ATTACHMENT_URL_KEY, nonEmptyAttachmentsOf, stripStateAttachments } from "./messages.ts"
 import type { MessageBundle } from "./messages.ts"
 import type { ResolvedOptions } from "./options.ts"
 import { pagesForSession, pageStoreMatchesFor, recordPageStoreLines, storeEvictedPage } from "./page-store.ts"
@@ -14,11 +14,11 @@ import type {
   SessionPageStore,
   StoredPageMatch,
 } from "./page-store.ts"
-import { rememberFaultForSubject, sessionIDFromContext, sessionKeyFromContext, touchMapEntry } from "./session-maps.ts"
+import { rememberFaultForSubject, rememberSessionValue, sessionIDFromContext, sessionKeyFromContext, touchMapEntry } from "./session-maps.ts"
 import { compactCountersOf, createSessionMetrics, DEFAULT_REMEMBERED_FAULT_SUBJECTS, metricsForSession, totalsOf, withSessionMetricsEntry } from "./state.ts"
 import type { MetricsHydration, MetricsStore, PersistedTotals } from "./state.ts"
 import type { SummaryCompressor } from "./summaries.ts"
-import { buildOutputDigest, buildReloadPointer, buildTombstone, JSON_INDENT_SPACES, RECALL_TOOL_NAME, renderSubject, SUBJECT_SEPARATOR, UNKNOWN_TARGET_LABEL } from "./vocabulary.ts"
+import { buildOutputDigest, buildReloadPointer, buildTombstone, JSON_INDENT_SPACES, RECALL_TOOL_NAME, SUBJECT_SEPARATOR, SUMMARY_MARKER } from "./vocabulary.ts"
 
 export const RECALL_ARG_NAME = "subject"
 export const RECALL_PROBE_ARG_NAME = "countsOnly"
@@ -60,7 +60,6 @@ const RECALL_PROBE_BYTES_UNIT = "bytes"
 const RECALL_PROBE_SUMMARY_LABEL = "summary"
 const RECALL_PROBE_OLDER_LABEL = "older matches"
 const RECALL_PROBE_ATTACHMENTS_LABEL = "attachments present"
-const SUMMARY_MARKER = "[ctx-summary]"
 const SUMMARY_SERVE_INSTRUCTION =
   "condensed summary of the evicted output; pass verbatim: true to reload the full original"
 const STASH_MARKER = "[ctx-stash]"
@@ -337,13 +336,17 @@ export const COMPACT_TOOL_DESCRIPTION =
 
 // The per-session settling bookkeeping: the last accepted compaction's
 // start time and whether its summary side calls are still outstanding.
-// The map is keyed by session and never trimmed: one small record per
-// session that ever ran the tool, the same lifetime the metrics map's
-// diagnostics ride. The entry clears the flag through
-// notifyCompactSettled once the session's outstanding summary count
-// returns to zero, re-arming the single-in-flight gate exactly then.
+// Bounded at the metrics map's session bound with the shared
+// remember-session idiom, so no unbounded map remains in the unit: a
+// quiet session's record ages out exactly as its metrics entry does, and
+// an aged-out record restarts with an open cooldown and a clear settling
+// flag, the same conservative state a fresh session holds. The entry
+// clears the settling flag through notifyCompactSettled once the
+// session's outstanding summary count returns to zero, re-arming the
+// single-in-flight gate exactly then.
 type CompactRunState = { lastStartMs: number; settling: boolean }
 const compactRunsBySession = new Map<string, CompactRunState>()
+const COMPACT_RUN_SESSIONS_BOUND = 64
 
 // The settle notification the entry's counter sink raises when the
 // session's outstanding summary side calls all finish.
@@ -379,8 +382,10 @@ export const executeCompact = async (source: CompactSource, toolContext: unknown
     tool: entry.tool,
     msgIndex: entry.msgIndex,
     partIndex: entry.partIndex,
+    lastTouch: entry.lastTouch,
     bytes: entry.bytes,
-    subject: renderSubject(entry.subjects[0] ?? { path: UNKNOWN_TARGET_LABEL }),
+    subject: primaryRenderedSubjectOf(entry),
+    attachments: nonEmptyAttachmentsOf(entry.stateRef),
   }))
   if (batch.length < COMPACT_MIN_BATCH_ENTRIES)
     return refuse(`accumulated tool outputs (${batch.length}) sit below the minimum batch of ${COMPACT_MIN_BATCH_ENTRIES}`)
@@ -403,9 +408,10 @@ export const executeCompact = async (source: CompactSource, toolContext: unknown
   const pageStore = pagesForSession(source.pageStores, sessionKey, source.options.stashSessions)
   const pageStoreEntries: PageEntry[] = []
   let compactedBytes = 0
+  let pagesDropped = 0
   for (const candidate of batch) {
     const digest = buildOutputDigest(candidate.tool, candidate.subject, candidate.stateRef.output)
-    const tombstone = buildTombstone(candidate.tool, candidate.subject, candidate.bytes, list.length - candidate.msgIndex, false, digest)
+    const tombstone = buildTombstone(candidate.tool, candidate.subject, candidate.bytes, list.length - candidate.lastTouch, candidate.attachments !== undefined, digest)
     const stored: PageEntry = {
       output: candidate.stateRef.output,
       tool: candidate.tool,
@@ -413,13 +419,15 @@ export const executeCompact = async (source: CompactSource, toolContext: unknown
       msgIndex: candidate.msgIndex,
       partIndex: candidate.partIndex,
     }
-    storeEvictedPage(pageStore, stored, source.options.stashLimit)
+    if (candidate.attachments !== undefined) stored.attachments = candidate.attachments
+    pagesDropped += storeEvictedPage(pageStore, stored, source.options.stashLimit)
     pageStoreEntries.push(stored)
     source.summaryCompressor?.enqueue({ sessionKey, page: stored })
+    stripStateAttachments(candidate.stateRef)
     candidate.stateRef.output = `${tombstone}${buildReloadPointer(candidate.subject)}`
     compactedBytes += candidate.bytes
   }
-  compactRunsBySession.set(sessionKey, { lastStartMs: nowMs, settling: source.summaryCompressor !== undefined })
+  rememberSessionValue(compactRunsBySession, sessionKey, { lastStartMs: nowMs, settling: source.summaryCompressor !== undefined }, COMPACT_RUN_SESSIONS_BOUND)
   withSessionMetricsEntry(source.metrics, sessionKey, source.options.metricsSessions, (entry) => {
     const counters = compactCountersOf(entry)
     counters.compactionsRun += 1
@@ -429,7 +437,13 @@ export const executeCompact = async (source: CompactSource, toolContext: unknown
   if (pageStoreEntries.length > 0) {
     await recordPageStoreLines(source.options, source.metrics, sessionKey, pageStoreEntries, source.pageStoreGuard)
   }
-  return `${COMPACT_MARKER} compacted ${pageStoreEntries.length} accumulated outputs (${compactedBytes} bytes) at this boundary: ${COMPACT_ACCEPTED_TAIL}`
+  // The declared-losses report names everything the boundary dropped: the
+  // stash overflow's evicted pages ride the sentence, never silent.
+  const dropClause =
+    pagesDropped === 0
+      ? ""
+      : ` ${pagesDropped} older stashed ${pagesDropped === 1 ? "page was" : "pages were"} dropped by the session store's overflow to make room.`
+  return `${COMPACT_MARKER} compacted ${pageStoreEntries.length} accumulated outputs (${compactedBytes} bytes) at this boundary:${dropClause} ${COMPACT_ACCEPTED_TAIL}`
 }
 
 export const executeStatsTool = (source: StatsSource, toolContext: unknown): string => {

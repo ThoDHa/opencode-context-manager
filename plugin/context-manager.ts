@@ -5,7 +5,7 @@ import { PLUGIN_ID } from "./schema.ts"
 import { chatParamsHookBody, type ChatParamsModel, type ContextLimitEntry } from "./context-limits.ts"
 import type { MessageBundle } from "./messages.ts"
 import { resolveOptions, type ContextManagerOptions } from "./options.ts"
-import { FALLBACK_SESSION_KEY, sessionKeyFromContext, touchMapEntry } from "./session-maps.ts"
+import { FALLBACK_SESSION_KEY, rememberSessionValue, sessionKeyFromContext, touchMapEntry } from "./session-maps.ts"
 import { HINT_LINE_PREFIX, orderedRenderedSubjectsOf, RECALL_TOOL_NAME, SUBJECT_SEPARATOR } from "./vocabulary.ts"
 import { rememberError, withSessionMetricsEntry, type MetricsHydration, type MetricsStore, type PersistedTotals, type SessionMetrics } from "./state.ts"
 import { appendHygieneCopy, migrateLegacyDefaultPaths, newestPersistedTotalsOf, PRUNE_SCAN_NEVER, type PruneThrottle } from "./persistence.ts"
@@ -280,9 +280,11 @@ const server = (async (pluginInput, rawOptions) => {
 
   // The newest transform's message list per session, captured by reference
   // so the compact tool reads and mutates exactly the array the next
-  // request carries. The map never trims: one reference per live session,
-  // replaced on every transform (the same lifetime the page-store map rides;
-  // a replaced array is garbage the moment the host drops it).
+  // request carries. Written only when the compact gate is on (every other
+  // build has no reader), and bounded at the metrics map's session bound
+  // with the shared remember-session idiom: a stale list is garbage the
+  // moment its session goes quiet past the bound, and the newest sessions
+  // survive the trim exactly as they do in the metrics map.
   const messageListsBySession = new Map<string, MessageBundle[]>()
 
   const compactTool = async (_args: unknown, toolContext: unknown): Promise<string> =>
@@ -319,7 +321,7 @@ const server = (async (pluginInput, rawOptions) => {
       let sessionKey = FALLBACK_SESSION_KEY
       try {
         sessionKey = sessionKeyFromContext(messages[0]?.info)
-        messageListsBySession.set(sessionKey, messages)
+        if (options.compactTool) rememberSessionValue(messageListsBySession, sessionKey, messages, options.metricsSessions)
         // Side-session stand-down: a side session's own model call
         // re-enters this hook, and returning identity output is the
         // recursion guard the LRU-60 spike validated. The session key is
