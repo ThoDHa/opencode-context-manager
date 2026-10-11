@@ -277,7 +277,11 @@ export const recordMetricsLine = async (
     // a refusal) is a declared loss the readout must see: any movement in
     // the session's cumulative compact counters since the last flushed
     // line makes the next run eventful.
-    compactCountersMovedSinceLastLine(metrics)
+    compactCountersMovedSinceLastLine(metrics) ||
+    // The tail pass's appends and cap drops are declared losses the readout
+    // must see per run; a pure-occupancy run (nothing appended, nothing
+    // dropped) stays quiet exactly like today's uneventful runs.
+    (run.tailSummaries !== undefined && (run.tailSummaries.appended > 0 || run.tailSummaries.dropped > 0))
   const isEventful = hasRecordedEvent || reasoningExpiredThisRun.parts > 0
   if (options.metricsLog === false || isEventful === false) return
   const hasSignificantEvent = hasRecordedEvent || contextLimit.source !== metrics.lastLineContextLimitSource
@@ -324,6 +328,19 @@ export const recordMetricsLine = async (
     // JSON byte-shape identical on every gated-off or never-invoked run,
     // pre-compact readers included.
     ...(metrics.compact === undefined ? {} : { compact: metrics.compact }),
+    // The tail pass's run result, present only on a tail-gate-on run: the
+    // spread keeps the JSON byte-shape identical on every gate-off run,
+    // pre-tail readers included.
+    ...(run.tailSummaries === undefined
+      ? {}
+      : {
+          tailSummaries: {
+            appended: run.tailSummaries.appended,
+            dropped: run.tailSummaries.dropped,
+            liveEntries: run.tailSummaries.liveEntries,
+            liveTokens: run.tailSummaries.liveTokens,
+          },
+        }),
     totals: totalsOf(metrics, options.charsPerToken),
   }
   try {

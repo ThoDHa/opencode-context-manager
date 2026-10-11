@@ -169,14 +169,15 @@ const server = (async (pluginInput, rawOptions) => {
   const pageStoreGuard: PageStoreGuard = { newerSchemaObserved: false }
   const persistedTotalsForSession = (sessionKey: string): Promise<PersistedTotals | undefined> =>
     newestPersistedTotalsOf(options, sessionKey)
-  // The compression-on-evict side path: built only when a summary-writing
-  // gate is on (the compression pair, or the compact tool whose batch rides
-  // the same compressor under the shared budget) AND the host provided a
-  // client. Every other start leaves the plugin byte-identical to the
-  // pre-compression build: no sink reaches the walk, no side session is
-  // created, and no summary serves ahead of the store merge. The summary
-  // map itself lives inside the compressor; the sink below only persists
-  // the line.
+  // The compression-on-evict side path: built when any summary-writing
+  // gate is on (the compression pair, the tail block whose appends ride
+  // the same compressor, or the compact tool whose batch does) AND the
+  // host provided a client; leaving any gate out of the OR would silently
+  // measure the base on that gate's solo arm. Every other start leaves
+  // the plugin byte-identical to the pre-compression build: no sink
+  // reaches the walk, no side session is created, and no summary serves
+  // ahead of the store merge. The summary map itself lives inside the
+  // compressor; the sink below only persists the line.
   const sideSessionIds = new Set<string>()
   // The outstanding-summary census the settle notification consumes: one
   // count per session, incremented by the queued deltas and decremented by
@@ -192,7 +193,7 @@ const server = (async (pluginInput, rawOptions) => {
     await recordPageStoreSummaryLines(options, metricsBySession, line.session, [summaryRecordOfStoreLine(line)], pageStoreGuard)
   }
   const summaryCompressor =
-    (options.summarizeEvictedOutputs || options.compactTool) && pluginInput?.client !== undefined
+    (options.summarizeEvictedOutputs || options.compactTool || options.tailSummaryBlocks) && pluginInput?.client !== undefined
       ? createSummaryCompressor({
           client: hostSummaryClientOf(pluginInput.client, sideSessionIds),
           sink: summarySink,

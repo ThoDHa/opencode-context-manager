@@ -142,6 +142,12 @@ export type SummaryCompressor = {
     partIndex: number,
     stashSlot?: number,
   ) => PageSummaryRecord | undefined
+  // The tail-side hand-off: the session's completed-but-not-yet-tailed
+  // summaries in completion order, removed from the pending set (each is
+  // consumed exactly once) while the durable record stays served through
+  // summaryFor. This is the seam the transform's tail pass reads on the
+  // next transform after a completion.
+  takeTailPending: (sessionKey: string) => PageSummaryRecord[]
   counters: () => SummaryCounters
 }
 
@@ -267,6 +273,12 @@ export const createSummaryCompressor = (options: SummaryCompressorOptions): Summ
   // insert (the pagesForSession idiom), so a fresh session never pushes
   // the map past its bound.
   const summaries = new Map<string, Map<string, PageSummaryRecord>>()
+  // Completed summaries waiting for their tail append, session-then-key in
+  // insertion (= completion) order. Bounded by the same map bound and
+  // session bound as summaries: a record here always has its durable twin
+  // in summaries, so trimming cannot lose information the recall path
+  // still needs, only the tail append for a page that aged out.
+  const tailPending = new Map<string, Map<string, PageSummaryRecord>>()
   const queue: SummaryQueueItem[] = []
   let queued = 0
   let written = 0
@@ -284,6 +296,18 @@ export const createSummaryCompressor = (options: SummaryCompressorOptions): Summ
     }
     rememberSessionValue(
       byPageKey,
+      pageKeyOf(record.tool, record.subject, record.msgIndex, record.partIndex, record.stashSlot),
+      record,
+      mapLimit,
+    )
+    let pendingByPageKey = touchMapEntry(tailPending, sessionKey)
+    if (pendingByPageKey === undefined) {
+      trimMapToBound(tailPending, sessionLimit)
+      pendingByPageKey = new Map()
+      tailPending.set(sessionKey, pendingByPageKey)
+    }
+    rememberSessionValue(
+      pendingByPageKey,
       pageKeyOf(record.tool, record.subject, record.msgIndex, record.partIndex, record.stashSlot),
       record,
       mapLimit,
@@ -463,7 +487,14 @@ export const createSummaryCompressor = (options: SummaryCompressorOptions): Summ
     stashSlot?: number,
   ): PageSummaryRecord | undefined => summaries.get(sessionKey)?.get(pageKeyOf(tool, subject, msgIndex, partIndex, stashSlot))
 
+  const takeTailPending = (sessionKey: string): PageSummaryRecord[] => {
+    const byPageKey = tailPending.get(sessionKey)
+    if (byPageKey === undefined) return []
+    tailPending.delete(sessionKey)
+    return [...byPageKey.values()]
+  }
+
   const counters = (): SummaryCounters => ({ queued, written, failures, lastFailureKind, lastError })
 
-  return { enqueue, settled, summaryFor, counters }
+  return { enqueue, settled, summaryFor, takeTailPending, counters }
 }

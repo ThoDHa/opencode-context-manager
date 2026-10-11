@@ -453,6 +453,8 @@ export const executeStatsTool = (source: StatsSource, toolContext: unknown): str
       summarizeEvictedOutputs: source.options.summarizeEvictedOutputs,
       summaryTokenBudget: source.options.summaryTokenBudget,
       compactTool: source.options.compactTool,
+      tailSummaryBlocks: source.options.tailSummaryBlocks,
+      tailSummaryMaxTokens: source.options.tailSummaryMaxTokens,
       modelContextTokens: source.options.modelContextTokens,
       metricsLog: source.options.metricsLog,
       metricsPath: source.options.metricsPath,

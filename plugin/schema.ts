@@ -19,8 +19,10 @@ export const DEFAULT_LIVE_STATE_DIR_BASENAME = "context-state"
 // same reason (the compression-on-evict flagship is judged by the lever5
 // readout before it earns its default); evictionBatchMultiplier ships at
 // its identity default 1, which reproduces the deficit-exact walk byte for
-// byte; summaryTokenBudget ships at the compressor module's default 256.
-// The README cache-model passage is the frame of record.
+// byte; summaryTokenBudget ships at the compressor module's default 256;
+// tailSummaryBlocks ships default-off pending the tailblock wave (the
+// append-only tail placement judged by its own series before it earns its
+// default). The README cache-model passage is the frame of record.
 export const OPTION_CACHE_AWARE_HINTS = "cacheAwareHints"
 export const DEFAULT_CACHE_AWARE_HINTS = false
 export const OPTION_MUTATION_BATCH_CADENCE = "mutationBatchCadence"
@@ -33,6 +35,17 @@ export const OPTION_SUMMARY_TOKEN_BUDGET = "summaryTokenBudget"
 export const DEFAULT_SUMMARY_TOKEN_BUDGET = 256
 export const OPTION_COMPACT_TOOL = "compactTool"
 export const DEFAULT_COMPACT_TOOL = false
+export const OPTION_TAIL_SUMMARY_BLOCKS = "tailSummaryBlocks"
+export const DEFAULT_TAIL_SUMMARY_BLOCKS = false
+// The tail region's permanent occupancy cap, token-denominated so the tax
+// stays a constant fraction of the context budget as budgets change:
+// 2048 tokens is ~17 percent of the 12k watermark (12000 x 0.17), and the
+// same ratio holds wherever the watermark scales (at charsPerToken 4 the
+// cap admits ~8192 text characters of tail entries). The tail pass stops
+// appending at the cap rather than removing mid-history entries, so a
+// configured cap can never translate into a prefix invalidation.
+export const OPTION_TAIL_SUMMARY_MAX_TOKENS = "tailSummaryMaxTokens"
+export const DEFAULT_TAIL_SUMMARY_MAX_TOKENS = 2048
 
 // Shared by both entry modules so their registrations never drift.
 export const PLUGIN_ID = "context-manager"

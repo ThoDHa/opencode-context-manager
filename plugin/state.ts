@@ -47,6 +47,10 @@ export type RunOutcome = {
   faults: number
   reasoningExpired: ReasoningExpiry
   fenceEvicted: FenceEviction
+  // Defined only when the tail gate is on and the compressor exists; the
+  // metrics line spreads it as the tailSummaries block, so gate-off runs
+  // leave the field absent from the JSON.
+  tailSummaries?: TailSummariesResult
   dryRun: DryRunResult | undefined
   advisory: AdvisoryResult | undefined
   composition: RunComposition
@@ -64,6 +68,12 @@ export type CompactCounters = { compactionsRun: number; compactedEntries: number
 // shape shared by the tool's accept and refuse paths, so a counter can
 // never land on a half-initialized object.
 export const compactCountersOf = (entry: SessionMetrics): CompactCounters => (entry.compact ??= { compactionsRun: 0, compactedEntries: 0, compactedBytes: 0, compactRefusals: 0 })
+
+// The tail pass's per-run result: this run's appends and cap drops plus
+// the live tail-entry occupancy after the pass (entry count and its
+// estimated tokens over the session's charsPerToken). Ride-scoped like
+// the omissions: replaced every run, never persisted as a totals counter.
+export type TailSummariesResult = { appended: number; dropped: number; liveEntries: number; liveTokens: number }
 
 export type SessionMetrics = {
   evictions: number

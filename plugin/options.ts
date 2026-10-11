@@ -11,12 +11,16 @@ import {
   DEFAULT_MUTATION_BATCH_CADENCE,
   DEFAULT_SUMMARIZE_EVICTED_OUTPUTS,
   DEFAULT_SUMMARY_TOKEN_BUDGET,
+  DEFAULT_TAIL_SUMMARY_BLOCKS,
+  DEFAULT_TAIL_SUMMARY_MAX_TOKENS,
   OPTION_CACHE_AWARE_HINTS,
   OPTION_COMPACT_TOOL,
   OPTION_EVICTION_BATCH_MULTIPLIER,
   OPTION_MUTATION_BATCH_CADENCE,
   OPTION_SUMMARIZE_EVICTED_OUTPUTS,
   OPTION_SUMMARY_TOKEN_BUDGET,
+  OPTION_TAIL_SUMMARY_BLOCKS,
+  OPTION_TAIL_SUMMARY_MAX_TOKENS,
 } from "./schema.ts"
 
 const DEFAULT_CHARS_PER_TOKEN = 4
@@ -115,6 +119,8 @@ export type ContextManagerOptions = {
   summarizeEvictedOutputs?: boolean
   summaryTokenBudget?: number
   compactTool?: boolean
+  tailSummaryBlocks?: boolean
+  tailSummaryMaxTokens?: number
   protectedTools?: string[]
   protectedPatterns?: string[]
   stashLimit?: number
@@ -279,6 +285,19 @@ export const resolveOptions = (raw: ContextManagerOptions = {}): ResolvedOptions
     // schema.ts convention); false leaves the tool map and every other
     // path byte-identical to the pre-compact build.
     [OPTION_COMPACT_TOOL]: typeof raw.compactTool === "boolean" ? raw.compactTool : DEFAULT_COMPACT_TOOL,
+    // The tail-side durable summary block: when true, each completed
+    // eviction summary also appends one user-role text part at the
+    // transform-time end of the message list, so the eviction seat's
+    // tombstone bytes stay frozen while the summary's tokens ride the
+    // newest (uncached-by-construction) tail seat. Shares the compressor
+    // and summaryTokenBudget with the compression-on-evict gate; a
+    // tail-only gate builds the compressor exactly like a compression
+    // gate. Ships default-off pending the tailblock wave.
+    [OPTION_TAIL_SUMMARY_BLOCKS]: typeof raw.tailSummaryBlocks === "boolean" ? raw.tailSummaryBlocks : DEFAULT_TAIL_SUMMARY_BLOCKS,
+    // The tail region's token cap (schema.ts records the arithmetic):
+    // stop-appending-at-cap, never mid-history removal. Same
+    // bounded-integer discipline as the other count options.
+    [OPTION_TAIL_SUMMARY_MAX_TOKENS]: boundedIntegerOr(raw.tailSummaryMaxTokens, DEFAULT_TAIL_SUMMARY_MAX_TOKENS, 1),
     protectedTools: Array.isArray(raw.protectedTools) && raw.protectedTools.every(isNonEmptyString) ? raw.protectedTools : DEFAULT_PROTECTED_TOOLS,
     protectedPatterns: protectedPatterns.flatMap((pattern) => {
       const compiled = compiledGlobOf(pattern)
