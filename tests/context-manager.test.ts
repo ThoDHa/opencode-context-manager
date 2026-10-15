@@ -12861,8 +12861,12 @@ test("a compact accept in one process shape cannot flash: the tombstones ride ev
     // previous request's list between turns, the projection re-derives
     // from the durable record, so a host that drops the mutation (the
     // probe's finding) still sees the tombstones on the next request.
+    // The second arm runs a genuinely fresh part tree (deep copy, not
+    // slice(): slice shares the part objects the first projection
+    // mutated, which would make this arm pass vacuously), so the
+    // tombstones can only come from the durable record.
     const hostStripped = buildCompactBatchBundle(sessionID)
-    hostStripped.messages = bundle.messages.slice()
+    hostStripped.messages = structuredClone(bundle.messages)
     const freshHooks = await freshProjectionHooksOver(storePath, sessionID)
     await runTransform(freshHooks, hostStripped)
     assert.ok(toolPartAt(hostStripped.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))

@@ -4,7 +4,7 @@ import type { ResolvedOptions } from "./options.ts"
 import { sessionKeyFromContext, touchMapEntry } from "./session-maps.ts"
 import { countFaults, countUniqueDedupedPairs, metricsForSession, type MetricsHydration, type MetricsStore, type PersistedTotals, type ReasoningExpiry, recordRunOutcome, type RunOutcome, type TailSummariesResult } from "./state.ts"
 import { recordMetricsLine, recordSessionCheckpoint, type PruneThrottle } from "./persistence.ts"
-import { type PageEntry, type PageSummaryRecord, pageKeyOf, pagesForSession, type PageStoreBySession, type PageStoreGuard, recordPageStoreLines } from "./page-store.ts"
+import { compactedKeyOf, type PageEntry, type PageSummaryRecord, pagesForSession, type PageStoreBySession, type PageStoreGuard, recordPageStoreLines } from "./page-store.ts"
 import { deduplicateFileAttachments, deduplicateToolOutputs } from "./dedup.ts"
 import { expireAgedReasoning, fireCollapsePass, type HygieneCadenceBySession, purgeErroredToolInputs, REASONING_EXPIRY_NONE, resolveHygieneBatch, stripLegacyHintParts } from "./hygiene.ts"
 import { evictLargeUserFences } from "./fences.ts"
@@ -291,10 +291,17 @@ const applyCompactedSeats = async (messages: MessageBundle[], sessionKey: string
       if (startsWithEitherGeneration(output, EVICTION_MARKER, LEGACY_EVICTION_MARKER)) continue
       const input = typeof typedState["input"] === "object" && typedState["input"] !== null ? (typedState["input"] as Record<string, unknown>) : {}
       const primary = primarySubjectOf(subjectsOf(tool, input))
-      const seatKey = pageKeyOf(tool, primary, msgIndex, partIndex)
+      const seatKey = compactedKeyOf(tool, primary, msgIndex, partIndex)
       if (!compactedKeys.has(seatKey)) continue
       const attachments = nonEmptyAttachmentsOf(typedState)
       const digest = buildOutputDigest(tool, primary, output)
+      // The age reads from the seat's birth index, not the evictor's
+      // lastTouch basis: the projection cannot recompute a touch scan (no
+      // appearance walk runs here), and the record's list-relative age
+      // would go stale the moment later turns land behind the seat. The
+      // birth basis stays fresh on every request and narrates the same
+      // figure the tombstone has carried since the projection first
+      // applied it.
       const tombstone = buildTombstone(tool, primary, output.length, messages.length - msgIndex, attachments !== undefined, digest)
       stripStateAttachments(typedState)
       typedState["output"] = `${tombstone}${buildReloadPointer(primary)}`

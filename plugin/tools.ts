@@ -4,7 +4,7 @@ import { evictionCandidatesOf, primaryRenderedSubjectOf } from "./eviction.ts"
 import { ATTACHMENT_MIME_KEY, ATTACHMENT_URL_KEY, nonEmptyAttachmentsOf } from "./messages.ts"
 import type { MessageBundle } from "./messages.ts"
 import type { ResolvedOptions } from "./options.ts"
-import { type CompactedEntryKey, pageKeyOf, pagesForSession, pageStoreMatchesFor, recordPageStoreCompactionLines, recordPageStoreLines, storeEvictedPage } from "./page-store.ts"
+import { type CompactedEntryKey, compactedKeyOf, pagesForSession, pageStoreMatchesFor, recordPageStoreCompactionLines, recordPageStoreLines, storeEvictedPage } from "./page-store.ts"
 import type {
   PageEntry,
   PageStoreBySession,
@@ -386,7 +386,7 @@ export const executeCompact = async (source: CompactSource, toolContext: unknown
   const alreadyCompacted = await source.compactedKeysForSession(sessionKey)
   const candidates = evictionCandidatesOf(list, source.options, new Map())
   const batch = candidates.evictable
-    .filter((entry) => !alreadyCompacted.has(pageKeyOf(entry.tool, primaryRenderedSubjectOf(entry), entry.msgIndex, entry.partIndex)))
+    .filter((entry) => !alreadyCompacted.has(compactedKeyOf(entry.tool, primaryRenderedSubjectOf(entry), entry.msgIndex, entry.partIndex)))
     .map((entry) => ({
     stateRef: entry.stateRef,
     tool: entry.tool,

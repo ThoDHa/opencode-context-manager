@@ -102,6 +102,13 @@ export type PageStoreBySession = Map<string, SessionPageStore>
 export const pageKeyOf = (tool: string, subject: string, msgIndex: number, partIndex: number, stashSlot?: number): string =>
   `${tool}:${subject}:${msgIndex}:${partIndex}${stashSlot === undefined ? "" : `:${stashSlot}`}`
 
+// The compacted-record key a projection seat must match, derived from the
+// pageKeyOf fields of one candidate. One builder so the record write, the
+// executor's batch filter, and the projection's seat lookup cannot drift
+// apart on the string shape.
+export const compactedKeyOf = (tool: string, subject: string, msgIndex: number, partIndex: number): string =>
+  pageKeyOf(tool, subject, msgIndex, partIndex)
+
 export const pagesForSession = (pageStores: PageStoreBySession, sessionKey: string, sessionBound: number): SessionPageStore => {
   const touched = touchMapEntry(pageStores, sessionKey)
   if (touched !== undefined) return touched
@@ -571,7 +578,7 @@ export const recordPageStoreCompactionLines = async (
   if (entry !== undefined) {
     if (entry.compactedKeys === undefined) entry.compactedKeys = []
     for (const key of batch) {
-      const compacted = `${key.tool}:${key.subject}:${key.msgIndex}:${key.partIndex}`
+      const compacted = compactedKeyOf(key.tool, key.subject, key.msgIndex, key.partIndex)
       if (!entry.compactedKeys.includes(compacted)) entry.compactedKeys.push(compacted)
     }
   }
@@ -614,7 +621,7 @@ export const pageStoreCompactedKeysFor = async (
     if (lineSessionOf(parsed) !== sessionKey) return
     const batch = pageStoreCompactionLineOf(parsed)
     if (batch === undefined) return
-    for (const key of batch) keys.add(`${key.tool}:${key.subject}:${key.msgIndex}:${key.partIndex}`)
+    for (const key of batch) keys.add(compactedKeyOf(key.tool, key.subject, key.msgIndex, key.partIndex))
   })
   return keys
 }
