@@ -49,7 +49,49 @@ export type MetricsEvent = {
   generation: MetricsGeneration
   evictedThisRun: boolean
   summariesWritten: number
+  tailSummaries: TailSummariesBlock | null
+  compact: CompactCountersBlock | null
   contextLimitModelKey: string | null
+}
+
+// The tail pass's per-run result, as the producer spreads it into a metrics
+// line (the producer omits the block on gate-off runs): the projected
+// entries, the cap drops, and the live tail occupancy.
+export type TailSummariesBlock = { projected: number; dropped: number; liveEntries: number; liveTokens: number }
+
+// The compact tool's session-cumulative counters, as the producer spreads
+// them into a metrics line (the producer omits the block until the tool's
+// first event).
+export type CompactCountersBlock = { compactionsRun: number; compactedEntries: number; compactedBytes: number; compactRefusals: number }
+
+// The tail block a metrics line carries, or null when the line's shape
+// carries none (gate-off runs, pre-tail readers): a present-but-malformed
+// member degrades to zero rather than poisoning the census, matching the
+// summaries figure's tolerance.
+const tailSummariesBlockOf = (record: Record<string, unknown>): TailSummariesBlock | null => {
+  const block = record["tailSummaries"]
+  if (block === null || typeof block !== "object" || Array.isArray(block)) return null
+  const members = block as Record<string, unknown>
+  return {
+    projected: numberOrZero(members["projected"]),
+    dropped: numberOrZero(members["dropped"]),
+    liveEntries: numberOrZero(members["liveEntries"]),
+    liveTokens: numberOrZero(members["liveTokens"]),
+  }
+}
+
+// The compact block a metrics line carries, or null when the line's shape
+// carries none.
+const compactBlockOf = (record: Record<string, unknown>): CompactCountersBlock | null => {
+  const block = record["compact"]
+  if (block === null || typeof block !== "object" || Array.isArray(block)) return null
+  const members = block as Record<string, unknown>
+  return {
+    compactionsRun: numberOrZero(members["compactionsRun"]),
+    compactedEntries: numberOrZero(members["compactedEntries"]),
+    compactedBytes: numberOrZero(members["compactedBytes"]),
+    compactRefusals: numberOrZero(members["compactRefusals"]),
+  }
 }
 
 // The summaries figure a metrics line's cumulative totals block carries; a
@@ -77,8 +119,10 @@ const contextLimitModelKeyOf = (record: Record<string, unknown>): string | null 
  * must not poison the census). Each event records whether its line's
  * `evictedThisRun` array is nonempty (real evictions happened this run),
  * the lever profile's full-mode corroboration signal; the line's cumulative
- * `summariesWritten` counter, the lever5 profile's compression corroboration
- * signal; and the line's `contextLimitModelKey`, the session model identity
+ * `summariesWritten` counter, the compression arms' corroboration signal;
+ * the line's `tailSummaries` and `compact` blocks, the wave profiles' tail
+ * and compact corroboration signals (null on lines whose shape carries
+ * none); and the line's `contextLimitModelKey`, the session model identity
  * the readout records beside the summaries figures.
  *
  * @param metricsLogText the raw metrics-log content
@@ -92,7 +136,7 @@ export const parseMetricsLog = (metricsLogText: string): MetricsEvent[] => {
       const parsed: unknown = JSON.parse(line)
       const generation = classifyMetricsGeneration(parsed)
       if (generation === null) continue
-      const record = parsed as { ts: string; session: string; evictedThisRun?: unknown; totals?: unknown; contextLimitModelKey?: unknown }
+      const record = parsed as { ts: string; session: string; evictedThisRun?: unknown; totals?: unknown; tailSummaries?: unknown; compact?: unknown; contextLimitModelKey?: unknown }
       const timestampMs = Date.parse(record.ts)
       events.push({
         timestamp: record.ts,
@@ -101,6 +145,8 @@ export const parseMetricsLog = (metricsLogText: string): MetricsEvent[] => {
         generation,
         evictedThisRun: Array.isArray(record.evictedThisRun) && record.evictedThisRun.length > 0,
         summariesWritten: summariesWrittenOf(record),
+        tailSummaries: tailSummariesBlockOf(record),
+        compact: compactBlockOf(record),
         contextLimitModelKey: contextLimitModelKeyOf(record),
       })
     } catch {
@@ -237,6 +283,8 @@ export type CensusRow = {
   metricsEvents: MetricsEvent[]
   metricsGenerations: { 1: number; 2: number }
   summariesWritten: number
+  tailSummaries: TailSummariesBlock | null
+  compact: CompactCountersBlock | null
   contextLimitModelKeys: string[]
   windowStartMs: number | null
   windowEndMs: number | null
@@ -339,6 +387,23 @@ export const buildCensus = (inputs: CensusInputs): CensusRow[] => {
     // block's lines is its figure; the model keys collect distinctly in log
     // order so mid-block model drift surfaces as multiple entries.
     const summariesWritten = metricsEvents.reduce((latest, event) => Math.max(latest, event.summariesWritten), 0)
+    // The tail block is a per-run snapshot, not a cumulative counter, so the
+    // newest line carrying one is the block's tail state at its end; a block
+    // whose lines carry no tail block reports none (the wave's tail gate
+    // judges the presence, tolerant of quiet blocks).
+    const tailSummaries = metricsEvents.reduce<MetricsEvent["tailSummaries"]>((latest, event) => event.tailSummaries ?? latest, null)
+    // The compact counters are session-cumulative, so the per-key maximum
+    // among the block's lines is its figure at the block's end.
+    const compact = metricsEvents.reduce<MetricsEvent["compact"]>((latest, event) => {
+      if (event.compact === null) return latest
+      if (latest === null) return event.compact
+      return {
+        compactionsRun: Math.max(latest.compactionsRun, event.compact.compactionsRun),
+        compactedEntries: Math.max(latest.compactedEntries, event.compact.compactedEntries),
+        compactedBytes: Math.max(latest.compactedBytes, event.compact.compactedBytes),
+        compactRefusals: Math.max(latest.compactRefusals, event.compact.compactRefusals),
+      }
+    }, null)
     const contextLimitModelKeys: string[] = []
     for (const event of metricsEvents) {
       const key = event.contextLimitModelKey
@@ -388,6 +453,8 @@ export const buildCensus = (inputs: CensusInputs): CensusRow[] => {
       metricsEvents,
       metricsGenerations,
       summariesWritten,
+      tailSummaries,
+      compact,
       contextLimitModelKeys,
       windowStartMs,
       windowEndMs,
@@ -450,4 +517,75 @@ export const uncorroboratedSummaryBlocks = (rows: readonly CensusRow[]): string[
     if (!row.metricsEvents.some((event) => event.summariesWritten > 0)) failures.push(row.blockLabel)
   }
   return failures
+}
+
+/**
+ * The wave tail-arm's tailSummaries corroboration: every metrics-bearing
+ * LEVER data block must carry at least one metrics event whose shape
+ * includes a `tailSummaries` block (the tail pass actually ran and wrote
+ * its result during the block), so a silently disengaged tail arm cannot
+ * pass for engagement. A LEVER block with no metrics lines at all is
+ * tolerated: the producer's eventfulness gate deliberately stays quiet on
+ * an uneventful tail run (a pure re-projection writes no line), so absence
+ * of lines is a quiet block, not disengagement (the S4 fold). An
+ * empty-tail block corroborates: `liveEntries` zero with `dropped` zero
+ * reads as rotation retirement, not disengagement (the DC2 rotation note).
+ * ON-FULL blocks are never judged (the tail gate is off in that arm by the
+ * profile's own seed) and an OFF block carrying any metrics line is already
+ * the full-mode gate's leak. The calibration block is exempt (it prices the
+ * series and never counts as data); every other exclusion class still gets
+ * judged, because the corroboration is an apparatus-integrity check, not an
+ * endpoint gate. Applied by the readout only under a profile whose
+ * `corroboratesTailBlocks` is true.
+ *
+ * @param rows the census rows of a tail-corroborated series
+ * @returns the labels of blocks failing the corroboration
+ */
+export const uncorroboratedTailBlocks = (rows: readonly CensusRow[]): string[] => {
+  const failures: string[] = []
+  for (const row of rows) {
+    if (row.exclusion === "calibration") continue
+    if (row.arm !== "LEVER") continue
+    if (row.metricsEvents.length === 0) continue
+    if (!row.metricsEvents.some((event) => event.tailSummaries !== null)) failures.push(row.blockLabel)
+  }
+  return failures
+}
+
+export type CompactEngagementFailure = { ran: boolean; refusals: number }
+
+/**
+ * The wave compact-arm's series-level engagement gate: across the whole
+ * series, the LEVER arm's compactionsRun must rise above zero at least once
+ * (a compaction actually ran) AND at least one refusal must be observed.
+ * A cooperative tool's non-use is a real outcome of the lever, so a silent
+ * series is a failed screen rather than a silent base measurement, while a
+ * single-block zero stays legitimate (the F6/DC3 decision); the per-block
+ * invocation counts join the readout as an observed covariate the verdict
+ * narrative addresses. Only LEVER-arm rows are evidence: compaction
+ * counters on other arms do not corroborate the lever. The calibration
+ * block is exempt (it prices the series and never counts as data); every
+ * other exclusion class still gets judged, because the corroboration is an
+ * apparatus-integrity check, not an endpoint gate. Applied by the readout
+ * only under a profile whose `corroboratesCompactEngagement` is true.
+ *
+ * @param rows the census rows of a compact-engagement series
+ * @returns null when the series engages; otherwise the failure naming
+ *   which of the two conditions did not hold
+ */
+export const compactEngagementFailure = (rows: readonly CensusRow[]): string | null => {
+  let ran = false
+  let refusals = 0
+  for (const row of rows) {
+    if (row.exclusion === "calibration") continue
+    if (row.arm !== "LEVER") continue
+    const compact = row.compact
+    if (compact === null) continue
+    ran = ran || compact.compactionsRun > 0
+    refusals = Math.max(refusals, compact.compactRefusals)
+  }
+  const missing: string[] = []
+  if (!ran) missing.push("no compaction ran (compactionsRun never rose above zero on the LEVER arm across the series)")
+  if (refusals === 0) missing.push("no refusal was observed (compactRefusals never rose above zero on the LEVER arm across the series)")
+  return missing.length === 0 ? null : missing.join("; ")
 }

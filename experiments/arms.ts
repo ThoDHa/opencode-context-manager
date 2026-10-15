@@ -131,6 +131,79 @@ export const LEVER5_ARM_PLUGIN_ENTRY: readonly PluginEntry[] = [
   ],
 ]
 
+// The compaction-wave seeds (LRU-89-3): every wave profile's ON arms run the
+// lever4-adopted cumulative stack as the shared baseline (byte-equal to the
+// lever5 ON-FULL seed and the lever4 LEVER seed), and each profile's LEVER
+// arm adds exactly its lever delta on top, so the readout attributes the
+// whole delta to that lever. Each seed is its own record: the byte-equality
+// with the lever4 stack is a pin, not an alias. The wave's five screen arms
+// per the task's binding seam: tail (the tail placement, tailSummaryBlocks
+// plus the pinned budget 256), compact (the cooperative tool, compactTool
+// plus 256), and the compression budget grid bud128, bud512, and bud256
+// (the re-mapped LRU-84-9/10 children plus the anchor-connected midpoint;
+// the compression pair is the two-key decision unit the lever5 precedent
+// carries over).
+export const TAIL_ON_FULL_PLUGIN_ENTRY: readonly PluginEntry[] = [
+  [
+    "./opencode-context-manager/plugin/context-manager.ts",
+    { manualMode: false, watermarkTokens: 12000, agedReadEvictionMessages: 30, reasoningRetentionMessages: 16, cacheAwareHints: true, mutationBatchCadence: 3, evictionBatchMultiplier: 2, metricsMinLineIntervalMs: 0 },
+  ],
+]
+export const TAIL_ARM_PLUGIN_ENTRY: readonly PluginEntry[] = [
+  [
+    "./opencode-context-manager/plugin/context-manager.ts",
+    { manualMode: false, watermarkTokens: 12000, agedReadEvictionMessages: 30, reasoningRetentionMessages: 16, cacheAwareHints: true, mutationBatchCadence: 3, evictionBatchMultiplier: 2, metricsMinLineIntervalMs: 0, tailSummaryBlocks: true, summaryTokenBudget: 256 },
+  ],
+]
+export const COMPACT_ON_FULL_PLUGIN_ENTRY: readonly PluginEntry[] = [
+  [
+    "./opencode-context-manager/plugin/context-manager.ts",
+    { manualMode: false, watermarkTokens: 12000, agedReadEvictionMessages: 30, reasoningRetentionMessages: 16, cacheAwareHints: true, mutationBatchCadence: 3, evictionBatchMultiplier: 2, metricsMinLineIntervalMs: 0 },
+  ],
+]
+export const COMPACT_ARM_PLUGIN_ENTRY: readonly PluginEntry[] = [
+  [
+    "./opencode-context-manager/plugin/context-manager.ts",
+    { manualMode: false, watermarkTokens: 12000, agedReadEvictionMessages: 30, reasoningRetentionMessages: 16, cacheAwareHints: true, mutationBatchCadence: 3, evictionBatchMultiplier: 2, metricsMinLineIntervalMs: 0, compactTool: true, summaryTokenBudget: 256 },
+  ],
+]
+export const BUD128_ON_FULL_PLUGIN_ENTRY: readonly PluginEntry[] = [
+  [
+    "./opencode-context-manager/plugin/context-manager.ts",
+    { manualMode: false, watermarkTokens: 12000, agedReadEvictionMessages: 30, reasoningRetentionMessages: 16, cacheAwareHints: true, mutationBatchCadence: 3, evictionBatchMultiplier: 2, metricsMinLineIntervalMs: 0 },
+  ],
+]
+export const BUD128_ARM_PLUGIN_ENTRY: readonly PluginEntry[] = [
+  [
+    "./opencode-context-manager/plugin/context-manager.ts",
+    { manualMode: false, watermarkTokens: 12000, agedReadEvictionMessages: 30, reasoningRetentionMessages: 16, cacheAwareHints: true, mutationBatchCadence: 3, evictionBatchMultiplier: 2, metricsMinLineIntervalMs: 0, summarizeEvictedOutputs: true, summaryTokenBudget: 128 },
+  ],
+]
+export const BUD512_ON_FULL_PLUGIN_ENTRY: readonly PluginEntry[] = [
+  [
+    "./opencode-context-manager/plugin/context-manager.ts",
+    { manualMode: false, watermarkTokens: 12000, agedReadEvictionMessages: 30, reasoningRetentionMessages: 16, cacheAwareHints: true, mutationBatchCadence: 3, evictionBatchMultiplier: 2, metricsMinLineIntervalMs: 0 },
+  ],
+]
+export const BUD512_ARM_PLUGIN_ENTRY: readonly PluginEntry[] = [
+  [
+    "./opencode-context-manager/plugin/context-manager.ts",
+    { manualMode: false, watermarkTokens: 12000, agedReadEvictionMessages: 30, reasoningRetentionMessages: 16, cacheAwareHints: true, mutationBatchCadence: 3, evictionBatchMultiplier: 2, metricsMinLineIntervalMs: 0, summarizeEvictedOutputs: true, summaryTokenBudget: 512 },
+  ],
+]
+export const BUD256_ON_FULL_PLUGIN_ENTRY: readonly PluginEntry[] = [
+  [
+    "./opencode-context-manager/plugin/context-manager.ts",
+    { manualMode: false, watermarkTokens: 12000, agedReadEvictionMessages: 30, reasoningRetentionMessages: 16, cacheAwareHints: true, mutationBatchCadence: 3, evictionBatchMultiplier: 2, metricsMinLineIntervalMs: 0 },
+  ],
+]
+export const BUD256_ARM_PLUGIN_ENTRY: readonly PluginEntry[] = [
+  [
+    "./opencode-context-manager/plugin/context-manager.ts",
+    { manualMode: false, watermarkTokens: 12000, agedReadEvictionMessages: 30, reasoningRetentionMessages: 16, cacheAwareHints: true, mutationBatchCadence: 3, evictionBatchMultiplier: 2, metricsMinLineIntervalMs: 0, summarizeEvictedOutputs: true, summaryTokenBudget: 256 },
+  ],
+]
+
 export const FLIP_ARG_BY_ARM = {
   OFF: "off",
   "ON-FULL": "on-full",
@@ -157,18 +230,22 @@ export const ARM_BY_FLIP_ARG: ArmByFlipArg = {
 
 // An experiment profile fixes the data-arm triple, the per-arm plugin seeds
 // (the OFF arm is the empty plugin list and carries no seed), whether the
-// readout runs the full-mode metrics corroboration and the compression-arm
-// summariesWritten corroboration (the lever5 profile alone), whether the
-// flip command defaults to this CLI's self flip (the legacy bash flip tool
-// writes the frozen deep seeds only), and the pre-registered readout
-// contrasts. The deep profile is the frozen LRU-82 shape and stays the
-// default everywhere; a profile parameter omitted means deep.
+// readout runs the full-mode metrics corroboration and the per-flavor lever
+// corroborations (the compression-arm summariesWritten gate, the
+// tailSummaries presence gate, and the compact series-level engagement
+// gate), whether the flip command defaults to this CLI's self flip (the
+// legacy bash flip tool writes the frozen deep seeds only), and the
+// pre-registered readout contrasts. The deep profile is the frozen LRU-82
+// shape and stays the default everywhere; a profile parameter omitted means
+// deep.
 export type ExperimentProfile = {
-  name: "deep" | "lever1" | "lever3" | "lever4" | "lever5"
+  name: "deep" | "lever1" | "lever3" | "lever4" | "lever5" | "tail" | "compact" | "bud128" | "bud512" | "bud256"
   dataArms: readonly Arm[]
   pluginSeedByArm: Readonly<Partial<Record<FlipArm, readonly PluginEntry[]>>>
   corroboratesFullModeMetrics: boolean
   corroboratesSummariesWritten: boolean
+  corroboratesTailBlocks: boolean
+  corroboratesCompactEngagement: boolean
   defaultsToSelfFlip: boolean
   contrasts: readonly (readonly [Arm, Arm])[]
 }
@@ -183,6 +260,8 @@ export const DEEP_PROFILE: ExperimentProfile = {
   },
   corroboratesFullModeMetrics: false,
   corroboratesSummariesWritten: false,
+  corroboratesTailBlocks: false,
+  corroboratesCompactEngagement: false,
   defaultsToSelfFlip: false,
   contrasts: [
     ["ON-FULL", "OFF"],
@@ -201,6 +280,8 @@ export const LEVER1_PROFILE: ExperimentProfile = {
   },
   corroboratesFullModeMetrics: true,
   corroboratesSummariesWritten: false,
+  corroboratesTailBlocks: false,
+  corroboratesCompactEngagement: false,
   defaultsToSelfFlip: true,
   contrasts: [
     ["LEVER", "OFF"],
@@ -222,6 +303,8 @@ export const LEVER3_PROFILE: ExperimentProfile = {
   },
   corroboratesFullModeMetrics: true,
   corroboratesSummariesWritten: false,
+  corroboratesTailBlocks: false,
+  corroboratesCompactEngagement: false,
   defaultsToSelfFlip: true,
   contrasts: [
     ["LEVER", "OFF"],
@@ -251,6 +334,8 @@ export const LEVER4_PROFILE: ExperimentProfile = {
   },
   corroboratesFullModeMetrics: true,
   corroboratesSummariesWritten: false,
+  corroboratesTailBlocks: false,
+  corroboratesCompactEngagement: false,
   defaultsToSelfFlip: true,
   contrasts: [
     ["LEVER", "OFF"],
@@ -280,6 +365,122 @@ export const LEVER5_PROFILE: ExperimentProfile = {
   },
   corroboratesFullModeMetrics: true,
   corroboratesSummariesWritten: true,
+  corroboratesTailBlocks: false,
+  corroboratesCompactEngagement: false,
+  defaultsToSelfFlip: true,
+  contrasts: [
+    ["LEVER", "OFF"],
+    ["LEVER", "ON-FULL"],
+    ["ON-FULL", "OFF"],
+  ],
+}
+
+// The compaction-wave profiles (LRU-89-3): the five screen arms the wave
+// runs over the byte-pinned LEVER4 base, each on the shared lever shape
+// (the mirrored 18-block schedule, the frozen contrasts, the full-mode
+// metrics corroboration, the self flip). The lever5 precedent's arm-delta
+// rule holds everywhere: each LEVER seed differs from its ON-FULL baseline
+// by exactly its lever keys. Corroboration is per flavor: the tail profile
+// runs the tailSummaries presence gate (tolerant of quiet blocks and of the
+// empty-tail rotation-retirement shape, pinned in census.ts), the compact
+// profile runs the series-level engagement gate (compactionsRun above zero
+// at least once across the series plus refusals observed, per the F6/DC3
+// decision), and the bud profiles run the lever5 compression gate. The
+// lever5 per-block summariesWritten gate deliberately stays off the tail
+// and compact profiles: those levers' engagement flavors are their own.
+// The deep lever2 era name stays retired.
+export const TAIL_PROFILE: ExperimentProfile = {
+  name: "tail",
+  dataArms: LEVER_DATA_ARMS,
+  pluginSeedByArm: {
+    "ON-FULL": TAIL_ON_FULL_PLUGIN_ENTRY,
+    LEVER: TAIL_ARM_PLUGIN_ENTRY,
+    "CAL-ON-FULL": TAIL_ON_FULL_PLUGIN_ENTRY,
+  },
+  corroboratesFullModeMetrics: true,
+  corroboratesSummariesWritten: false,
+  corroboratesTailBlocks: true,
+  corroboratesCompactEngagement: false,
+  defaultsToSelfFlip: true,
+  contrasts: [
+    ["LEVER", "OFF"],
+    ["LEVER", "ON-FULL"],
+    ["ON-FULL", "OFF"],
+  ],
+}
+
+export const COMPACT_PROFILE: ExperimentProfile = {
+  name: "compact",
+  dataArms: LEVER_DATA_ARMS,
+  pluginSeedByArm: {
+    "ON-FULL": COMPACT_ON_FULL_PLUGIN_ENTRY,
+    LEVER: COMPACT_ARM_PLUGIN_ENTRY,
+    "CAL-ON-FULL": COMPACT_ON_FULL_PLUGIN_ENTRY,
+  },
+  corroboratesFullModeMetrics: true,
+  corroboratesSummariesWritten: false,
+  corroboratesTailBlocks: false,
+  corroboratesCompactEngagement: true,
+  defaultsToSelfFlip: true,
+  contrasts: [
+    ["LEVER", "OFF"],
+    ["LEVER", "ON-FULL"],
+    ["ON-FULL", "OFF"],
+  ],
+}
+
+export const BUD128_PROFILE: ExperimentProfile = {
+  name: "bud128",
+  dataArms: LEVER_DATA_ARMS,
+  pluginSeedByArm: {
+    "ON-FULL": BUD128_ON_FULL_PLUGIN_ENTRY,
+    LEVER: BUD128_ARM_PLUGIN_ENTRY,
+    "CAL-ON-FULL": BUD128_ON_FULL_PLUGIN_ENTRY,
+  },
+  corroboratesFullModeMetrics: true,
+  corroboratesSummariesWritten: true,
+  corroboratesTailBlocks: false,
+  corroboratesCompactEngagement: false,
+  defaultsToSelfFlip: true,
+  contrasts: [
+    ["LEVER", "OFF"],
+    ["LEVER", "ON-FULL"],
+    ["ON-FULL", "OFF"],
+  ],
+}
+
+export const BUD512_PROFILE: ExperimentProfile = {
+  name: "bud512",
+  dataArms: LEVER_DATA_ARMS,
+  pluginSeedByArm: {
+    "ON-FULL": BUD512_ON_FULL_PLUGIN_ENTRY,
+    LEVER: BUD512_ARM_PLUGIN_ENTRY,
+    "CAL-ON-FULL": BUD512_ON_FULL_PLUGIN_ENTRY,
+  },
+  corroboratesFullModeMetrics: true,
+  corroboratesSummariesWritten: true,
+  corroboratesTailBlocks: false,
+  corroboratesCompactEngagement: false,
+  defaultsToSelfFlip: true,
+  contrasts: [
+    ["LEVER", "OFF"],
+    ["LEVER", "ON-FULL"],
+    ["ON-FULL", "OFF"],
+  ],
+}
+
+export const BUD256_PROFILE: ExperimentProfile = {
+  name: "bud256",
+  dataArms: LEVER_DATA_ARMS,
+  pluginSeedByArm: {
+    "ON-FULL": BUD256_ON_FULL_PLUGIN_ENTRY,
+    LEVER: BUD256_ARM_PLUGIN_ENTRY,
+    "CAL-ON-FULL": BUD256_ON_FULL_PLUGIN_ENTRY,
+  },
+  corroboratesFullModeMetrics: true,
+  corroboratesSummariesWritten: true,
+  corroboratesTailBlocks: false,
+  corroboratesCompactEngagement: false,
   defaultsToSelfFlip: true,
   contrasts: [
     ["LEVER", "OFF"],
@@ -294,6 +495,11 @@ export const EXPERIMENT_PROFILES: Readonly<Record<ExperimentProfile["name"], Exp
   lever3: LEVER3_PROFILE,
   lever4: LEVER4_PROFILE,
   lever5: LEVER5_PROFILE,
+  tail: TAIL_PROFILE,
+  compact: COMPACT_PROFILE,
+  bud128: BUD128_PROFILE,
+  bud512: BUD512_PROFILE,
+  bud256: BUD256_PROFILE,
 }
 
 /**

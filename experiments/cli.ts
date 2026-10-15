@@ -60,7 +60,7 @@ import {
   SPAWN_TIMEOUT_MS,
   TIMEOUT_EXIT_STATUS,
 } from "./spawn.ts"
-import { buildCensus, METRICS_LOG_BASENAME, openTurnDatabase, uncorroboratedFullModeBlocks, uncorroboratedSummaryBlocks } from "./census.ts"
+import { buildCensus, compactEngagementFailure, METRICS_LOG_BASENAME, openTurnDatabase, uncorroboratedFullModeBlocks, uncorroboratedSummaryBlocks, uncorroboratedTailBlocks } from "./census.ts"
 import {
   computeCredits,
   computeDepthBucketTable,
@@ -719,6 +719,36 @@ export const runReadout = (config: CliConfig): string => {
     const uncorroboratedSummaries = uncorroboratedSummaryBlocks(census)
     if (uncorroboratedSummaries.length > 0) {
       caveats.push(`summariesWritten corroboration failed for blocks: ${uncorroboratedSummaries.join(", ")}`)
+    }
+  }
+  if (config.profile.corroboratesTailBlocks) {
+    const uncorroboratedTail = uncorroboratedTailBlocks(census)
+    if (uncorroboratedTail.length > 0) {
+      caveats.push(`tailSummaries corroboration failed for blocks: ${uncorroboratedTail.join(", ")}`)
+    }
+    // The placement thesis judges tail against the compression pair at a
+    // matched budget: the standing DC1 rule the tail verdict narrative
+    // applies.
+    caveats.push("placement rule (DC1): the tail arm is judged against the compression pair at the matched budget 256, not against the base")
+    // The rotation-retirement note: a metrics-bearing tail block whose tail
+    // block reads a silent empty tail (liveEntries zero, dropped zero) is
+    // read as rotation retirement, never as disengagement.
+    caveats.push("tail rotation note (DC2): a silent empty tail with dropped=0 reads as rotation retirement, not disengagement")
+  }
+  if (config.profile.corroboratesCompactEngagement) {
+    const engagementFailure = compactEngagementFailure(census)
+    if (engagementFailure !== null) {
+      caveats.push(`compact engagement gate failed (series level): ${engagementFailure}`)
+    }
+    // The per-block invocation counts are an observed covariate, not a gate:
+    // the verdict narrative must address them (the F6/DC3 decision).
+    const covariateRows = census.filter((row) => row.exclusion !== "calibration" && row.arm === "LEVER" && row.compact !== null)
+    if (covariateRows.length > 0) {
+      caveats.push(
+        `compact covariate (DC3): ${covariateRows
+          .map((row) => `block ${row.blockLabel}: ${row.compact!.compactionsRun} run / ${row.compact!.compactRefusals} refused`)
+          .join("; ")}`,
+      )
     }
   }
   const inputs: ReadoutInputs = {
