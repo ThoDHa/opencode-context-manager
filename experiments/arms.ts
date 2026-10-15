@@ -52,6 +52,8 @@ export type PluginEntryOption = {
   metricsMinLineIntervalMs?: number
   summarizeEvictedOutputs?: boolean
   summaryTokenBudget?: number
+  compactTool?: boolean
+  tailSummaryBlocks?: boolean
 }
 export type PluginEntry = [string, PluginEntryOption]
 

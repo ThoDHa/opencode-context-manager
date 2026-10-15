@@ -2459,13 +2459,18 @@ const WAVE_PROFILES = [
 const WAVE_ON_FULL_SEED_TEXT =
   '[["./opencode-context-manager/plugin/context-manager.ts",{"manualMode":false,"watermarkTokens":12000,"agedReadEvictionMessages":30,"reasoningRetentionMessages":16,"cacheAwareHints":true,"mutationBatchCadence":3,"evictionBatchMultiplier":2,"metricsMinLineIntervalMs":0}]]'
 
+// The four lever option keys the wave's LEVER deltas draw from, typed
+// against the seed option surface so a misspelled key is a contract break,
+// not a silently-false absence assertion.
+const WAVE_LEVER_OPTION_KEYS = ["tailSummaryBlocks", "compactTool", "summarizeEvictedOutputs", "summaryTokenBudget"] as const satisfies readonly (keyof PluginEntryOption)[]
+
 test("the wave profiles' ON-FULL seeds pin the LEVER4 base stack byte-exactly as their own records", () => {
   for (const { profile, onFullEntry } of WAVE_PROFILES) {
     assert.equal(JSON.stringify(onFullEntry), WAVE_ON_FULL_SEED_TEXT, `the ${profile.name} ON-FULL seed must stay byte-identical to the LEVER4 base stack`)
     assert.equal(profile.pluginSeedByArm["ON-FULL"], onFullEntry)
     assert.equal(profile.pluginSeedByArm["CAL-ON-FULL"], profile.pluginSeedByArm["ON-FULL"], `the calibration token maps to the ${profile.name} profile's ON-FULL seed`)
     const options = onFullEntry[0]![1]
-    for (const leverKey of ["tailSummaryBlocks", "compactTool", "summarizeEvictedOutputs", "summaryTokenBudget"]) {
+    for (const leverKey of WAVE_LEVER_OPTION_KEYS) {
       assert.equal(leverKey in options, false, `the ${profile.name} ON-FULL seed carries no lever keys (${leverKey})`)
     }
     assert.equal(options.metricsMinLineIntervalMs, 0, "the series-4 metrics-visibility rider rides the base stack")
@@ -2487,7 +2492,7 @@ test("the wave profiles' ON-FULL seeds pin the LEVER4 base stack byte-exactly as
 })
 
 test("the wave LEVER seeds carry exactly their lever deltas over the shared base, byte-exactly", () => {
-  const leverSeedExpectations: readonly { armEntry: readonly PluginEntry[]; seedText: string; delta: Record<string, unknown> }[] = [
+  const leverSeedExpectations: readonly { armEntry: readonly PluginEntry[]; seedText: string; delta: PluginEntryOption }[] = [
     {
       armEntry: TAIL_ARM_PLUGIN_ENTRY,
       seedText:
@@ -2521,13 +2526,18 @@ test("the wave LEVER seeds carry exactly their lever deltas over the shared base
   ]
   for (const expectation of leverSeedExpectations) {
     assert.equal(JSON.stringify(expectation.armEntry), expectation.seedText, "each wave LEVER seed must stay byte-identical")
-    const base = { ...expectation.armEntry[0]![1] } as Record<string, unknown>
-    for (const leverKey of Object.keys(expectation.delta)) {
-      delete base[leverKey]
-    }
+    const leverOptions = expectation.armEntry[0]![1]
+    const base = { ...leverOptions }
+    for (const leverKey of WAVE_LEVER_OPTION_KEYS) delete base[leverKey]
     assert.deepEqual(base, WAVE_PROFILES[0]!.onFullEntry[0]![1], "no option other than the profile's lever delta differs between the data arms")
-    for (const [leverKey, leverValue] of Object.entries(expectation.delta)) {
-      assert.equal((expectation.armEntry[0]![1] as Record<string, unknown>)[leverKey], leverValue)
+    assert.deepEqual(
+      WAVE_LEVER_OPTION_KEYS.filter((key) => key in leverOptions),
+      Object.keys(expectation.delta),
+      "the LEVER seed's lever keys are exactly its profile's delta keys",
+    )
+    for (const leverKey of WAVE_LEVER_OPTION_KEYS) {
+      if (!(leverKey in expectation.delta)) continue
+      assert.equal(leverOptions[leverKey], expectation.delta[leverKey])
     }
     assert.notEqual(expectation.armEntry, LEVER5_ARM_PLUGIN_ENTRY, "each wave LEVER seed is its own record, never an alias of the lever5 seed it resembles")
   }
@@ -2831,6 +2841,7 @@ test("the wave readouts run their profile corroboration and carry the DC1, DC2, 
     const healthyCompact = runAndRead(COMPACT_PROFILE)
     assert.match(healthyCompact, /profile compact,/, "the readout stamps the compact profile")
     assert.match(healthyCompact, /caveat: compact covariate \(DC3\): block 3: 2 run \/ 1 refused/, "the covariate caveat lists each LEVER block's per-block invocation counts")
+    assert.doesNotMatch(healthyCompact, /block 3: 0 run \/ 0 refused/, "a block with its own counters prints them, not zeros")
     assert.equal(healthyCompact.includes("compact engagement gate failed"), false, "an engaged compact series carries no engagement caveat")
     assert.equal(healthyCompact.includes("summariesWritten corroboration failed"), false, "the compact profile runs no per-block summaries gate")
     writeMetrics([
@@ -2839,6 +2850,16 @@ test("the wave readouts run their profile corroboration and carry the DC1, DC2, 
     ])
     const refusalOnlyCompact = runAndRead(COMPACT_PROFILE)
     assert.match(refusalOnlyCompact, /caveat: compact engagement gate failed \(series level\): no compaction ran/, "a refusal-only series fails the series-level engagement gate")
+    assert.match(refusalOnlyCompact, /block 3: 0 run \/ 3 refused/, "the covariate keeps a present block's own figures")
+    // A metricless LEVER block (no compact block on any of its lines) must
+    // still get its covariate row as zeros: the producer omits the block
+    // until its first counter movement and null means exactly zero, so the
+    // covariate is complete on its face (review 15 DC-2).
+    writeMetrics([
+      summaryMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1 }),
+      summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1 }),
+    ])
+    assert.match(runAndRead(COMPACT_PROFILE), /caveat: compact covariate \(DC3\): block 3: 0 run \/ 0 refused/, "a metricless LEVER block prints its zeros")
 
     writeMetrics([
       summaryMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1 }),

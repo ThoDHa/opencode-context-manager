@@ -67,7 +67,12 @@ export type CompactCountersBlock = { compactionsRun: number; compactedEntries: n
 // The tail block a metrics line carries, or null when the line's shape
 // carries none (gate-off runs, pre-tail readers): a present-but-malformed
 // member degrades to zero rather than poisoning the census, matching the
-// summaries figure's tolerance.
+// summaries figure's tolerance. The wave tail gate treats a null block on
+// a metrics-bearing LEVER block as disengagement, which is only sound
+// because the producer stamps the block on EVERY gate-on flushed line
+// (pipeline.ts applyTailSummaries returns undefined on gate-off alone);
+// the core suite pins that invariant, so a producer change that breaks it
+// is caught there before a series can misattribute quiet runs.
 const tailSummariesBlockOf = (record: Record<string, unknown>): TailSummariesBlock | null => {
   const block = record["tailSummaries"]
   if (block === null || typeof block !== "object" || Array.isArray(block)) return null

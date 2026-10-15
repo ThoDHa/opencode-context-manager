@@ -740,15 +740,22 @@ export const runReadout = (config: CliConfig): string => {
     if (engagementFailure !== null) {
       caveats.push(`compact engagement gate failed (series level): ${engagementFailure}`)
     }
-    // The per-block invocation counts are an observed covariate, not a gate:
-    // the verdict narrative must address them (the F6/DC3 decision).
-    const covariateRows = census.filter((row) => row.exclusion !== "calibration" && row.arm === "LEVER" && row.compact !== null)
-    if (covariateRows.length > 0) {
-      caveats.push(
-        `compact covariate (DC3): ${covariateRows
-          .map((row) => `block ${row.blockLabel}: ${row.compact!.compactionsRun} run / ${row.compact!.compactRefusals} refused`)
-          .join("; ")}`,
-      )
+    // The per-block invocation counts are an observed covariate, not a
+    // gate: the verdict narrative must address them (the F6/DC3 decision).
+    // Every non-calibration LEVER block gets a row, zeros included: the
+    // producer omits the compact block until its first counter movement
+    // and a null block means exactly zero, so the covariate is complete on
+    // its face and immune to that stamping contract.
+    const covariate = census
+      .filter((row) => row.exclusion !== "calibration" && row.arm === "LEVER")
+      .map((row) => {
+        const compact = row.compact
+        return compact === null
+          ? `block ${row.blockLabel}: 0 run / 0 refused`
+          : `block ${row.blockLabel}: ${compact.compactionsRun} run / ${compact.compactRefusals} refused`
+      })
+    if (covariate.length > 0) {
+      caveats.push(`compact covariate (DC3): ${covariate.join("; ")}`)
     }
   }
   const inputs: ReadoutInputs = {
