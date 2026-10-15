@@ -56,6 +56,7 @@ import {
   type Arm,
   type ExperimentProfile,
   type PluginEntry,
+  type PluginEntryOption,
 } from "../../../experiments/arms.ts"
 import {
   buildSolveArgv,
@@ -2492,7 +2493,7 @@ test("the wave profiles' ON-FULL seeds pin the LEVER4 base stack byte-exactly as
 })
 
 test("the wave LEVER seeds carry exactly their lever deltas over the shared base, byte-exactly", () => {
-  const leverSeedExpectations: readonly { armEntry: readonly PluginEntry[]; seedText: string; delta: PluginEntryOption }[] = [
+  const leverSeedExpectations: readonly { armEntry: readonly PluginEntry[]; seedText: string; delta: Partial<PluginEntryOption> }[] = [
     {
       armEntry: TAIL_ARM_PLUGIN_ENTRY,
       seedText:
