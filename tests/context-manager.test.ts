@@ -12968,6 +12968,39 @@ test("gate off keeps the metrics line byte-shape identical to today: no tail blo
   }
 })
 
+test("a gate-on run with zero summary records still stamps a zero tailSummaries block on its flushed line", async () => {
+  const metricsDir = makeMetricsDir()
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const metricsPath = metricsLogPathIn(metricsDir)
+    const fake = createWiringFakeClient()
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, {
+      [OPTION_TAIL_SUMMARY_BLOCKS]: true,
+      metricsLog: true,
+      metricsPath,
+    })
+
+    // An eventful run under the tail gate with an empty record set: the
+    // tail pass must report its zero projection (never undefined, which is
+    // the gate-off shape alone), so the flushed line carries the zeroed
+    // block the experiments-side tail gate reads as engagement presence.
+    await runPageStoreEviction(hooks, SESSION_ID, PAGE_STORE_EVICTED_SUBJECT)
+
+    const lines = metricsLinesIn(metricsPath)
+    assert.ok(lines.length >= 1)
+    const last = lines[lines.length - 1]
+    assert.deepEqual(
+      last["tailSummaries"],
+      { projected: 0, dropped: 0, liveEntries: 0, liveTokens: 0 },
+      "the producer invariant the tail corroboration leans on: a gate-on flushed line always carries the tailSummaries block",
+    )
+  } finally {
+    cleanupMetricsDir(pagesDir)
+    cleanupMetricsDir(metricsDir)
+  }
+})
+
 test("both gates on: the compressor fires once, the tombstone lands, the tail entry appends, and recall serves summary-first", async () => {
   const pagesDir = makeMetricsDir()
   try {
