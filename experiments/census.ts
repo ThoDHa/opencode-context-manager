@@ -552,8 +552,6 @@ export const uncorroboratedTailBlocks = (rows: readonly CensusRow[]): string[] =
   return failures
 }
 
-export type CompactEngagementFailure = { ran: boolean; refusals: number }
-
 /**
  * The wave compact-arm's series-level engagement gate: across the whole
  * series, the LEVER arm's compactionsRun must rise above zero at least once

@@ -1448,8 +1448,17 @@ test("the corroboration flags every metrics-line leak class on an OFF block", ()
 // the session model key the plugin stamps from the chat.params capture. The
 // fixture builder's MetricsLineOptions cannot carry the summaries fields and
 // sits outside this unit's territory, so the summaries-bearing lines are
-// built here.
-const summaryMetricsLine = (options: { minute: number; sessionId: string; evictions?: number; summariesWritten?: number; modelKey?: string }): string =>
+// built here; the wave units' tailSummaries and compact blocks ride the same
+// builder, each present only when its producer recorded a first event.
+const summaryMetricsLine = (options: {
+  minute: number
+  sessionId: string
+  evictions?: number
+  summariesWritten?: number
+  modelKey?: string
+  tailSummaries?: { projected: number; dropped: number; liveEntries: number; liveTokens: number }
+  compact?: { compactionsRun: number; compactedEntries: number; compactedBytes: number; compactRefusals: number }
+}): string =>
   JSON.stringify({
     ts: at(options.minute),
     session: options.sessionId,
@@ -1467,6 +1476,8 @@ const summaryMetricsLine = (options: { minute: number; sessionId: string; evicti
     })),
     totals: { evictions: 0, ...(options.summariesWritten === undefined ? {} : { summariesWritten: options.summariesWritten }) },
     ...(options.modelKey === undefined ? {} : { contextLimitModelKey: options.modelKey }),
+    ...(options.tailSummaries === undefined ? {} : { tailSummaries: options.tailSummaries }),
+    ...(options.compact === undefined ? {} : { compact: options.compact }),
   })
 
 // The corroboration geometry under the lever5 profile, fed the
@@ -2510,7 +2521,7 @@ test("the wave LEVER seeds carry exactly their lever deltas over the shared base
   ]
   for (const expectation of leverSeedExpectations) {
     assert.equal(JSON.stringify(expectation.armEntry), expectation.seedText, "each wave LEVER seed must stay byte-identical")
-    const { ...base } = expectation.armEntry[0]![1]
+    const base = { ...expectation.armEntry[0]![1] } as Record<string, unknown>
     for (const leverKey of Object.keys(expectation.delta)) {
       delete base[leverKey]
     }
@@ -2635,39 +2646,14 @@ test("resolveCliConfig selects each wave profile with the self-flip default and 
   assert.equal(isExperimentProfileName("lever2"), false, "the retired lever2 era name must not resolve to a profile")
 })
 
-// A metrics-log line as the producer writes it with the tail and compact
-// blocks spread in: generation 2, the eviction-shaped entries, the
-// cumulative totals block, and the two optional blocks (each present only
-// when its producer recorded a first event). The summaries fields ride the
-// summaryMetricsLine builder above; the tail and compact fields ride this
-// one.
-const waveMetricsLine = (options: {
-  minute: number
-  sessionId: string
-  evictions?: number
-  summariesWritten?: number
-  tailSummaries?: { projected: number; dropped: number; liveEntries: number; liveTokens: number }
-  compact?: { compactionsRun: number; compactedEntries: number; compactedBytes: number; compactRefusals: number }
-}): string =>
-  JSON.stringify({
-    ts: at(options.minute),
-    session: options.sessionId,
-    modelContextTokens: 1000000,
-    estimatedTokens: 50000,
-    modelContextTokensSource: "model",
-    wouldEvictThisRun: 0,
-    wouldEvictBytesThisRun: 0,
-    evictedThisRun: Array.from({ length: options.evictions ?? 0 }, (_, index) => ({
-      tool: `tool-${index}`,
-      subject: `subject-${index}`,
-      bytes: 16,
-      attachmentBytes: 0,
-      messagesAgo: index + 1,
-    })),
-    totals: { evictions: 0, ...(options.summariesWritten === undefined ? {} : { summariesWritten: options.summariesWritten }) },
-    ...(options.tailSummaries === undefined ? {} : { tailSummaries: options.tailSummaries }),
-    ...(options.compact === undefined ? {} : { compact: options.compact }),
-  })
+// The corroboration geometry under a wave profile, fed raw metrics-log line
+// text so each gate's line shapes ride the same blocks (the lever5
+// census-with-lines pattern, parameterized over the profile).
+const waveCensusWithLines = (lines: readonly string[], profile: ExperimentProfile): CensusRow[] =>
+  corroborationCensusFromMetrics(
+    lines.join("\n") + "\n",
+    profile,
+  )
 
 test("parseMetricsLog carries the tailSummaries and compact blocks a metrics line records", () => {
   const events = parseMetricsLog(
@@ -2696,21 +2682,12 @@ test("parseMetricsLog carries the tailSummaries and compact blocks a metrics lin
   assert.equal(events[3]!.compact, null, "a null compact block parses as no compact counters")
 })
 
-// The corroboration geometry under a wave profile, fed raw metrics-log line
-// text so each gate's line shapes ride the same blocks (the lever5
-// census-with-lines pattern, parameterized over the profile).
-const waveCensusWithLines = (lines: readonly string[], profile: ExperimentProfile): CensusRow[] =>
-  corroborationCensusFromMetrics(
-    lines.join("\n") + "\n",
-    profile,
-  )
-
 test("the census row carries the block's tail figure and the session-cumulative compact counters", () => {
   const census = waveCensusWithLines(
     [
-      waveMetricsLine({ minute: 16, sessionId: "ses_off", tailSummaries: { projected: 1, dropped: 0, liveEntries: 2, liveTokens: 500 } }),
-      waveMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, tailSummaries: { projected: 3, dropped: 0, liveEntries: 4, liveTokens: 1200 }, compact: { compactionsRun: 1, compactedEntries: 2, compactedBytes: 400, compactRefusals: 0 } }),
-      waveMetricsLine({ minute: 37, sessionId: "ses_lever", tailSummaries: { projected: 1, dropped: 1, liveEntries: 4, liveTokens: 1000 }, compact: { compactionsRun: 3, compactedEntries: 6, compactedBytes: 1200, compactRefusals: 2 } }),
+      summaryMetricsLine({ minute: 16, sessionId: "ses_off", tailSummaries: { projected: 1, dropped: 0, liveEntries: 2, liveTokens: 500 } }),
+      summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, tailSummaries: { projected: 3, dropped: 0, liveEntries: 4, liveTokens: 1200 }, compact: { compactionsRun: 1, compactedEntries: 2, compactedBytes: 400, compactRefusals: 0 } }),
+      summaryMetricsLine({ minute: 37, sessionId: "ses_lever", tailSummaries: { projected: 1, dropped: 1, liveEntries: 4, liveTokens: 1000 }, compact: { compactionsRun: 3, compactedEntries: 6, compactedBytes: 1200, compactRefusals: 2 } }),
     ],
     TAIL_PROFILE,
   )
@@ -2720,7 +2697,7 @@ test("the census row carries the block's tail figure and the session-cumulative 
   const off = census.find((row) => row.blockLabel === "1")!
   assert.deepEqual(off.tailSummaries, { projected: 1, dropped: 0, liveEntries: 2, liveTokens: 500 })
   assert.equal(off.compact, null, "a block without compact-bearing lines reports none")
-  const plain = waveCensusWithLines([waveMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1 })], TAIL_PROFILE)
+  const plain = waveCensusWithLines([summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1 })], TAIL_PROFILE)
   const plainLever = plain.find((row) => row.blockLabel === "3")!
   assert.equal(plainLever.tailSummaries, null, "a block whose lines carry no tailSummaries block reports no tail state")
   assert.equal(plainLever.compact, null)
@@ -2729,38 +2706,38 @@ test("the census row carries the block's tail figure and the session-cumulative 
 test("the tailSummaries corroboration names metrics-bearing LEVER blocks without a tail block and tolerates quiet blocks", () => {
   const healthy = waveCensusWithLines(
     [
-      waveMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1 }),
-      waveMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, tailSummaries: { projected: 2, dropped: 0, liveEntries: 3, liveTokens: 800 } }),
+      summaryMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1 }),
+      summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, tailSummaries: { projected: 2, dropped: 0, liveEntries: 3, liveTokens: 800 } }),
     ],
     TAIL_PROFILE,
   )
   assert.deepEqual(uncorroboratedTailBlocks(healthy), [], "a corroborating series names no blocks")
-  const silentLever = waveCensusWithLines([waveMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1 })], TAIL_PROFILE)
+  const silentLever = waveCensusWithLines([summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1 })], TAIL_PROFILE)
   assert.deepEqual(uncorroboratedTailBlocks(silentLever), ["3"], "a metrics-bearing LEVER block whose lines carry no tailSummaries block must be named")
-  const quietLever = waveCensusWithLines([waveMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1 })], TAIL_PROFILE)
+  const quietLever = waveCensusWithLines([summaryMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1 })], TAIL_PROFILE)
   assert.deepEqual(uncorroboratedTailBlocks(quietLever), [], "a quiet LEVER block is tolerated: the eventfulness gate writes no metrics line on an uneventful tail run (the S4 fold)")
-  const emptyTail = waveCensusWithLines([waveMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, tailSummaries: { projected: 0, dropped: 0, liveEntries: 0, liveTokens: 0 } })], TAIL_PROFILE)
+  const emptyTail = waveCensusWithLines([summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, tailSummaries: { projected: 0, dropped: 0, liveEntries: 0, liveTokens: 0 } })], TAIL_PROFILE)
   assert.deepEqual(uncorroboratedTailBlocks(emptyTail), [], "an empty tail block corroborates: a silent empty tail with dropped 0 reads as rotation retirement, not disengagement (the DC2 rotation note)")
   const offWithMetrics = waveCensusWithLines(
     [
-      waveMetricsLine({ minute: 16, sessionId: "ses_off" }),
-      waveMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, tailSummaries: { projected: 1, dropped: 0, liveEntries: 1, liveTokens: 200 } }),
+      summaryMetricsLine({ minute: 16, sessionId: "ses_off" }),
+      summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, tailSummaries: { projected: 1, dropped: 0, liveEntries: 1, liveTokens: 200 } }),
     ],
     TAIL_PROFILE,
   )
   assert.deepEqual(uncorroboratedTailBlocks(offWithMetrics), [], "OFF blocks are never judged by the tail gate (any metrics line there is the full-mode gate's leak)")
   const quietOnFull = waveCensusWithLines(
     [
-      waveMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1 }),
-      waveMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, tailSummaries: { projected: 1, dropped: 0, liveEntries: 1, liveTokens: 200 } }),
+      summaryMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1 }),
+      summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, tailSummaries: { projected: 1, dropped: 0, liveEntries: 1, liveTokens: 200 } }),
     ],
     TAIL_PROFILE,
   )
   assert.deepEqual(uncorroboratedTailBlocks(quietOnFull), [], "ON-FULL blocks are never judged: the tail gate is off in that arm by the profile's own seed")
   const calibrationWithTail = waveCensusWithLines(
     [
-      waveMetricsLine({ minute: 6, sessionId: "ses_cal", evictions: 1, tailSummaries: { projected: 9, dropped: 0, liveEntries: 9, liveTokens: 2000 } }),
-      waveMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, tailSummaries: { projected: 1, dropped: 0, liveEntries: 1, liveTokens: 200 } }),
+      summaryMetricsLine({ minute: 6, sessionId: "ses_cal", evictions: 1, tailSummaries: { projected: 9, dropped: 0, liveEntries: 9, liveTokens: 2000 } }),
+      summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, tailSummaries: { projected: 1, dropped: 0, liveEntries: 1, liveTokens: 200 } }),
     ],
     TAIL_PROFILE,
   )
@@ -2770,31 +2747,31 @@ test("the tailSummaries corroboration names metrics-bearing LEVER blocks without
 test("the compact engagement gate demands a compaction and an observed refusal across the series", () => {
   const engaged = waveCensusWithLines(
     [
-      waveMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1 }),
-      waveMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, compact: { compactionsRun: 1, compactedEntries: 3, compactedBytes: 600, compactRefusals: 2 } }),
+      summaryMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1 }),
+      summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, compact: { compactionsRun: 1, compactedEntries: 3, compactedBytes: 600, compactRefusals: 2 } }),
     ],
     COMPACT_PROFILE,
   )
   assert.equal(compactEngagementFailure(engaged), null, "an engaged series (a compaction ran, a refusal was observed) passes")
-  const silent = waveCensusWithLines([waveMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1 })], COMPACT_PROFILE)
+  const silent = waveCensusWithLines([summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1 })], COMPACT_PROFILE)
   assert.match(compactEngagementFailure(silent) ?? "", /no compaction ran/, "a series whose compactionsRun never rises must fail")
   assert.match(compactEngagementFailure(silent) ?? "", /no refusal was observed/, "a series whose compactRefusals never rise must fail")
   const ranWithoutRefusal = waveCensusWithLines(
-    [waveMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, compact: { compactionsRun: 2, compactedEntries: 4, compactedBytes: 800, compactRefusals: 0 } })],
+    [summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, compact: { compactionsRun: 2, compactedEntries: 4, compactedBytes: 800, compactRefusals: 0 } })],
     COMPACT_PROFILE,
   )
   assert.match(compactEngagementFailure(ranWithoutRefusal) ?? "", /no refusal was observed/)
   assert.doesNotMatch(compactEngagementFailure(ranWithoutRefusal) ?? "", /no compaction ran/)
   const refusedWithoutRun = waveCensusWithLines(
-    [waveMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, compact: { compactionsRun: 0, compactedEntries: 0, compactedBytes: 0, compactRefusals: 3 } })],
+    [summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, compact: { compactionsRun: 0, compactedEntries: 0, compactedBytes: 0, compactRefusals: 3 } })],
     COMPACT_PROFILE,
   )
   assert.match(compactEngagementFailure(refusedWithoutRun) ?? "", /no compaction ran/)
   assert.doesNotMatch(compactEngagementFailure(refusedWithoutRun) ?? "", /no refusal was observed/)
   const otherArmCounts = waveCensusWithLines(
     [
-      waveMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1, compact: { compactionsRun: 5, compactedEntries: 9, compactedBytes: 1800, compactRefusals: 4 } }),
-      waveMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1 }),
+      summaryMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1, compact: { compactionsRun: 5, compactedEntries: 9, compactedBytes: 1800, compactRefusals: 4 } }),
+      summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1 }),
     ],
     COMPACT_PROFILE,
   )
@@ -2830,8 +2807,8 @@ test("the wave readouts run their profile corroboration and carry the DC1, DC2, 
     const runAndRead = (profile: ExperimentProfile): string => readFileSync(runReadout(cliConfigFor(temp, { dbPath, profile })), "utf8")
 
     writeMetrics([
-      waveMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1 }),
-      waveMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, tailSummaries: { projected: 2, dropped: 0, liveEntries: 3, liveTokens: 800 } }),
+      summaryMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1 }),
+      summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, tailSummaries: { projected: 2, dropped: 0, liveEntries: 3, liveTokens: 800 } }),
     ])
     const healthyTail = runAndRead(TAIL_PROFILE)
     assert.match(healthyTail, /profile tail,/, "the readout stamps the tail profile")
@@ -2842,14 +2819,14 @@ test("the wave readouts run their profile corroboration and carry the DC1, DC2, 
     assert.equal(healthyTail.includes("summariesWritten corroboration failed"), false, "the tail profile runs no per-block summaries gate")
     assert.equal(healthyTail.includes("compact engagement gate failed"), false, "the tail profile runs no compact gate")
     writeMetrics([
-      waveMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1 }),
-      waveMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1 }),
+      summaryMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1 }),
+      summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1 }),
     ])
     assert.match(runAndRead(TAIL_PROFILE), /caveat: tailSummaries corroboration failed for blocks: 3/, "a metrics-bearing LEVER block without a tail block is named")
 
     writeMetrics([
-      waveMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1 }),
-      waveMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, compact: { compactionsRun: 2, compactedEntries: 4, compactedBytes: 800, compactRefusals: 1 } }),
+      summaryMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1 }),
+      summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, compact: { compactionsRun: 2, compactedEntries: 4, compactedBytes: 800, compactRefusals: 1 } }),
     ])
     const healthyCompact = runAndRead(COMPACT_PROFILE)
     assert.match(healthyCompact, /profile compact,/, "the readout stamps the compact profile")
@@ -2857,8 +2834,8 @@ test("the wave readouts run their profile corroboration and carry the DC1, DC2, 
     assert.equal(healthyCompact.includes("compact engagement gate failed"), false, "an engaged compact series carries no engagement caveat")
     assert.equal(healthyCompact.includes("summariesWritten corroboration failed"), false, "the compact profile runs no per-block summaries gate")
     writeMetrics([
-      waveMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1 }),
-      waveMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, compact: { compactionsRun: 0, compactedEntries: 0, compactedBytes: 0, compactRefusals: 3 } }),
+      summaryMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1 }),
+      summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, compact: { compactionsRun: 0, compactedEntries: 0, compactedBytes: 0, compactRefusals: 3 } }),
     ])
     const refusalOnlyCompact = runAndRead(COMPACT_PROFILE)
     assert.match(refusalOnlyCompact, /caveat: compact engagement gate failed \(series level\): no compaction ran/, "a refusal-only series fails the series-level engagement gate")
