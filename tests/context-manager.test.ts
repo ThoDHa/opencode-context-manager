@@ -11689,6 +11689,22 @@ const loadPluginHooksWithClientAndStore = async (client: unknown, storePath: str
     },
   )) as HookMap
 
+// A fresh plugin instance over the same store, wired to a refusing client:
+// any model call the restart shape made would fail loudly instead of
+// silently serving stale state.
+const freshProjectionHooksOver = (storePath: string, sessionID: string): Promise<HookMap> =>
+  loadPluginHooksWithClientAndStore(
+    {
+      session: {
+        create: async () => { throw new Error(`the restart shape must make no model calls (session ${sessionID})`) },
+        prompt: async () => { throw new Error(`the restart shape must make no model calls (session ${sessionID})`) },
+        messages: async () => { throw new Error(`the restart shape must make no model calls (session ${sessionID})`) },
+        delete: async () => { throw new Error(`the restart shape must make no model calls (session ${sessionID})`) },
+      },
+    },
+    storePath,
+  )
+
 test("a gate-on watermark eviction runs one side-call lifecycle and lands a v2 summary line beside the page", async () => {
   const pagesDir = makeMetricsDir()
   try {
@@ -12077,7 +12093,7 @@ const COMPACT_OVERFLOW_STASH_LIMIT = 1
 // must never share a session key with each other.
 const compactSessionId = (tag: string): string => `ctx-compact-${tag}`
 const COMPACT_ACCEPTED_TAIL =
-  "seats replaced with digests and recall pointers, originals persisted for reload, summaries queued under the shared budget."
+  "seats will be replaced with digests and recall pointers at the next turn boundary; originals persisted for reload, summaries queued under the shared budget."
 const COMPACT_ACCEPTED_FOR = (count: number, bytes: number): string =>
   `${COMPACT_MARKER} compacted ${count} accumulated outputs (${bytes} bytes) at this boundary: ${COMPACT_ACCEPTED_TAIL}`
 const COMPACT_BATCH_REFUSAL_FOR = (count: number): string =>
@@ -12253,6 +12269,14 @@ test("an accepted compact call compacts exactly the window-expired seats and lea
     await runTransform(hooks, bundle)
 
     assert.equal(await compactToolCall(hooks, sessionID), COMPACT_ACCEPTED_FOR(2, COMPACT_OLD_OUTPUT_BYTES * 2))
+
+    // PROJECTION SEMANTICS: the accept persists the durable record and
+    // returns immediately; the seats are still live until the next
+    // transform projects the tombstones.
+    assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(COMPACT_OLD_OUTPUT_BYTES))
+    assert.equal(toolPartAt(bundle.messages[1], 0).state.output, outputOfBytes(COMPACT_OLD_OUTPUT_BYTES))
+
+    await runTransform(hooks, bundle)
 
     const firstSeat = toolPartAt(bundle.messages[0], 0).state.output
     const secondSeat = toolPartAt(bundle.messages[1], 0).state.output
@@ -12702,6 +12726,10 @@ test("a compacted attachment-bearing output persists its payloads and strips the
     )
     await runTransform(hooks, bundle)
     await compactToolCall(hooks, sessionID)
+    // PROJECTION SEMANTICS: the attachments strip happens at the next
+    // transform's projection pass, alongside the tombstone.
+    assert.equal(toolPartAt(bundle.messages[0], 0).state.output, outputOfBytes(COMPACT_OLD_OUTPUT_BYTES))
+    await runTransform(hooks, bundle)
 
     const seatState = toolPartAt(bundle.messages[0], 0).state as { output: string; attachments?: unknown[] }
     assert.ok(seatState.output.startsWith(TOMBSTONE_MARKER))
@@ -12742,6 +12770,103 @@ test("an accepted compact call reports stash-overflow drops in its return instea
     // the first page from the live session store; the return must name
     // the drop, never stay silent about the lost seat.
     assert.match(report, /^\[ctx-compact\] compacted 2 accumulated outputs \(4096 bytes\) at this boundary: 1 older stashed page was dropped by the session store's overflow to make room\./)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("the projection re-derives the seats idempotently across re-transforms of the same list", async () => {
+  const sessionID = compactSessionId("determinism")
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient()
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, { [COMPACT_OPTION_KEY]: true })
+    const bundle = buildCompactBatchBundle(sessionID)
+    await runTransform(hooks, bundle)
+    await compactToolCall(hooks, sessionID)
+    await runTransform(hooks, bundle)
+    const firstProjection = JSON.stringify([
+      toolPartAt(bundle.messages[0], 0).state.output,
+      toolPartAt(bundle.messages[1], 0).state.output,
+    ])
+
+    // The host re-runs the transform over the same persisted list every
+    // turn; the projection must be idempotent: a seat already carrying
+    // its tombstone is skipped, never rewritten, and nothing else moves.
+    await runTransform(hooks, bundle)
+    assert.equal(JSON.stringify([
+      toolPartAt(bundle.messages[0], 0).state.output,
+      toolPartAt(bundle.messages[1], 0).state.output,
+    ]), firstProjection)
+    assert.equal(toolPartAt(bundle.messages[4], 0).state.output, outputOfBytes(COMPACT_OLD_OUTPUT_BYTES))
+
+    await fake.settledAfter(2)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a fresh instance projects the compacted seats from the prior instance's durable record with zero model calls", async () => {
+  const sessionID = compactSessionId("restart")
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const writerFake = createWiringFakeClient({ holdPrompt: true })
+    const writerHooks = await loadPluginHooksWithClientAndStore(writerFake.client, storePath, { [COMPACT_OPTION_KEY]: true })
+    const bundle = buildCompactBatchBundle(sessionID)
+    await runTransform(writerHooks, bundle)
+    await compactToolCall(writerHooks, sessionID)
+    // Drain fully so the writer instance is a clean predecessor.
+    writerFake.releasePrompts()
+    await writerFake.whenPrompted(2)
+    writerFake.releasePrompts()
+    await writerFake.settledAfter(2)
+
+    // Restart shape: a new process over the same store, its own empty
+    // in-memory state. The compaction lines are the durable source, so
+    // the first transform projects the tombstones with no model calls
+    // and no second accept.
+    const freshFake = createWiringFakeClient()
+    const freshHooks = await loadPluginHooksWithClientAndStore(freshFake.client, storePath, { [COMPACT_OPTION_KEY]: true })
+    await runTransform(freshHooks, bundle)
+
+    const firstSeat = toolPartAt(bundle.messages[0], 0).state.output
+    const secondSeat = toolPartAt(bundle.messages[1], 0).state.output
+    assert.ok(firstSeat.startsWith(TOMBSTONE_MARKER))
+    assert.ok(firstSeat.includes(reloadPointerFor(COMPACT_OLD_PATH_A)))
+    assert.ok(secondSeat.startsWith(TOMBSTONE_MARKER))
+    assert.ok(secondSeat.includes(reloadPointerFor(COMPACT_OLD_PATH_B)))
+    assert.equal(freshFake.created.length, 0)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("a compact accept in one process shape cannot flash: the tombstones ride every later request's list", async () => {
+  const sessionID = compactSessionId("no-flash")
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient()
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, { [COMPACT_OPTION_KEY]: true })
+    const bundle = buildCompactBatchBundle(sessionID)
+    await runTransform(hooks, bundle)
+    await compactToolCall(hooks, sessionID)
+    await fake.settledAfter(2)
+    await runTransform(hooks, bundle)
+    assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+
+    // The F4-analog defect shape: whatever the host does with the
+    // previous request's list between turns, the projection re-derives
+    // from the durable record, so a host that drops the mutation (the
+    // probe's finding) still sees the tombstones on the next request.
+    const hostStripped = buildCompactBatchBundle(sessionID)
+    hostStripped.messages = bundle.messages.slice()
+    const freshHooks = await freshProjectionHooksOver(storePath, sessionID)
+    await runTransform(freshHooks, hostStripped)
+    assert.ok(toolPartAt(hostStripped.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+    assert.ok(toolPartAt(hostStripped.messages[1], 0).state.output.startsWith(TOMBSTONE_MARKER))
   } finally {
     cleanupMetricsDir(pagesDir)
   }
