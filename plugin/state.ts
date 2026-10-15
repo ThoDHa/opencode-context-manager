@@ -182,6 +182,12 @@ export type SessionMetrics = {
   // store lines are the durable copy. The record values are never
   // mutated in place, so the read side needs no copy.
   summaryRecords?: Map<string, PageSummaryRecord>
+  // The per-process mirror of this session's durable compacted keys (the
+  // "tool:subject:msgIndex:partIndex" strings the compaction lines
+  // carry): appended once per key at accept time, merged over the stored
+  // lines by the compact projection's read. Never persisted; the store
+  // lines are the durable copy.
+  compactedKeys?: string[]
   // Set when this session observed a page-store line from a newer schema
   // version, or when an eviction ran while the instance guard held: the
   // store's writes and rotation are halted and describe explains why.

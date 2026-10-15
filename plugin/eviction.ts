@@ -1,6 +1,6 @@
 import { appearanceTouches, attachmentPayloadCharsOf, estimateTokens, hotFromIndexOf, nonEmptyAttachmentsOf, stripStateAttachments } from "./messages.ts"
 import type { MessageBundle, ToolAppearance } from "./messages.ts"
-import { BASH_TOOL_NAME, buildOutputDigest, buildReloadPointer, buildTombstone, DEDUP_MARKER, EVICTION_MARKER, LEGACY_DEDUP_MARKER, LEGACY_EVICTION_MARKER, renderSubject, startsWithEitherGeneration, subjectsOf, UNKNOWN_TARGET_LABEL } from "./vocabulary.ts"
+import { BASH_TOOL_NAME, buildOutputDigest, buildReloadPointer, buildTombstone, DEDUP_MARKER, EVICTION_MARKER, LEGACY_DEDUP_MARKER, LEGACY_EVICTION_MARKER, primarySubjectOf, startsWithEitherGeneration, subjectsOf } from "./vocabulary.ts"
 import type { HotSubject, Subject } from "./vocabulary.ts"
 import { ADVISORY_SUBJECTS_BOUND, isPatternProtected, isProtectedTool } from "./options.ts"
 import type { ResolvedOptions } from "./options.ts"
@@ -100,8 +100,7 @@ type EvictionCandidates = { appearances: ToolAppearance[]; entries: EvictableEnt
 // narrate: the first subject, or the unknown-target label for an entry
 // without one. Exported so the compact tool's batch shapes its subjects
 // through the same rule instead of a parallel copy.
-export const primaryRenderedSubjectOf = (entry: EvictableEntry): string =>
-  entry.subjects.length > 0 ? renderSubject(entry.subjects[0]) : UNKNOWN_TARGET_LABEL
+export const primaryRenderedSubjectOf = (entry: EvictableEntry): string => primarySubjectOf(entry.subjects)
 
 // The sort key fault feedback adjusts: each recorded fault pushes the
 // entry's effective recency FAULT_PENALTY_MESSAGES newer, so faulted

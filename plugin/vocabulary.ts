@@ -111,6 +111,13 @@ export const renderSubject = (subject: Subject): string => {
   return boundedSingleLineOf(rendered)
 }
 
+// The primary-subject rule every seat narrator shares: the first subject
+// rendered, or the unknown-target label for a seat without one. One
+// helper so the evictor's tombstones and the compact projection's keys
+// cannot drift apart.
+export const primarySubjectOf = (subjects: Subject[]): string =>
+  subjects.length > 0 ? renderSubject(subjects[0]) : UNKNOWN_TARGET_LABEL
+
 const boundedDigestOf = (text: string): string =>
   text.length > MAX_DIGEST_CHARS ? `${text.slice(0, MAX_DIGEST_CHARS - ELLIPSIS_MARKER.length)}${ELLIPSIS_MARKER}` : text
 

@@ -18,6 +18,13 @@ export const PAGE_STORE_SCHEMA_VERSION = 2
 // keeps their shape identical across v1 and v2.
 export const PAGE_STORE_SUMMARY_LINE_KIND = "summary"
 
+// The compact tool's durable record: one line per accepted compaction
+// carrying the batch's page-key entries. The transform's per-request
+// projection reads these lines (plus the per-process mirror) and applies
+// the seat mechanics to every list seat whose pageKeyOf matches a
+// recorded key.
+export const PAGE_STORE_COMPACTION_LINE_KIND = "compaction"
+
 // The first stamped version (v1 introduced the schemaVersion stamp); older
 // admission below admits only plausible prior stamps.
 const FIRST_STAMPED_PAGE_STORE_SCHEMA_VERSION = 1
@@ -504,4 +511,110 @@ export const recordPageStoreSummaryLines = async (
       )
       .join("\n")}\n`,
   )
+}
+
+// One compacted batch entry: the page-key identity a transform-view seat
+// must match for the projection to apply the seat mechanics. Recorded
+// beside the batch's page lines at accept time; the entry itself carries
+// no output bytes (the page lines are the bytes' durable home).
+export type CompactedEntryKey = {
+  tool: string
+  subject: string
+  msgIndex: number
+  partIndex: number
+  stashSlot?: number
+}
+
+// The v2 compaction line's payload, validated field by field with the
+// same per-line tolerance as the other shapes: a malformed line is
+// skipped, never thrown. One line carries the whole accepted batch.
+const pageStoreCompactionLineOf = (parsed: unknown): CompactedEntryKey[] | undefined => {
+  if (!isRecord(parsed) || parsed["kind"] !== PAGE_STORE_COMPACTION_LINE_KIND) return undefined
+  const entries = parsed["entries"]
+  if (!Array.isArray(entries)) return undefined
+  const keys: CompactedEntryKey[] = []
+  for (const raw of entries) {
+    if (!isRecord(raw)) return undefined
+    const tool = raw["tool"]
+    const subject = raw["subject"]
+    const msgIndex = raw["msgIndex"]
+    const partIndex = raw["partIndex"]
+    if (typeof tool !== "string" || typeof subject !== "string") return undefined
+    if (typeof msgIndex !== "number" || typeof partIndex !== "number") return undefined
+    const stashSlot = raw["stashSlot"]
+    if (stashSlot !== undefined && typeof stashSlot !== "number") return undefined
+    keys.push({
+      tool,
+      subject,
+      msgIndex,
+      partIndex,
+      ...(stashSlot === undefined ? {} : { stashSlot }),
+    })
+  }
+  return keys
+}
+
+// The compact tool's durable write: one compaction line per accepted
+// batch, riding the identical rotation, downgrade-refusal, and diagnostic
+// machinery as the other line kinds, and disabled by the same gates. The
+// per-process mirror refreshes insert-last so the projection's merge sees
+// this run's batch before its line re-reads.
+export const recordPageStoreCompactionLines = async (
+  options: ResolvedOptions,
+  metrics: MetricsStore,
+  sessionKey: string,
+  batch: CompactedEntryKey[],
+  pageStoreGuard: PageStoreGuard,
+): Promise<void> => {
+  if (batch.length === 0) return
+  const entry = metrics.get(sessionKey)
+  if (entry !== undefined) {
+    if (entry.compactedKeys === undefined) entry.compactedKeys = []
+    for (const key of batch) {
+      const compacted = `${key.tool}:${key.subject}:${key.msgIndex}:${key.partIndex}`
+      if (!entry.compactedKeys.includes(compacted)) entry.compactedKeys.push(compacted)
+    }
+  }
+  await recordPageStorePayload(options, metrics, sessionKey, pageStoreGuard, (ts) =>
+    `${JSON.stringify({
+      ts,
+      schemaVersion: PAGE_STORE_SCHEMA_VERSION,
+      session: sessionKey,
+      kind: PAGE_STORE_COMPACTION_LINE_KIND,
+      entries: batch,
+    })}\n`,
+  )
+}
+
+// The compact projection's persistent source: the session's durable
+// compacted keys, one set from every compaction line this session ever
+// wrote, merged with the per-process mirror (always a subset of the
+// lines). The same degradation contract as the other reads: read and
+// parse failures degrade to an empty set, never a thrown error, and the
+// same schema verdicts apply (newer-version lines skip uninterpreted and
+// flip the instance guard).
+export const pageStoreCompactedKeysFor = async (
+  options: ResolvedOptions,
+  metrics: MetricsStore,
+  sessionKey: string,
+  guard: PageStoreGuard,
+  sessionBound: number,
+): Promise<Set<string>> => {
+  // The mirror precedes the store gate: a pageStore-off build still
+  // records batches in memory, and a second accept in the same process
+  // must exclude them even though no durable line exists.
+  const keys = new Set<string>()
+  const entry = metrics.get(sessionKey)
+  for (const compacted of entry?.compactedKeys ?? []) keys.add(compacted)
+  if (options.pageStore === false) return keys
+  await pageStoreParsedLines(options, (parsed) => {
+    const verdict = pageStoreSchemaVerdictOf(parsed)
+    observePageStoreSchemaVerdict(verdict, guard, metrics, sessionKey, sessionBound)
+    if (verdict.kind !== "admissible") return
+    if (lineSessionOf(parsed) !== sessionKey) return
+    const batch = pageStoreCompactionLineOf(parsed)
+    if (batch === undefined) return
+    for (const key of batch) keys.add(`${key.tool}:${key.subject}:${key.msgIndex}:${key.partIndex}`)
+  })
+  return keys
 }

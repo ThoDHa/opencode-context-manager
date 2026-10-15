@@ -1,10 +1,10 @@
 import { contextLimitForRun } from "./context-limits.ts"
 import type { ContextLimitEntry } from "./context-limits.ts"
 import { evictionCandidatesOf, primaryRenderedSubjectOf } from "./eviction.ts"
-import { ATTACHMENT_MIME_KEY, ATTACHMENT_URL_KEY, nonEmptyAttachmentsOf, stripStateAttachments } from "./messages.ts"
+import { ATTACHMENT_MIME_KEY, ATTACHMENT_URL_KEY, nonEmptyAttachmentsOf } from "./messages.ts"
 import type { MessageBundle } from "./messages.ts"
 import type { ResolvedOptions } from "./options.ts"
-import { pagesForSession, pageStoreMatchesFor, recordPageStoreLines, storeEvictedPage } from "./page-store.ts"
+import { type CompactedEntryKey, pageKeyOf, pagesForSession, pageStoreMatchesFor, recordPageStoreCompactionLines, recordPageStoreLines, storeEvictedPage } from "./page-store.ts"
 import type {
   PageEntry,
   PageStoreBySession,
@@ -18,7 +18,7 @@ import { rememberFaultForSubject, rememberSessionValue, sessionIDFromContext, se
 import { compactCountersOf, createSessionMetrics, DEFAULT_REMEMBERED_FAULT_SUBJECTS, metricsForSession, totalsOf, withSessionMetricsEntry } from "./state.ts"
 import type { MetricsHydration, MetricsStore, PersistedTotals } from "./state.ts"
 import type { SummaryCompressor } from "./summaries.ts"
-import { buildOutputDigest, buildReloadPointer, buildTombstone, JSON_INDENT_SPACES, RECALL_TOOL_NAME, SUBJECT_SEPARATOR, SUMMARY_MARKER } from "./vocabulary.ts"
+import { JSON_INDENT_SPACES, RECALL_TOOL_NAME, SUBJECT_SEPARATOR, SUMMARY_MARKER } from "./vocabulary.ts"
 
 export const RECALL_ARG_NAME = "subject"
 export const RECALL_PROBE_ARG_NAME = "countsOnly"
@@ -108,7 +108,7 @@ const UNKNOWN_ATTACHMENT_MIME_LABEL = "unknown mime"
 export const COMPACT_TOOL_NAME = "compact"
 const COMPACT_MARKER = "[ctx-compact]"
 const COMPACT_ACCEPTED_TAIL =
-  "seats replaced with digests and recall pointers, originals persisted for reload, summaries queued under the shared budget."
+  "seats will be replaced with digests and recall pointers at the next turn boundary; originals persisted for reload, summaries queued under the shared budget."
 const COMPACT_BOUNDED_REASON_TAIL = "; nothing compacted."
 const COMPACT_INFLIGHT_REASON =
   "a compaction is still settling for this session; retry once its summaries finish"
@@ -328,6 +328,10 @@ export type CompactSource = {
   pageStores: PageStoreBySession
   pageStoreGuard: PageStoreGuard
   listsForSession: (sessionKey: string) => MessageBundle[] | undefined
+  // The session's durable compacted keys: seats already recorded are
+  // excluded from new batches, so a second call sizes only live outputs
+  // and the summaries a batch queues never repeat a page.
+  compactedKeysForSession: (sessionKey: string) => Promise<Set<string>>
   summaryCompressor: SummaryCompressor | undefined
 }
 
@@ -376,8 +380,14 @@ export const executeCompact = async (source: CompactSource, toolContext: unknown
   }
   const list = source.listsForSession(sessionKey)
   if (list === undefined) return refuse(`accumulated tool outputs (0) sit below the minimum batch of ${COMPACT_MIN_BATCH_ENTRIES}`)
+  // Seats already recorded from a previous compaction are not candidates:
+  // the projection owns their tombstones, and re-recording them would
+  // queue duplicate summaries for the same page.
+  const alreadyCompacted = await source.compactedKeysForSession(sessionKey)
   const candidates = evictionCandidatesOf(list, source.options, new Map())
-  const batch = candidates.evictable.map((entry) => ({
+  const batch = candidates.evictable
+    .filter((entry) => !alreadyCompacted.has(pageKeyOf(entry.tool, primaryRenderedSubjectOf(entry), entry.msgIndex, entry.partIndex)))
+    .map((entry) => ({
     stateRef: entry.stateRef,
     tool: entry.tool,
     msgIndex: entry.msgIndex,
@@ -407,11 +417,10 @@ export const executeCompact = async (source: CompactSource, toolContext: unknown
   )
   const pageStore = pagesForSession(source.pageStores, sessionKey, source.options.stashSessions)
   const pageStoreEntries: PageEntry[] = []
+  const batchKeys: CompactedEntryKey[] = []
   let compactedBytes = 0
   let pagesDropped = 0
   for (const candidate of batch) {
-    const digest = buildOutputDigest(candidate.tool, candidate.subject, candidate.stateRef.output)
-    const tombstone = buildTombstone(candidate.tool, candidate.subject, candidate.bytes, list.length - candidate.lastTouch, candidate.attachments !== undefined, digest)
     const stored: PageEntry = {
       output: candidate.stateRef.output,
       tool: candidate.tool,
@@ -423,8 +432,7 @@ export const executeCompact = async (source: CompactSource, toolContext: unknown
     pagesDropped += storeEvictedPage(pageStore, stored, source.options.stashLimit)
     pageStoreEntries.push(stored)
     source.summaryCompressor?.enqueue({ sessionKey, page: stored })
-    stripStateAttachments(candidate.stateRef)
-    candidate.stateRef.output = `${tombstone}${buildReloadPointer(candidate.subject)}`
+    batchKeys.push({ tool: candidate.tool, subject: candidate.subject, msgIndex: candidate.msgIndex, partIndex: candidate.partIndex })
     compactedBytes += candidate.bytes
   }
   rememberSessionValue(compactRunsBySession, sessionKey, { lastStartMs: nowMs, settling: source.summaryCompressor !== undefined }, COMPACT_RUN_SESSIONS_BOUND)
@@ -437,6 +445,11 @@ export const executeCompact = async (source: CompactSource, toolContext: unknown
   if (pageStoreEntries.length > 0) {
     await recordPageStoreLines(source.options, source.metrics, sessionKey, pageStoreEntries, source.pageStoreGuard)
   }
+  // The durable compacted record: the projection source every later
+  // transform reads. The tombstones are NOT applied here; the host drops
+  // tool-executor-time part mutations (the DC-1 probe's finding), so the
+  // seats are replaced at the next transform's projection pass instead.
+  await recordPageStoreCompactionLines(source.options, source.metrics, sessionKey, batchKeys, source.pageStoreGuard)
   // The declared-losses report names everything the boundary dropped: the
   // stash overflow's evicted pages ride the sentence, never silent.
   const dropClause =

@@ -1,17 +1,17 @@
 import { CONTEXT_TOKENS_SOURCE_UNKNOWN, type ContextLimitEntry, contextLimitForRun } from "./context-limits.ts"
-import { type MessageBundle, runCompositionOf, TEXT_PART_TYPE } from "./messages.ts"
+import { type MessageBundle, nonEmptyAttachmentsOf, runCompositionOf, stripStateAttachments, TEXT_PART_TYPE } from "./messages.ts"
 import type { ResolvedOptions } from "./options.ts"
 import { sessionKeyFromContext, touchMapEntry } from "./session-maps.ts"
 import { countFaults, countUniqueDedupedPairs, metricsForSession, type MetricsHydration, type MetricsStore, type PersistedTotals, type ReasoningExpiry, recordRunOutcome, type RunOutcome, type TailSummariesResult } from "./state.ts"
 import { recordMetricsLine, recordSessionCheckpoint, type PruneThrottle } from "./persistence.ts"
-import { type PageEntry, type PageSummaryRecord, pagesForSession, type PageStoreBySession, type PageStoreGuard, recordPageStoreLines } from "./page-store.ts"
+import { type PageEntry, type PageSummaryRecord, pageKeyOf, pagesForSession, type PageStoreBySession, type PageStoreGuard, recordPageStoreLines } from "./page-store.ts"
 import { deduplicateFileAttachments, deduplicateToolOutputs } from "./dedup.ts"
 import { expireAgedReasoning, fireCollapsePass, type HygieneCadenceBySession, purgeErroredToolInputs, REASONING_EXPIRY_NONE, resolveHygieneBatch, stripLegacyHintParts } from "./hygiene.ts"
 import { evictLargeUserFences } from "./fences.ts"
 import { effectiveWatermarkTokensOf, evictLeastRecentlyUsed, evictionCandidatesOf, measureAdvisory, measureDryRun, measureWithoutEvicting, retentionBreakdownOf } from "./eviction.ts"
 import { type HintMembershipBySession, storeHint, storeStableHint } from "./hints.ts"
 import type { SummaryCompressor } from "./summaries.ts"
-import { buildTailSummaryEntry, TAIL_SUMMARY_TEXT_PREFIX } from "./vocabulary.ts"
+import { buildOutputDigest, buildReloadPointer, buildTailSummaryEntry, buildTombstone, EVICTION_MARKER, LEGACY_EVICTION_MARKER, primarySubjectOf, startsWithEitherGeneration, subjectsOf, TAIL_SUMMARY_TEXT_PREFIX } from "./vocabulary.ts"
 
 // The transform hook's body, extracted so the registration-site boundary
 // can wrap it in fault isolation. Everything it needs rides the deps
@@ -40,6 +40,10 @@ export type TransformHookDeps = {
   // summary records, stored and in-memory alike, wired by the entry to
   // the page-store reader over this instance's summary lines.
   summaryRecordsForSession: (sessionKey: string) => Promise<PageSummaryRecord[]>
+  // The compact projection's persistent source: the session's durable
+  // compacted keys (page-store compaction lines merged with the
+  // per-process mirror), wired by the entry the same way.
+  compactedKeysForSession: (sessionKey: string) => Promise<Set<string>>
 }
 
 export const transformHookBody = async (messages: MessageBundle[], deps: TransformHookDeps): Promise<void> => {
@@ -125,6 +129,13 @@ export const transformHookBody = async (messages: MessageBundle[], deps: Transfo
   // a per-request projection over the persistent summary records, re-derived
   // on every transform.
   const tailSummaries = await applyTailSummaries(messages, sessionKey, sessionID, deps)
+  // The compact tool's per-request projection: the executor recorded the
+  // batch durably at accept time; every transform after it applies the
+  // seat mechanics to the transform-view parts whose keys the record
+  // holds, so the tombstones survive restarts and the host's dropped
+  // mutations by construction. Runs after the tail pass so both read the
+  // same post-hygiene list.
+  await applyCompactedSeats(messages, sessionKey, deps)
   // Composition reads the final post-transform list: every pass above has
   // applied its edits, so the sums are what this request carries.
   const composition = runCompositionOf(messages, options)
@@ -246,4 +257,47 @@ const existingTailTextsOf = (messages: MessageBundle[]): string[] => {
     }
   }
   return texts
+}
+
+// The compact tool's per-request projection: the accept path records the
+// batch's page keys durably (the page store's compaction lines plus the
+// per-process mirror); every transform after it re-derives the seat
+// replacements from that record. For each list seat whose pageKeyOf
+// matches a recorded key and whose output is not already an eviction
+// marker, the seat mechanics apply exactly as the evictor writes them:
+// tombstone with digest and reload pointer built from the seat's current
+// output bytes, the attachment trio (payloads into the seat's stored
+// page, the dropped flag in the tombstone, stripped from the live state),
+// attachments strip included. Deterministic per request: the same list
+// and the same record project the same edits, and a seat already carrying
+// its tombstone (the same-list re-transform, a host that did keep the
+// mutation) is skipped, never rewritten.
+const applyCompactedSeats = async (messages: MessageBundle[], sessionKey: string, deps: TransformHookDeps): Promise<void> => {
+  const { options, compactedKeysForSession } = deps
+  if (!options.compactTool) return
+  const compactedKeys = await compactedKeysForSession(sessionKey)
+  if (compactedKeys.size === 0) return
+  messages.forEach((message, msgIndex) => {
+    for (const [partIndex, part] of message.parts.entries()) {
+      if (part["type"] !== "tool") continue
+      const state = part["state"]
+      if (typeof state !== "object" || state === null) continue
+      const typedState = state as Record<string, unknown>
+      if (typedState["status"] !== "completed") continue
+      const tool = part["tool"]
+      if (typeof tool !== "string") continue
+      if (typeof typedState["output"] !== "string") continue
+      const output = typedState["output"]
+      if (startsWithEitherGeneration(output, EVICTION_MARKER, LEGACY_EVICTION_MARKER)) continue
+      const input = typeof typedState["input"] === "object" && typedState["input"] !== null ? (typedState["input"] as Record<string, unknown>) : {}
+      const primary = primarySubjectOf(subjectsOf(tool, input))
+      const seatKey = pageKeyOf(tool, primary, msgIndex, partIndex)
+      if (!compactedKeys.has(seatKey)) continue
+      const attachments = nonEmptyAttachmentsOf(typedState)
+      const digest = buildOutputDigest(tool, primary, output)
+      const tombstone = buildTombstone(tool, primary, output.length, messages.length - msgIndex, attachments !== undefined, digest)
+      stripStateAttachments(typedState)
+      typedState["output"] = `${tombstone}${buildReloadPointer(primary)}`
+    }
+  })
 }
