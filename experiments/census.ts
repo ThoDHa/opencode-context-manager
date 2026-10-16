@@ -534,7 +534,9 @@ export const uncorroboratedSummaryBlocks = (rows: readonly CensusRow[]): string[
  * an uneventful tail run (a pure re-projection writes no line), so absence
  * of lines is a quiet block, not disengagement (the S4 fold). An
  * empty-tail block corroborates: `liveEntries` zero with `dropped` zero
- * reads as rotation retirement, not disengagement (the DC2 rotation note).
+ * reads as rotation retirement, not disengagement (the DC2 rotation note);
+ * the series-level occupancy floor that separates retirement from
+ * stillbirth is `tailEngagementFailure`'s judgment, not this gate's.
  * ON-FULL blocks are never judged (the tail gate is off in that arm by the
  * profile's own seed) and an OFF block carrying any metrics line is already
  * the full-mode gate's leak. The calibration block is exempt (it prices the
@@ -555,6 +557,43 @@ export const uncorroboratedTailBlocks = (rows: readonly CensusRow[]): string[] =
     if (!row.metricsEvents.some((event) => event.tailSummaries !== null)) failures.push(row.blockLabel)
   }
   return failures
+}
+
+// The floor's failure text: a stillbirth must read as its own failure mode,
+// distinct from the per-block gate's disengagement naming.
+const TAIL_STILLBORN_SERIES_REASON =
+  "no tail occupancy was ever observed (liveEntries and projected stayed zero on every LEVER metrics event across the series): the arm is a stillbirth, not a rotation-retired series"
+
+/**
+ * The wave tail-arm's series-level engagement floor (the seam review's
+ * DC-2): across the whole series, at least one LEVER metrics event must
+ * carry observed tail occupancy (`liveEntries` above zero, or `projected`
+ * above zero when the cap dropped every record), so a silently-dead tail
+ * arm (an option-resolution failure, a seed the host dropped, a
+ * pageStore-off environment) fails loudly instead of passing vacuously
+ * through the per-block gate's quiet-block tolerance. Retirement is a
+ * trajectory that passed through occupancy, so ANY earlier-in-series
+ * occupancy satisfies the floor and a rotation-retired series passes; a
+ * series with occupancy at no point is not retirement but stillbirth and
+ * fails. Only LEVER-arm rows are evidence: occupancy on other arms does
+ * not corroborate the lever. The calibration block is exempt (it prices
+ * the series and never counts as data). Applied by the readout only under
+ * a profile whose `corroboratesTailBlocks` is true.
+ *
+ * @param rows the census rows of a tail-corroborated series
+ * @returns null when the series passed through occupancy; otherwise the
+ *   stillbirth failure naming the never-observed occupancy
+ */
+export const tailEngagementFailure = (rows: readonly CensusRow[]): string | null => {
+  for (const row of rows) {
+    if (row.exclusion === "calibration") continue
+    if (row.arm !== "LEVER") continue
+    for (const event of row.metricsEvents) {
+      const block = event.tailSummaries
+      if (block !== null && (block.liveEntries > 0 || block.projected > 0)) return null
+    }
+  }
+  return TAIL_STILLBORN_SERIES_REASON
 }
 
 /**

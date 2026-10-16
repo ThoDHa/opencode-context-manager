@@ -21,9 +21,9 @@ Run `make test`, then confirm the runner-reported `tests` total matches the expe
 - `tests/tui-registration.test.ts`: 13
 - `tests/tui-panel.test.ts`: 11
 - `tests/tui-sidebar.test.ts`: 11
-- `tests/integration/ab/ab-apparatus.test.ts`: 141
+- `tests/integration/ab/ab-apparatus.test.ts`: 142
 - `tests/summaries.test.ts`: 33
-- aggregate: 921
+- aggregate: 922
 
 These counts drift as tests are added; `make ci` recomputes and cross-checks them per run, so treat its numbers as current and this list as a sanity reference.
 

@@ -384,7 +384,10 @@ export const LEVER5_PROFILE: ExperimentProfile = {
 // rule holds everywhere: each LEVER seed differs from its ON-FULL baseline
 // by exactly its lever keys. Corroboration is per flavor: the tail profile
 // runs the tailSummaries presence gate (tolerant of quiet blocks and of the
-// empty-tail rotation-retirement shape, pinned in census.ts), the compact
+// empty-tail rotation-retirement shape, pinned in census.ts) plus the
+// series-level engagement floor (occupancy observed at least once across
+// the series; a never-occupied series fails as stillbirth, a
+// passed-through-occupancy series passes as retirement), the compact
 // profile runs the series-level engagement gate (compactionsRun above zero
 // at least once across the series plus refusals observed, per the F6/DC3
 // decision), and the bud profiles run the lever5 compression gate. The

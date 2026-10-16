@@ -76,6 +76,7 @@ import {
   openTurnDatabase,
   parseMetricsLog,
   parseWorkLog,
+  tailEngagementFailure,
   uncorroboratedFullModeBlocks,
   uncorroboratedSummaryBlocks,
   uncorroboratedTailBlocks,
@@ -2755,6 +2756,49 @@ test("the tailSummaries corroboration names metrics-bearing LEVER blocks without
   assert.deepEqual(uncorroboratedTailBlocks(calibrationWithTail), [], "the calibration block is exempt like the other gates' exemption")
 })
 
+test("the tail engagement floor fails a never-occupied series as stillbirth and passes a passed-through-occupancy series as retirement", () => {
+  // Stillbirth: every LEVER metrics line carries a zero-occupancy block (or
+  // none at all), the silent-dead arm's exact signature the per-block gate's
+  // quiet tolerance would wave through.
+  const stillborn = waveCensusWithLines(
+    [
+      summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, tailSummaries: { projected: 0, dropped: 0, liveEntries: 0, liveTokens: 0 } }),
+      summaryMetricsLine({ minute: 37, sessionId: "ses_lever", tailSummaries: { projected: 0, dropped: 0, liveEntries: 0, liveTokens: 0 } }),
+    ],
+    TAIL_PROFILE,
+  )
+  assert.match(tailEngagementFailure(stillborn) ?? "", /stillbirth/, "a series whose occupancy never rose fails the floor loudly")
+  const blockless = waveCensusWithLines([summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1 })], TAIL_PROFILE)
+  assert.match(tailEngagementFailure(blockless) ?? "", /stillbirth/, "a series whose only LEVER lines carry no tail block fails the floor")
+  // Retirement: occupancy early in the series, empty tails after; the floor
+  // passes on the trajectory (the DC2 carve-out: retirement is a trajectory
+  // that passed through occupancy).
+  const retired = waveCensusWithLines(
+    [
+      summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, tailSummaries: { projected: 2, dropped: 0, liveEntries: 2, liveTokens: 500 } }),
+      summaryMetricsLine({ minute: 37, sessionId: "ses_lever", tailSummaries: { projected: 0, dropped: 0, liveEntries: 0, liveTokens: 0 } }),
+    ],
+    TAIL_PROFILE,
+  )
+  assert.equal(tailEngagementFailure(retired), null, "a series that passed through occupancy passes the floor as retirement")
+  // Projected-above-zero counts as observed occupancy even when the cap
+  // dropped every record out of the live tail.
+  const cappedButEngaged = waveCensusWithLines(
+    [summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, tailSummaries: { projected: 3, dropped: 3, liveEntries: 0, liveTokens: 0 } })],
+    TAIL_PROFILE,
+  )
+  assert.equal(tailEngagementFailure(cappedButEngaged), null, "a series whose projected figure rose above zero passes the floor: the cap dropping records is occupancy observed")
+  // Only LEVER-arm occupancy corroborates: ON-FULL's block never counts.
+  const otherArmOccupancy = waveCensusWithLines(
+    [
+      summaryMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1, tailSummaries: { projected: 3, dropped: 0, liveEntries: 3, liveTokens: 700 } }),
+      summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1, tailSummaries: { projected: 0, dropped: 0, liveEntries: 0, liveTokens: 0 } }),
+    ],
+    TAIL_PROFILE,
+  )
+  assert.match(tailEngagementFailure(otherArmOccupancy) ?? "", /stillbirth/, "occupancy on the ON-FULL arm does not corroborate the LEVER lever")
+})
+
 test("the compact engagement gate demands a compaction and an observed refusal across the series", () => {
   const engaged = waveCensusWithLines(
     [
@@ -2826,6 +2870,7 @@ test("the wave readouts run their profile corroboration and carry the DC1, DC2, 
     assert.match(healthyTail, /caveat: placement rule \(DC1\)/, "the tail readout carries the standing DC1 placement-rule caveat")
     assert.match(healthyTail, /caveat: tail rotation note \(DC2\)/, "the tail readout carries the standing DC2 rotation-retirement caveat")
     assert.equal(healthyTail.includes("tailSummaries corroboration failed"), false, "a corroborating tail series carries no tail caveat")
+    assert.equal(healthyTail.includes("tail engagement gate failed"), false, "an occupied tail series carries no series-floor caveat")
     assert.equal(healthyTail.includes("full-mode metrics corroboration failed"), false)
     assert.equal(healthyTail.includes("summariesWritten corroboration failed"), false, "the tail profile runs no per-block summaries gate")
     assert.equal(healthyTail.includes("compact engagement gate failed"), false, "the tail profile runs no compact gate")
@@ -2834,6 +2879,10 @@ test("the wave readouts run their profile corroboration and carry the DC1, DC2, 
       summaryMetricsLine({ minute: 36, sessionId: "ses_lever", evictions: 1 }),
     ])
     assert.match(runAndRead(TAIL_PROFILE), /caveat: tailSummaries corroboration failed for blocks: 3/, "a metrics-bearing LEVER block without a tail block is named")
+    // The series floor rides the same readout: this metrics set's LEVER line
+    // carries no tail block, so occupancy was never observed and the floor
+    // fails alongside the per-block naming (the seam review's DC-2).
+    assert.match(runAndRead(TAIL_PROFILE), /caveat: tail engagement gate failed \(series level\): no tail occupancy was ever observed/, "a never-occupied tail series fails the series floor loudly")
 
     writeMetrics([
       summaryMetricsLine({ minute: 26, sessionId: "ses_full", evictions: 1 }),
