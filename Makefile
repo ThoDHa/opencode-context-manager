@@ -22,8 +22,8 @@ test:
 # the per-file totals to sum to the aggregate `make test` total. It also
 # cross-checks AGENTS.md's per-file and aggregate count rows against the
 # recomputed counts (failing on any mismatch and failing closed on a
-# missing or misformatted row) and refuses merge-conflict markers in any
-# tracked file. A suite
+# missing, duplicate, or misformatted row) and refuses merge-conflict
+# markers in any tracked file. A suite
 # file that fails to load (a syntax error, a duplicate import) makes its
 # node --test run exit non-zero and drops its tests from the aggregate
 # output while the rest still looks green; running files separately makes
@@ -81,11 +81,12 @@ ci:
 		echo "FAIL: AGENTS.md carries $$agents_row_total count rows, expected exactly $(words $(TEST_FILES)) (format drift)" >&2; \
 		exit 1; \
 	fi; \
-	agents_aggregate=$$(grep -E '^- aggregate: [0-9]+$$' AGENTS.md | sed -E 's/^- aggregate: ([0-9]+)$$/\1/'); \
-	if [ -z "$$agents_aggregate" ]; then \
-		echo "FAIL: AGENTS.md carries no parseable aggregate count row (format drift)" >&2; \
+	agents_aggregate_count=$$(grep -cE '^- aggregate: [0-9]+$$' AGENTS.md); \
+	if [ "$$agents_aggregate_count" -ne 1 ]; then \
+		echo "FAIL: AGENTS.md carries $$agents_aggregate_count aggregate count rows, expected exactly 1 (format drift)" >&2; \
 		exit 1; \
 	fi; \
+	agents_aggregate=$$(grep -E '^- aggregate: [0-9]+$$' AGENTS.md | sed -E 's/^- aggregate: ([0-9]+)$$/\1/'); \
 	if [ "$$agents_aggregate" -ne "$$total" ]; then \
 		echo "FAIL: AGENTS.md aggregate row $$agents_aggregate does not match the recomputed total $$total" >&2; \
 		exit 1; \
