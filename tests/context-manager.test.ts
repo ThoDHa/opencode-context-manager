@@ -13019,7 +13019,10 @@ test("the evictor re-evicts a recorded-but-unprojected seat: only the projection
     ]
     await setContextLimit(hooks, sessionID, contextForDeficit(COMPACT_PRESSURE_BUNDLE_CHARS, COMPACT_PRESSURE_DEFICIT_TOKENS))
     await runTransform(hooks, reshuffled)
-    await fake.settledAfter(4)
+    // The drain waits on delete counts that a regression may never reach
+    // (fewer enqueues than expected), so the wait is race-bounded: the
+    // pin fails on the counters below instead of hanging the suite.
+    await Promise.race([fake.settledAfter(4), new Promise<void>((resolve) => setTimeout(resolve, 2000))])
 
     assert.equal(fake.created.length, 4, "the walk re-enqueues both reshuffled seats (the accept's 2 plus the walk's 2): a recorded seat the record cannot find is unprotected")
     assert.equal(pageLinesIn(storePath).filter((line) => line.kind === undefined).length, 4, "the walk re-stores both reshuffled seats beside the accept's pages: the record alone shields nothing")
