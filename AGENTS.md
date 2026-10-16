@@ -4,7 +4,7 @@
 
 - `npm ci` is a prerequisite for every test target: it installs the dev-only test dependencies from the committed `package-lock.json` (test-time only; the plugin runtime stays dependency-free).
 - `make test` runs the whole suite with one `node --test` invocation over the eleven suite files. It loads the TUI compile hook into the runner through `NODE_OPTIONS`, so the plugin's `.tsx` imports under plain Node. Gate on the runner's own summary block (`tests`, `pass`, `fail`, `cancelled`, `skipped`, `todo`), not on the absence of red output.
-- `make ci` is the CI guard and what `.github/workflows/ci.yml` invokes. It runs each suite file in its own `node --test` invocation, requires every invocation to exit 0 and report at least one test, and requires the per-file counts to sum to the aggregate `make test` total.
+- `make ci` is the CI guard and what `.github/workflows/ci.yml` invokes. It runs each suite file in its own `node --test` invocation, requires every invocation to exit 0 and report at least one test, and requires the per-file counts to sum to the aggregate `make test` total. It also cross-checks the per-file rows and the aggregate row below against the recomputed counts (failing on any mismatch and failing closed on a missing or misformatted row) and refuses merge-conflict markers in tracked files.
 - `make install` symlinks every plugin file on the Makefile's `PLUGIN_FILES` list (the two entry files plus every module they load) into `~/.config/opencode/context-manager/`; `make uninstall` removes the symlinks only (a regular file at a target path is left alone).
 - `make ab-install` symlinks the A/B experiment framework's operational entry points into `~/.local/bin/` (`opencode-abx`, `opencode-abx-work`) and the fixture template/reference trees into `~/.local/share/opencode/` under `abx-` prefixed names; `make ab-uninstall` removes those symlinks only (a regular file or directory at a target path aborts the install).
 
@@ -12,11 +12,7 @@
 
 Run `make test`, then confirm the runner-reported `tests` total matches the expected count for your change. A suite file that fails to load (a syntax error, a duplicate import) drops its tests from the aggregate output while the remaining files still report pass, so a green-looking run can be silently short. Current totals per file:
 
-<<<<<<< HEAD
 - `tests/context-manager.test.ts`: 548
-=======
-- `tests/context-manager.test.ts`: 548
->>>>>>> task/lru89-3-profiles
 - `tests/panel-data.test.ts`: 81
 - `tests/panel-rows.test.ts`: 19
 - `tests/sidebar-rows.test.ts`: 21
@@ -27,11 +23,7 @@ Run `make test`, then confirm the runner-reported `tests` total matches the expe
 - `tests/tui-sidebar.test.ts`: 11
 - `tests/integration/ab/ab-apparatus.test.ts`: 141
 - `tests/summaries.test.ts`: 33
-<<<<<<< HEAD
 - aggregate: 918
-=======
-- aggregate: 918
->>>>>>> task/lru89-3-profiles
 
 These counts drift as tests are added; `make ci` recomputes and cross-checks them per run, so treat its numbers as current and this list as a sanity reference.
 
