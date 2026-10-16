@@ -31,7 +31,7 @@ import type {
   StoredPageMatch,
 } from "../plugin/page-store.ts"
 import { executeReadEvicted, RECALL_TOOL_ARGS, RECALL_VERBATIM_ARG_SCHEMA } from "../plugin/tools.ts"
-import { TAIL_SUMMARY_TEXT_PREFIX } from "../plugin/vocabulary.ts"
+import { TAIL_SUMMARY_TEXT_PREFIX, SUMMARY_MARKER } from "../plugin/vocabulary.ts"
 import { loadPanelData, PANEL_COMMAND_CATEGORY, PANEL_COMMAND_NAME, PANEL_COMMAND_NAMESPACE, PANEL_COMMAND_SLASH_NAME } from "../plugin/panel-data.ts"
 import {
   DEFAULT_SUMMARY_TOKEN_BUDGET as SCHEMA_DEFAULT_SUMMARY_TOKEN_BUDGET,
@@ -195,7 +195,6 @@ const RECALL_PROBE_OLDER_LABEL = "older matches"
 const RECALL_PROBE_ATTACHMENTS_LABEL = "attachments present"
 const RECALL_PROBE_SUMMARY_LABEL = "summary"
 const RECALL_VERBATIM_ARG_NAME = "verbatim"
-const SUMMARY_MARKER = "[ctx-summary]"
 const SUMMARY_SERVE_INSTRUCTION = "condensed summary of the evicted output; pass verbatim: true to reload the full original"
 const STASH_SUMMARY_SUBJECT = "/data/stash-summarized.txt"
 const PROBE_HIT_SUBJECT = "/data/probe-hit.txt"
