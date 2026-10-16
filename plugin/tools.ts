@@ -112,6 +112,8 @@ const COMPACT_ACCEPTED_TAIL =
 const COMPACT_BOUNDED_REASON_TAIL = "; nothing compacted."
 const COMPACT_INFLIGHT_REASON =
   "a compaction is still settling for this session; retry once its summaries finish"
+const COMPACT_NO_LIST_REASON =
+  "this session has not transformed yet, so no message list is recorded to compact from"
 const COMPACT_MIN_INTERVAL_MS = 30000
 const COMPACT_MIN_BATCH_ENTRIES = 2
 
@@ -379,7 +381,7 @@ export const executeCompact = async (source: CompactSource, toolContext: unknown
     return compactRefusalFor(detail)
   }
   const list = source.listsForSession(sessionKey)
-  if (list === undefined) return refuse(`accumulated tool outputs (0) sit below the minimum batch of ${COMPACT_MIN_BATCH_ENTRIES}`)
+  if (list === undefined) return refuse(COMPACT_NO_LIST_REASON)
   // Seats already recorded from a previous compaction are not candidates:
   // the projection owns their tombstones, and re-recording them would
   // queue duplicate summaries for the same page.
