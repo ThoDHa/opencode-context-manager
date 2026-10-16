@@ -19,7 +19,11 @@ test:
 
 # CI guard: run each suite file in its own node --test invocation, require
 # every invocation to exit 0 and to report at least one test, and require
-# the per-file totals to sum to the aggregate `make test` total. A suite
+# the per-file totals to sum to the aggregate `make test` total. It also
+# cross-checks AGENTS.md's per-file and aggregate count rows against the
+# recomputed counts (failing on any mismatch and failing closed on a
+# missing or misformatted row) and refuses merge-conflict markers in any
+# tracked file. A suite
 # file that fails to load (a syntax error, a duplicate import) makes its
 # node --test run exit non-zero and drops its tests from the aggregate
 # output while the rest still looks green; running files separately makes
@@ -27,6 +31,7 @@ test:
 ci:
 	@test_count() { grep -E '^[^0-9]*tests [0-9]+[[:space:]]*$$' | grep -o '[0-9]*' | tail -n 1; }; \
 	total=0; \
+	agents_expected=""; \
 	expected=$$(env $(NODE_TEST_ENV) node --test $(TEST_FILES) | test_count); \
 	if [ -z "$$expected" ]; then \
 		echo "FAIL: aggregate run produced no measurable test count" >&2; \
@@ -54,9 +59,43 @@ ci:
 		fi; \
 		echo "  ok $$file ($$count tests)"; \
 		total=$$((total + count)); \
+		agents_expected="$$agents_expected $$file:$$count"; \
 	done; \
 	if [ "$$expected" -ne "$$total" ]; then \
 		echo "FAIL: aggregate count $$expected does not match per-file sum $$total" >&2; \
+		exit 1; \
+	fi; \
+	marker_hits=$$(git grep -n -I -e '^<<<<<<<' -e '^=======$$' -e '^>>>>>>>' -- . || true); \
+	if [ -n "$$marker_hits" ]; then \
+		echo "FAIL: merge-conflict markers in tracked files:" >&2; \
+		printf '%s\n' "$$marker_hits" >&2; \
+		exit 1; \
+	fi; \
+	agents_rows=$$(grep -E '^- `[a-zA-Z0-9/.-]+`: [0-9]+$$' AGENTS.md | sed -E 's/^- `([^`]+)`: ([0-9]+)$$/\1:\2/'); \
+	if [ -z "$$agents_rows" ]; then \
+		echo "FAIL: AGENTS.md carries no parseable count rows (format drift)" >&2; \
+		exit 1; \
+	fi; \
+	agents_row_total=$$(printf '%s\n' "$$agents_rows" | wc -l); \
+	if [ "$$agents_row_total" -ne $(words $(TEST_FILES)) ]; then \
+		echo "FAIL: AGENTS.md carries $$agents_row_total count rows, expected exactly $(words $(TEST_FILES)) (format drift)" >&2; \
+		exit 1; \
+	fi; \
+	agents_aggregate=$$(grep -E '^- aggregate: [0-9]+$$' AGENTS.md | sed -E 's/^- aggregate: ([0-9]+)$$/\1/'); \
+	if [ -z "$$agents_aggregate" ]; then \
+		echo "FAIL: AGENTS.md carries no parseable aggregate count row (format drift)" >&2; \
+		exit 1; \
+	fi; \
+	if [ "$$agents_aggregate" -ne "$$total" ]; then \
+		echo "FAIL: AGENTS.md aggregate row $$agents_aggregate does not match the recomputed total $$total" >&2; \
+		exit 1; \
+	fi; \
+	if [ "$$(printf '%s\n' "$$agents_rows" | sort)" != "$$(printf '%s' "$$agents_expected" | tr ' ' '\n' | grep -v '^$$' | sort)" ]; then \
+		echo "FAIL: AGENTS.md count rows do not match the recomputed counts" >&2; \
+		echo "AGENTS.md rows:" >&2; \
+		printf '%s\n' "$$agents_rows" | sort >&2; \
+		echo "recomputed rows:" >&2; \
+		printf '%s\n' "$$agents_expected" | tr ' ' '\n' | grep -v '^$$' | sort >&2; \
 		exit 1; \
 	fi; \
 	echo "ci guard green: $$total tests across $(words $(TEST_FILES)) files"
