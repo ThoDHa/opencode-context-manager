@@ -12105,6 +12105,7 @@ const COMPACT_ACCEPTED_FOR = (count: number, bytes: number): string =>
 const COMPACT_BATCH_REFUSAL_FOR = (count: number): string =>
   `${COMPACT_MARKER} accumulated tool outputs (${count}) sit below the minimum batch of ${COMPACT_MIN_BATCH_ENTRIES}; nothing compacted.`
 const COMPACT_INFLIGHT_REFUSAL = `${COMPACT_MARKER} a compaction is still settling for this session; retry once its summaries finish; nothing compacted.`
+const COMPACT_NO_LIST_REFUSAL = `${COMPACT_MARKER} this session has not transformed yet, so no message list is recorded to compact from; nothing compacted.`
 const COMPACT_COOLDOWN_REFUSAL_FOR = (elapsedMs: number): string =>
   `${COMPACT_MARKER} the minimum interval of ${COMPACT_MIN_INTERVAL_MS}ms between compactions has not elapsed (last ran ${elapsedMs}ms ago); nothing compacted.`
 
@@ -12163,9 +12164,25 @@ test("a compact call below the minimum batch refuses with a bounded reason and c
   assert.equal(counters[COMPACT_COUNTER_BYTES], 0)
 })
 
-test("a compact call with no recorded transform list refuses below the minimum batch", async () => {
+test("a compact call with no recorded transform list refuses as never-transformed, not below-batch", async () => {
   const sessionID = compactSessionId("no-list")
   const hooks = await loadPluginHooksWith({ [COMPACT_OPTION_KEY]: true })
+
+  assert.equal(await compactToolCall(hooks, sessionID), COMPACT_NO_LIST_REFUSAL)
+  assert.equal(compactCountersOf(await readStats(hooks, sessionID))[COMPACT_COUNTER_REFUSALS], 1)
+})
+
+test("the no-list refusal is distinct from the below-batch refusal and both stay bounded", async () => {
+  assert.notEqual(COMPACT_NO_LIST_REFUSAL, COMPACT_BATCH_REFUSAL_FOR(0))
+  assert.ok(COMPACT_NO_LIST_REFUSAL.startsWith(COMPACT_MARKER))
+  assert.ok(COMPACT_NO_LIST_REFUSAL.endsWith("; nothing compacted."))
+
+  // The recorded-but-empty pool keeps the below-batch shape: a transform
+  // with no tool outputs at all captures a list whose candidate walk is
+  // empty, exactly the never-invoked-compact pre-state.
+  const sessionID = compactSessionId("empty-pool")
+  const hooks = await loadPluginHooksWith({ [COMPACT_OPTION_KEY]: true })
+  await runTransform(hooks, buildBundle([...fillerMessages(COMPACT_WINDOW_FILLERS)], sessionID))
 
   assert.equal(await compactToolCall(hooks, sessionID), COMPACT_BATCH_REFUSAL_FOR(0))
   assert.equal(compactCountersOf(await readStats(hooks, sessionID))[COMPACT_COUNTER_REFUSALS], 1)
