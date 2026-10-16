@@ -89,6 +89,16 @@ export const transformHookBody = async (messages: MessageBundle[], deps: Transfo
     reasoningExpiredThisRun = expireAgedReasoning(sessionMetrics, messages, options)
   }
   const fenceEvictedThisRun = evictLargeUserFences(messages, options, sessionPageStore, pageStoreEntries)
+  // The compact tool's per-request projection: the executor recorded the
+  // batch durably at accept time; every transform after it applies the
+  // seat mechanics to the transform-view parts whose keys the record
+  // holds, so the tombstones survive restarts and the host's dropped
+  // mutations by construction. It runs BEFORE the eviction walk: a
+  // recorded seat arrives at the walk already carrying its marker, so the
+  // walk's marker filter skips it and the batch is never re-evicted
+  // (no duplicate page write, no second summary enqueue; the seam
+  // review's F-3, sealed by the DC-1 alternative (a) disposition).
+  await applyCompactedSeats(messages, sessionKey, deps)
   // The compression sink closes over this run's session key so the
   // compressor stamps each summary line with the evicting session; the
   // enqueue is fire-and-forget, so handing the sink to the walk below
@@ -129,13 +139,6 @@ export const transformHookBody = async (messages: MessageBundle[], deps: Transfo
   // a per-request projection over the persistent summary records, re-derived
   // on every transform.
   const tailSummaries = await applyTailSummaries(messages, sessionKey, sessionID, deps)
-  // The compact tool's per-request projection: the executor recorded the
-  // batch durably at accept time; every transform after it applies the
-  // seat mechanics to the transform-view parts whose keys the record
-  // holds, so the tombstones survive restarts and the host's dropped
-  // mutations by construction. Runs after the tail pass so both read the
-  // same post-hygiene list.
-  await applyCompactedSeats(messages, sessionKey, deps)
   // Composition reads the final post-transform list: every pass above has
   // applied its edits, so the sums are what this request carries.
   const composition = runCompositionOf(messages, options)

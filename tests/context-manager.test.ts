@@ -12087,6 +12087,13 @@ const COMPACT_HOT_PATH = "/data/compact-hot.txt"
 const COMPACT_PROTECTED_TOOL = "task"
 const COMPACT_WINDOW_FILLERS = 4
 const COMPACT_OVERFLOW_STASH_LIMIT = 1
+// The accept-then-pressure geometry: the batch bundle's chars (3 outputs of
+// MIN_EVICTABLE_BYTES plus 5 fillers of FILLER_TEXT_CHARS) under a deficit
+// that reaches both recorded seats in sort order and stops before the
+// in-window sibling; post-projection the same list sits far below the
+// watermark, so the pin discriminates the projection shield from the walk.
+const COMPACT_PRESSURE_BUNDLE_CHARS = 3 * COMPACT_OLD_OUTPUT_BYTES + 5 * FILLER_TEXT_CHARS
+const COMPACT_PRESSURE_DEFICIT_TOKENS = 600
 // One fresh session id per compact test: the tool's per-session run-state
 // and metrics outlive one plugin instance in the module maps, so tests
 // must never share a session key with each other.
@@ -12926,6 +12933,82 @@ test("the settle re-arm accepts a second compaction after the first batch's summ
     await fake.whenPrompted(5)
     fake.releasePrompts()
     await fake.settledAfter(5)
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("an accept-then-pressure transform writes N summaries and one page line per seat, not twice each", async () => {
+  const sessionID = compactSessionId("accept-pressure")
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient()
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, { [COMPACT_OPTION_KEY]: true })
+    const bundle = buildCompactBatchBundle(sessionID)
+    await runTransform(hooks, bundle)
+    assert.equal(await compactToolCall(hooks, sessionID), COMPACT_ACCEPTED_FOR(2, COMPACT_OLD_OUTPUT_BYTES * 2))
+    await fake.settledAfter(2)
+
+    // Sustained pressure behind the accept: the transform the projection
+    // rides also runs under a 600-token deficit, the wave's own geometry.
+    // The recorded seats must arrive at the eviction walk already carrying
+    // their projection tombstones, so the walk's marker filter skips them:
+    // N summaries and one plain page line per seat, the batch never
+    // re-stored and never re-enqueued.
+    await setContextLimit(hooks, sessionID, contextForDeficit(COMPACT_PRESSURE_BUNDLE_CHARS, COMPACT_PRESSURE_DEFICIT_TOKENS))
+    await runTransform(hooks, bundle)
+    await fake.settledAfter(2)
+
+    assert.equal(fake.created.length, 2, "the batch's two seats each summarize once: the accept's enqueues plus none from the eviction walk")
+    const plainPageLines = pageLinesIn(storePath).filter((line) => line.kind === undefined)
+    assert.equal(plainPageLines.length, 2, "one persisted page line per seat: the accept's writes plus none from the eviction walk")
+    assert.ok(toolPartAt(bundle.messages[0], 0).state.output.startsWith(TOMBSTONE_MARKER))
+    assert.ok(toolPartAt(bundle.messages[1], 0).state.output.startsWith(TOMBSTONE_MARKER))
+    assert.equal(toolPartAt(bundle.messages[4], 0).state.output, outputOfBytes(COMPACT_OLD_OUTPUT_BYTES))
+  } finally {
+    cleanupMetricsDir(pagesDir)
+  }
+})
+
+test("the evictor re-evicts a recorded-but-unprojected seat: only the projection pass shields compacted seats", async () => {
+  const sessionID = compactSessionId("evictor-view")
+  const pagesDir = makeMetricsDir()
+  try {
+    const storePath = pageStorePathIn(pagesDir)
+    const fake = createWiringFakeClient()
+    const hooks = await loadPluginHooksWithClientAndStore(fake.client, storePath, { [COMPACT_OPTION_KEY]: true })
+    const bundle = buildCompactBatchBundle(sessionID)
+    await runTransform(hooks, bundle)
+    assert.equal(await compactToolCall(hooks, sessionID), COMPACT_ACCEPTED_FOR(2, COMPACT_OLD_OUTPUT_BYTES * 2))
+    await fake.settledAfter(2)
+
+    // The reshuffle: the batch's seats land at indexes 1 and 2, so their
+    // recorded (msgIndex, partIndex) pairs name filler messages. The
+    // durable record no longer matches any live seat and the projection
+    // shields nothing; the eviction walk sees the seats as ordinary live
+    // outputs and re-evicts them (evictor enqueues, evictor tombstones).
+    // Holds under either pass order: the decision pin for keeping the
+    // record an index-keyed projection source, not an eviction filter.
+    const reshuffled = buildCompactBatchBundle(sessionID)
+    reshuffled.messages = [
+      syntheticMessageFor(sessionID, fillerMessages(1)),
+      reshuffled.messages[0],
+      reshuffled.messages[1],
+      syntheticMessageFor(sessionID, fillerMessages(1)),
+      reshuffled.messages[4],
+      syntheticMessageFor(sessionID, fillerMessages(1)),
+      syntheticMessageFor(sessionID, fillerMessages(1)),
+    ]
+    await setContextLimit(hooks, sessionID, contextForDeficit(COMPACT_PRESSURE_BUNDLE_CHARS, COMPACT_PRESSURE_DEFICIT_TOKENS))
+    await runTransform(hooks, reshuffled)
+    await fake.settledAfter(4)
+
+    assert.equal(fake.created.length, 4, "the walk re-enqueues both reshuffled seats (the accept's 2 plus the walk's 2): a recorded seat the record cannot find is unprotected")
+    assert.equal(pageLinesIn(storePath).filter((line) => line.kind === undefined).length, 4, "the walk re-stores both reshuffled seats beside the accept's pages: the record alone shields nothing")
+    assert.ok(toolPartAt(reshuffled.messages[1], 0).state.output.startsWith(TOMBSTONE_MARKER))
+    assert.ok(toolPartAt(reshuffled.messages[2], 0).state.output.startsWith(TOMBSTONE_MARKER))
+    assert.equal(toolPartAt(reshuffled.messages[4], 0).state.output, outputOfBytes(COMPACT_OLD_OUTPUT_BYTES))
   } finally {
     cleanupMetricsDir(pagesDir)
   }
